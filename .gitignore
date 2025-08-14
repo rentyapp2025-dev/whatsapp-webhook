@@ -1,0 +1,15 @@
+# Entornos virtuales
+.venv/
+venv/
+
+# Archivos de entorno / credenciales
+.env
+.env.*
+
+# Archivos de sistema
+__pycache__/
+*.pyc
+.DS_Store
+
+# Archivos de VS Code
+.vscode/
