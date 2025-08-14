@@ -3,7 +3,7 @@ import hmac
 import hashlib
 from typing import Optional, Any, Dict
 
-from fastapi import FastAPI, Request, Response, HTTPException
+from fastapi import FastAPI, Request, Response, HTTPException, Query
 from fastapi.responses import PlainTextResponse
 import httpx
 
@@ -42,9 +42,11 @@ async def send_text(to_msisdn: str, text: str) -> Dict[str, Any]:
         return r.json()
 
 @app.get("/webhook")
-async def verify_webhook(hub_mode: Optional[str] = None,
-                         hub_challenge: Optional[str] = None,
-                         hub_verify_token: Optional[str] = None):
+async def verify_webhook(
+    hub_mode: str | None = Query(None, alias="hub.mode"),
+    hub_challenge: str | None = Query(None, alias="hub.challenge"),
+    hub_verify_token: str | None = Query(None, alias="hub.verify_token"),
+):
     if hub_mode == "subscribe" and hub_verify_token == VERIFY_TOKEN:
         return PlainTextResponse(content=hub_challenge or "", status_code=200)
     raise HTTPException(status_code=403, detail="Verification token mismatch")
