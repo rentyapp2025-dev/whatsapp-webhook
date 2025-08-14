@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: whatsapp-webhook
+    env: python
+    plan: free         # considera levantar a starter si necesitas siempre encendido
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "uvicorn main:app --host 0.0.0.0 --port $PORT"
+    autoDeploy: true
+    envVars:
+      - key: VERIFY_TOKEN
+        sync: false
+      - key: WHATSAPP_TOKEN
+        sync: false
+      - key: PHONE_NUMBER_ID
+        sync: false
+      - key: APP_SECRET
+        sync: false
+      - key: GRAPH_API_VERSION
+        value: v20.0
