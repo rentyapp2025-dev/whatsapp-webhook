@@ -246,7 +246,7 @@ async def receive_webhook(request: Request):
 
     data = await request.json()
     # debug opcional:
-    # print(json.dumps(data, indent=2, ensure_ascii=False))
+    #print(json.dumps(data, indent=2, ensure_ascii=False))
 
     if data.get("object") != "whatsapp_business_account":
         return Response(status_code=200)
@@ -327,15 +327,18 @@ async def receive_webhook(request: Request):
                         continue
 
                 # ========== mensajes de texto ==========
+                # Extrae texto robustamente: usa body si es text, o caption si vino con imagen/documento
                 text = ""
                 if msg_type == "text":
-                    text = (msg.get("text") or {}).get("body", "").strip()
+                    text = (msg.get("text") or {}).get("body", "") or ""
+                else:
+                    text = (msg.get("caption") or "")  # algunos tipos traen caption
+                text = text.strip()
+                upper = text.upper()
 
                 if text:
-                    upper = text.upper()
-
-                    # ---- flujo ALQUILAR #ID ----
-                    if upper.startswith("ALQUILAR"):
+                    # ---- flujo ALQUILAR #ID (acepta ALQUILAR en cualquier parte) ----
+                    if "ALQUILAR" in upper:
                         m = re.search(r"ALQUILAR\s*#?(\d+)", upper)
                         item_id = (m.group(1) if m else "").strip()
                         if not item_id or item_id not in LISTINGS:
@@ -353,11 +356,9 @@ async def receive_webhook(request: Request):
                         await send_text(seller, f"Tienes una solicitud de alquiler para #{item_id}. ¿Autorizas compartir tu contacto?")
                         continue
 
-                    # ---- flujo PUBLICAR (iniciar) ----
-                    if upper.startswith("PUBLICAR"):
+                    # ---- flujo PUBLICAR (acepta PUBLICAR en cualquier parte) ----
+                    if "PUBLICAR" in upper:
                         set_state(from_msisdn, Step.PUBLISH_TITLE, {"title": "", "price": "", "location": ""})
-                        # alternativa con lista:
-                        # await send_list(...); return
                         await send_text(from_msisdn, "¡Genial! Dime el *título* del artículo.")
                         continue
 
