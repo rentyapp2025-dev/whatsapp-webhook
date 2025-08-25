@@ -31,39 +31,68 @@ app = FastAPI(title="WhatsApp Cloud API Webhook (Render/FastAPI)")
 # ==================== Documento de Preguntas y Respuestas (base de conocimiento) ====================
 # Estructura categorizada de preguntas y respuestas
 QA_CATEGORIZED = {
-    "1. Inversiones": {
-        "1. ¿Como puedo invertir?": "Primero debe estar registrado y aprobado en la aplicación, luego Ingresa en la opción de negociación >Selecciona suscripción > ingresa el monto que desea invertir > hacer click en suscribir > ingresa método de pago. Una vez pagado se sube el comprobante y en el transcurso del día de hace efectivo al cierre del.dia o al día siguiente hábil.",
-        "2. ¿Que es el Fondo Mutual Abierto?": "El Fondo Mutual Abierto es una cesta llena de diferentes inversiones (acciones, bonos, etc.). Al suscribir estaría comprando acciones y renta fija indirectamente. Puedes ver en que esta diversificado el portafolio dentro de la aplicación.",
-        "3. ¿En que puedo invertir?": "Por ahora puede invertir en el fondo mutual abierto que posee un portafolio diversificado en bolívares en acciones que cotizan en la bolsa de valores y en dólares en papeles comerciales o renta fija.",
-        "4. ¿Que son las Unidades de Inversion (UI)?": "Las Unidades de Inversión (UI) de un fondo mutual abierto son instrumentos que representan una participación proporcional en el patrimonio de dicho fondo. Cada Ul representa una porción del total del fondo, y su valor fluctúa según el rendimiento de los activos que componen el fondo.",
-        "5. ¿Que es el valor de la unidad de inversión (VUI)?": "El Valor de la Unidad de Inversión (VUI) es el precio por unidad que se utiliza para calcular el valor de una inversión. Es el valor de mercado de cada una de las acciones o unidades de inversión que representan una participación en el patrimonio del fondo, y que cambian a diario.",
-        "6. ¿Por que baja el rendimiento?": "El valor de tu inversión está directamente ligado al valor total de los activos del fondo. Si el valor de las inversiones dentro del fondo disminuye, el valor de tu participación también disminuirá. Recuerda que el horizonte de inversión de los Fondos Mutuales es a largo plazo.",
-        "7. ¿QUE HAGO AHORA?": "Una vez suscrito no debe hacer más nada, solo monitorear su inversión, ya que nosotros gestionamos activamente las inversiones. Puede observar en que esta invertido su dinero dentro de la aplicación en la opción de portafolio.",
-        "8. ¿Comisiones?": "Las comisiones son de 3% por suscripción y 5% de administración anualizado.",
-        "9. ¿Desde cuanto puedo invertir?": "Desde un Bolivar.",
-        "10. ¿En cuanto tiempo veo ganancias?": "Si su horizonte de inversión es a corto plazo no le aconsejamos participar en el Fondo Mutual Abierto. Le sugerimos tenga paciencia ya que los rendimientos esperados en los Fondos Mutuales se esperan a largo plazo.",
-        "11. ¿Como compro acciones?": "Próximamente podrá comprar y vender acciones por la aplicación, mientras tanto puede invertir en unidades de inversión en el Fondo Mutual Abierto, cuyo portafolio está compuesto por algunas acciones que están en la bolsa de valores.",
+    "1. PER CAPITAL": {
+        "1. ¿Qué es Per Capital?": "Es un grupo de empresas del Mercado de Valores Venezolano reguladas por la SUNAVAL, compuesta por Casa de Bolsa, Sociedad Administradora de EIC, Asesores de Inversion y Titularizadora.",
+        "2. ¿Qué es la SUNAVAL?": "Es el ente que regula el Mercado de Valores en Venezuela y protege a los inversionistas www.sunaval.gob.ve.",
+        "3. ¿Qué es la Bolsa de Valores de Caracas?": "Es el lugar donde se compran y venden bonos, acciones y otros instrumentos de manera ordenada a traves de las Casas de Bolsa y esta regulada por la SUNAVAL.",
+        "4. ¿Cómo invierto?": "Para invertir en el Fondo Mutual Abierto de PER CAPITAL debes descargar el app y registrate. Para invertir directamente en acciones o bonos debes acudir a una Casa de Bolsa autorizada."
     },
-    "2. Retiros y Transacciones": {
-        "1. ¿Como hago un retiro?": "Selecciona rescate > ingresa las unidades de inversión a rescatar > luego calcula selección > selecciona rescatar > siga los pasos que indique la app.",
-        "2. ¿Nunca he rescatado?": "Si usted no ha realizado algún rescate, haga caso omiso al correo enviado. Le sugerimos que ingrese en la aplicación y valide sus fondos.",
-        "3. ¿Cuanto puedo retirar?": "Desde una Unidad de Inversion.",
-        "4. ¿Como rescato?": "Selecciona rescate > ingresa las unidades de inversión a rescatar > luego calcula selección > selecciona rescatar > siga los pasos.",
+    "2. FONDO MUTUAL ABIERTO": {
+        "1. ¿Qué es un Fondo Mutual?": "Es un instrumento de inversion en grupo donde varias personas ponen dinero en un fondo que es gestionado por expertos y esta disenado para ser de bajo riesgo, dirigido a pequenos inversionistas con poca experiencia.",
+        "2. ¿Qué es una Unidad de Inversion?": "Es una “porcion” del fondo. Cuando inviertes adquieres unidades que representan tu parte del fondo.",
+        "3. ¿Qué es el VUI?": "El Valor de la Unidad de Inversion (VUI) es el precio de una Unidad de Inversion. Si el VUI sube tu inversion gana valor. Se calcula diariamente al cierre del dia y depende del comportamiento de las inversiones del fondo.",
+        "4. ¿Cómo invierto?": "Descarga el app para Android y IOS, registrate al 100%, espera tu aprobacion y suscribe Unidades de Inversion cuando quieras y cuantas veces desees.",
+        "5. ¿Cuál es el monto mínimo de inversion?": "1 Unidad de Inversion.",
+        "6. ¿Cómo gano?": "Ganas por apreciacion (subida del VUI) o por dividendo (en caso de que sea decretado).",
+        "7. ¿En cuánto tiempo gano?": "Por ser un instrumento de renta variable a largo plazo, se recomienda medir resultados trimestrales.",
+        "8. ¿Dónde consigo más información?": "En los prospectos y hojas de terminos en www.per-capital.com."
     },
-    "3. Problemas con la Cuenta": {
-        "1. ¿Mi usuario esta en revision que debo hacer?": "Estimado inversionista por favor enviar numero de cedula para apoyarle. (Se verifica que tenga documentación e información completa y se activa).",
-        "2. ¿Como recupero la clave?": "Una vez seleccione la opción de 'Recuperar' y le llegara una clave temporal. Deberá ingresarla como nueva clave de su usuario y luego la aplicación le solicitará una nueva clave que deberá confirmar.",
-        "3. ¿Por que tardan tanto en responder o en aprobar?": "Debido al alto tráfico estamos presentando retrasos en la aprobación de registros, estamos trabajando arduamente para aprobarte y que empieces a invertir. Por favor envianos tu cedula escaneada a este correo.",
-        "4. ¿Aprobado?": "Su usuario ya se encuentra APROBADO. Recuerde que, si realiza alguna modificación de su información, entra en revisión, por ende, debe notificarnos para apoyarle. Si realiza una suscripción antes de las 12 del mediodía la vera reflejada al cierre del día aproximadamente 5-6 de la tarde.",
-        "5. ¿No me llega el mensaje de texto?": "Por favor intente en otra locación, si persiste el error intente en unas horas o el dia de mañana. En caso de no persistir el error, por favor, intente con otro numero de teléfono y luego lo actualizamos en sistema.",
+    "3. REGISTRO": {
+        "1. ¿Cómo me registro?": "Descarga el app, completa 100% de los datos, acepta los contratos, sube tus recaudos como Cedula de Identidad y Selfie y espera tu aprobacion.",
+        "2. ¿Cuánto tarda mi aprobación?": "De 2 a 5 dias habiles siempre que hayas completado 100% de registro y recaudos.",
+        "3. ¿Qué hago si no me aprueban?": "Revisa que hayas completado 100% del registro o contactanos.",
+        "4. ¿Puedo invertir si soy menor de edad?": "Debes dirigirte a nuestras oficinas y registrarte con tu representante legal.",
+        "5. ¿Puedo modificar alguno de mis datos?": "Si, pero por exigencia de ley entras nuevamente en revision.",
+        "6. ¿Debo tener cuenta en la Caja Venezolana?": "No, para invertir en nuestro Fondo Mutual Abierto no es necesaria la cuenta en la CVV."
     },
-    "4. Otros Tipos de Inversión": {
-        "1. ¿Como invierto en dolares?": "Puede invertir en un Papel Comercial, que son instrumentos de deuda a corto plazo (menos de un año) emitidos por las empresas en el mercado de valores.",
-        "2. ¿Como invierto en un papel comercial?": "Debe estar registrado con Per Capital y en la Caja Venezolana con cedula, RIF y constancia de trabajo. Adjunto encontrara el link de la Caja Venezolana, una vez termine el registro nos avisa para apoyarle, el depositante deber ser Per Capital.",
-        "3. ¿Ya me registre en la Caja Venezolana?": "Por ahora no hace falta estar registrado en la caja venezolana para invertir en el fondo mutual abierto. Próximamente podrá comprar y vender acciones por la aplicación, mientras tanto puede invertir en unidades de inversión en el Fondo Mutual Abierto.",
-        "4. ¿Informacion del fondo mutual abierto y acciones?": "Por ahora puede invertir en el fondo mutual abierto, en el cual posee un portafolio diversificado en acciones que cotizan en la bolsa de valores de caracas y en papeles comerciales. El portafolio podrá verlo dentro de la aplicación en detalle.",
+    "4. SUSCRIPCIÓN": {
+        "1. ¿Cómo suscribo (compro)?": "Haz click en Negociacion > Suscripcion > Monto a invertir > Suscribir > Metodo de Pago. Recuerda pagar de TU cuenta bancaria y subir comprobante.",
+        "2. ¿Cómo pago mi suscripción?": "Debes pagar desde TU cuenta bancaria via Pago Movil. Y recuerda subir comprobante y que no se aceptan pagos de terceros.",
+        "3. ¿Puede pagar alguien por mí?": "No, la ley prohibe los pagos de terceros. Siempre debes pagar desde tu cuenta bancaria.",
+        "4. ¿Cómo veo mi inversión?": "En el Home en la seccion Mi Cuenta.",
+        "5. ¿Cuándo veo mi inversión?": "Al cierre del sistema entre las 5 pm y 7 pm despues del cierre de la publicacion de tasas del Banco Central de Venezuela.En dias habiles de Mercado.",
+        "6. ¿Cuáles son las comisiones?": "3% flat Suscripcion, 3% flat Rescate y 5% anual Administracion.",
+        "7. ¿Qué hago después de suscribir?": "Monitorea tu inversion desde el app.",
+        "8. ¿Puedo invertir el monto que quiera?": "Si, puedes invertir el monto que desees.",
+        "9. ¿Puedo invertir cuando quiera?": "Si, puedes invertir cuando quieras, las veces que quieras."
+    },
+    "5. RESCATE": {
+        "1. ¿Cómo rescato (vendo)?": "Haz click en Negociacion > Rescate > Unidades a Rescatar > Rescatar. Recuerda se enviaran fondos a TU cuenta bancaria.",
+        "2. ¿Cuándo me pagan mis rescates (ventas)?": "Al proximo dia habil bancario en horario de mercado.",
+        "3. ¿Cómo veo el saldo de mi inversión?": "En el Home en la seccion Mi Cuenta.",
+        "4. ¿Cuándo veo el saldo de mi inversión?": "Al cierre del sistema entre las 5 pm y 7 pm despues del cierre de la publicacion de tasas del Banco Central de Venezuela.En dias habiles de mercado.",
+        "5. ¿Cuándo puedo Rescatar?": "Cuando tu quieras, puedes rescatar y retirarte del fondo.",
+        "6. ¿Cuáles son las comisiones?": "3% flat Suscripcion, 3% flat Rescate y 5% anual Administracion."
+    },
+    "6. POSICIÓN (SALDO)": {
+        "1. ¿Cuándo se actualiza mi posición (saldo)?": "Al cierre del sistema entre las 5 pm y 7 pm despues del cierre de la publicacion de tasas del Banco Central de Venezuela en dias habiles de mercado.",
+        "2. ¿Por qué varía mi posición (saldo)?": "Tu saldo y rendimiento sube si suben los precios de las inversiones del fondo, se reciben dividendos o cupones y bajan si estos precios caen.",
+        "3. ¿Dónde veo mi histórico?": "En la seccion Historial.",
+        "4. ¿Dónde veo reportes?": "En la seccion Documentos > Reportes > Año > Trimestre."
+    },
+    "7. RIESGOS": {
+        "1. ¿Cuáles son los riesgos al invertir?": "Todas las inversionbes estan sujetas a riesgos y la perdida de capital es posible. Agunos riesgos son: riesgo de mercado, riesgo pais, riesgo cambiario, riesgo sector, entre otros."
+    },
+    "8. SOPORTE": {
+        "1. Estoy en revisión, ¿qué hago?": "Asegurate de haber completado 100% datos y recaudos y espera tu aprobacion. Si tarda mas de lo habitual contactanos.",
+        "2. No me llega el SMS": "Asegurate de tener buena senal y de que hayas colocado correctamente un numero telefonico venezolano.",
+        "3. No me llega el Correo": "Asegurate de no dejar espacios al final cuando escribiste tu correo electronico.",
+        "4. No logro descargar el App": "Asegurate de que tu app store este configurada en la region de Venezuela.",
+        "5. No me abre el App": "Asegurate de tener la version actualizada y que tu tienda de apps este configurada en la region de Venezuela.",
+        "6. ¿Cómo recupero mi clave?": "Seleccione Recuperar, te legara una clave temporal para ingresar y luego actualiza tu nueva clave."
     }
 }
+
 
 # Variable global para almacenar el estado de la conversación (categoría actual)
 # En producción, considera usar Redis o una base de datos para persistencia
