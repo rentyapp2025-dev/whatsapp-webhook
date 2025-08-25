@@ -5,18 +5,29 @@ import json
 import re
 from enum import Enum
 from typing import Optional, Any, Dict, List
+import logging
 
 from fastapi import FastAPI, Request, Response, HTTPException, Query
 from fastapi.responses import PlainTextResponse
 import httpx
 from fuzzywuzzy import fuzz
 
+# Configurar el logging para ver mensajes detallados
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+# Obtener variables de entorno. Es crucial que estas estén configuradas correctamente.
+# Si alguna falta, el programa no podrá funcionar.
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "")
 WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN", "")
 PHONE_NUMBER_ID = os.getenv("PHONE_NUMBER_ID", "")
 APP_SECRET = os.getenv("APP_SECRET", "").encode("utf-8")
 GRAPH_API_VERSION = os.getenv("GRAPH_API_VERSION", "v20.0")
 GRAPH_BASE = f"https://graph.facebook.com/{GRAPH_API_VERSION}"
+
+# Verificar que las variables de entorno cruciales estén presentes
+if not all([VERIFY_TOKEN, WHATSAPP_TOKEN, PHONE_NUMBER_ID]):
+    logging.error("Faltan variables de entorno cruciales: VERIFY_TOKEN, WHATSAPP_TOKEN, o PHONE_NUMBER_ID no están configuradas.")
+    logging.info("Asegúrate de configurar estas variables en tu entorno de despliegue (por ejemplo, en Render.com).")
 
 app = FastAPI(title="WhatsApp Cloud API Webhook (Render/FastAPI)")
 
@@ -139,8 +150,6 @@ def get_response_by_id(button_id: str) -> str:
 
 # ==================== Almacenamiento efímero (demo) ====================
 USERS: Dict[str, Dict[str, str]] = {}
-LISTINGS: Dict[str, Dict[str, str]] = {}
-CONSENTS: Dict[str, Dict[str, Any]] = {}
 STATE: Dict[str, Dict[str, Any]] = {}
 
 class Step(str, Enum):
@@ -149,22 +158,21 @@ class Step(str, Enum):
 def get_user(msisdn: str) -> dict:
     return USERS.setdefault(msisdn, {"name": msisdn})
 
-def set_state(msisdn: str, step: Step, draft: dict | None = None):
-    STATE[msisdn] = {"step": step, "draft": draft or {}}
-
-def get_state(msisdn: str) -> dict:
-    return STATE.get(msisdn, {"step": Step.IDLE, "draft": {}})
-
 # ==================== utilidades WhatsApp ====================
 def verify_signature(signature: Optional[str], body: bytes) -> bool:
     if not APP_SECRET:
+        logging.warning("APP_SECRET no está configurada. La verificación de firma está deshabilitada.")
         return True
     if not signature or not signature.startswith("sha256="):
+        logging.error("Firma de la solicitud no válida o ausente.")
         return False
     their = signature.split("sha256=")[-1].strip()
     mac = hmac.new(APP_SECRET, msg=body, digestmod=hashlib.sha256)
     mine = mac.hexdigest()
-    return hmac.compare_digest(mine, their)
+    is_valid = hmac.compare_digest(mine, their)
+    if not is_valid:
+        logging.error("La firma de la solicitud no coincide con la firma generada. Verifica tu APP_SECRET.")
+    return is_valid
 
 async def _post_messages(payload: Dict[str, Any]) -> Dict[str, Any]:
     url = f"{GRAPH_BASE}/{PHONE_NUMBER_ID}/messages"
@@ -172,14 +180,19 @@ async def _post_messages(payload: Dict[str, Any]) -> Dict[str, Any]:
         "Authorization": f"Bearer {WHATSAPP_TOKEN}",
         "Content-Type": "application/json"
     }
-    async with httpx.AsyncClient(timeout=20) as client:
-        r = await client.post(url, headers=headers, json=payload)
-        try:
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            r = await client.post(url, headers=headers, json=payload)
             r.raise_for_status()
-        except httpx.HTTPStatusError:
-            print("Graph error:", r.status_code, r.text)
-            raise
-        return r.json()
+            logging.info(f"Mensaje enviado con éxito a {payload.get('to')}")
+            return r.json()
+    except httpx.HTTPStatusError as e:
+        logging.error(f"Error al enviar el mensaje. Código de estado: {e.response.status_code}")
+        logging.error(f"Cuerpo del error: {e.response.text}")
+        raise
+    except Exception as e:
+        logging.error(f"Ocurrió un error inesperado al enviar el mensaje: {e}")
+        raise
 
 async def send_text(to_msisdn: str, text: str) -> Dict[str, Any]:
     payload = {
@@ -197,53 +210,67 @@ async def verify_webhook(
     hub_challenge: str | None = Query(None, alias="hub.challenge"),
     hub_verify_token: str | None = Query(None, alias="hub.verify_token"),
 ):
+    logging.info("Verificando el webhook...")
     if hub_mode == "subscribe" and hub_verify_token == VERIFY_TOKEN:
+        logging.info("Verificación exitosa.")
         return PlainTextResponse(content=hub_challenge or "", status_code=200)
+    logging.error("Fallo en la verificación. Token o modo incorrectos.")
     raise HTTPException(status_code=403, detail="Verification token mismatch")
 
 @app.post("/webhook")
 async def receive_webhook(request: Request):
-    body_bytes = await request.body()
-    signature = request.headers.get("X-Hub-Signature-256")
+    try:
+        body_bytes = await request.body()
+        signature = request.headers.get("X-Hub-Signature-256")
 
-    if not verify_signature(signature, body_bytes):
-        raise HTTPException(status_code=403, detail="Invalid signature")
+        if not verify_signature(signature, body_bytes):
+            raise HTTPException(status_code=403, detail="Invalid signature")
 
-    data = await request.json()
+        data = await request.json()
+        logging.info(f"Datos recibidos del webhook: {json.dumps(data, indent=2)}")
 
-    if data.get("object") != "whatsapp_business_account":
+        if data.get("object") != "whatsapp_business_account":
+            return Response(status_code=200)
+
+        for entry in data.get("entry", []):
+            for change in entry.get("changes", []):
+                value = change.get("value", {})
+                messages = value.get("messages")
+                if not messages:
+                    continue
+
+                for msg in messages:
+                    from_msisdn = msg.get("from")
+                    msg_type = msg.get("type")
+                    
+                    # 1. Manejar respuestas de botón (la prioridad más alta)
+                    if msg_type == "interactive":
+                        interactive_data = msg.get("interactive", {})
+                        if interactive_data.get("type") == "button_reply":
+                            button_id = interactive_data.get("button_reply", {}).get("id")
+                            logging.info(f"Respuesta de botón recibida de {from_msisdn}: '{button_id}'")
+                            response_text = get_response_by_id(button_id)
+                            await send_text(from_msisdn, response_text)
+                        else:
+                            # Tipo de respuesta interactiva no soportada (ej. lista)
+                            logging.info(f"Tipo de mensaje interactivo no soportado: {interactive_data.get('type')}")
+                            await send_text(from_msisdn, "Lo siento, solo puedo responder a selecciones del menú. Por favor, utiliza los botones para interactuar.")
+                    
+                    # 2. Para cualquier otro tipo de mensaje (texto, audio, imagen, etc.),
+                    # enviar el menú. Esto satisface la solicitud de enviar el menú
+                    # "apenas reciba cualquier mensaje".
+                    else:
+                        logging.info(f"Mensaje recibido de tipo '{msg_type}'. Enviando menú interactivo.")
+                        await send_interactive_menu(from_msisdn)
+
         return Response(status_code=200)
 
-    for entry in data.get("entry", []):
-        for change in entry.get("changes", []):
-            value = change.get("value", {})
-            messages = value.get("messages")
-            if not messages:
-                continue
-
-            for msg in messages:
-                from_msisdn = msg.get("from")
-                get_user(from_msisdn)
-                msg_type = msg.get("type")
-                
-                if msg_type == "text":
-                    text = (msg.get("text") or {}).get("body", "") or ""
-                    text = text.strip().lower()
-
-                    if re.match(r"^(hola|buenas|menu|start|ayuda|help)$", text):
-                        await send_interactive_menu(from_msisdn)
-                    else:
-                        response_text = find_best_match(text)
-                        await send_text(from_msisdn, response_text)
-
-                elif msg_type == "interactive":
-                    interactive_data = msg.get("interactive", {})
-                    if interactive_data.get("type") == "button_reply":
-                        button_id = interactive_data.get("button_reply", {}).get("id")
-                        response_text = get_response_by_id(button_id)
-                        await send_text(from_msisdn, response_text)
-
-    return Response(status_code=200)
+    except json.JSONDecodeError:
+        logging.error("Error al decodificar JSON en la solicitud.")
+        raise HTTPException(status_code=400, detail="Invalid JSON")
+    except Exception as e:
+        logging.error(f"Ocurrió un error inesperado al procesar el webhook: {e}", exc_info=True)
+        return Response(status_code=500, content="Internal Server Error")
 
 @app.get("/")
 async def health():
