@@ -4,7 +4,7 @@ import hashlib
 import json
 import re
 from enum import Enum
-from typing import Optional, Any, Dict
+from typing import Optional, Any, Dict, List
 
 from fastapi import FastAPI, Request, Response, HTTPException, Query
 from fastapi.responses import PlainTextResponse
@@ -81,7 +81,63 @@ def find_best_match(user_question: str) -> str:
     return "No estoy seguro de cómo responder a esa pregunta. Por favor, intente reformularla."
 
 
-# ==================== almacenamiento efímero (demo) ====================
+# ==================== Funciones para enviar mensajes interactivos ====================
+async def send_interactive_menu(to_msisdn: str) -> Dict[str, Any]:
+    """
+    Envía un menú interactivo con botones de las preguntas más comunes.
+    """
+    payload = {
+        "messaging_product": "whatsapp",
+        "to": to_msisdn,
+        "type": "interactive",
+        "interactive": {
+            "type": "button",
+            "body": {
+                "text": "¡Hola! Soy tu asistente de Per Capital. ¿En qué puedo ayudarte hoy? Selecciona una opción del menú:"
+            },
+            "action": {
+                "buttons": [
+                    {
+                        "type": "reply",
+                        "reply": {
+                            "id": "faq_invertir",
+                            "title": "Cómo invertir"
+                        }
+                    },
+                    {
+                        "type": "reply",
+                        "reply": {
+                            "id": "faq_retirar",
+                            "title": "Cómo retirar"
+                        }
+                    },
+                    {
+                        "type": "reply",
+                        "reply": {
+                            "id": "faq_fondo_mutual",
+                            "title": "Qué es el Fondo Mutual"
+                        }
+                    }
+                ]
+            }
+        }
+    }
+    return await _post_messages(payload)
+
+def get_response_by_id(button_id: str) -> str:
+    """
+    Obtiene la respuesta de la base de conocimiento según el ID del botón.
+    """
+    if button_id == "faq_invertir":
+        return QA_DATA.get("¿Como puedo invertir?", "Información no encontrada.")
+    elif button_id == "faq_retirar":
+        return QA_DATA.get("¿Como hago un retiro?", "Información no encontrada.")
+    elif button_id == "faq_fondo_mutual":
+        return QA_DATA.get("¿Que es el Fondo Mutual Abierto?", "Información no encontrada.")
+    else:
+        return "Lo siento, no pude encontrar la respuesta a esa pregunta. Por favor, intenta de nuevo o reformula tu pregunta."
+
+# ==================== Almacenamiento efímero (demo) ====================
 USERS: Dict[str, Dict[str, str]] = {}
 LISTINGS: Dict[str, Dict[str, str]] = {}
 CONSENTS: Dict[str, Dict[str, Any]] = {}
@@ -170,16 +226,23 @@ async def receive_webhook(request: Request):
                 get_user(from_msisdn)
                 msg_type = msg.get("type")
                 
-                text = ""
                 if msg_type == "text":
                     text = (msg.get("text") or {}).get("body", "") or ""
-                
-                text = text.strip()
+                    text = text.strip().lower()
 
-                if text:
-                    response_text = find_best_match(text)
-                    await send_text(from_msisdn, response_text)
-                
+                    if re.match(r"^(hola|buenas|menu|start|ayuda|help)$", text):
+                        await send_interactive_menu(from_msisdn)
+                    else:
+                        response_text = find_best_match(text)
+                        await send_text(from_msisdn, response_text)
+
+                elif msg_type == "interactive":
+                    interactive_data = msg.get("interactive", {})
+                    if interactive_data.get("type") == "button_reply":
+                        button_id = interactive_data.get("button_reply", {}).get("id")
+                        response_text = get_response_by_id(button_id)
+                        await send_text(from_msisdn, response_text)
+
     return Response(status_code=200)
 
 @app.get("/")
