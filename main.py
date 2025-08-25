@@ -60,103 +60,37 @@ QA_DATA = {
     "¿Nunca he rescatado?": "Si usted no ha realizado algún rescate, haga caso omiso al correo enviado. Le sugerimos que ingrese en la aplicación y valide sus fondos."
 }
 
-def find_best_match(user_question: str) -> str:
+# Convertir el diccionario de preguntas y respuestas en una lista de tuplas para un fácil acceso por índice.
+QA_LIST = list(QA_DATA.items())
+
+def get_answer_by_index(index: int) -> str:
     """
-    Encuentra la pregunta más similar en la base de conocimiento usando fuzzy string matching.
+    Obtiene la respuesta de la base de conocimiento según el índice proporcionado.
     """
-    best_match = None
-    best_score = 0
+    try:
+        # El índice se basa en 1, así que restamos 1 para el acceso a la lista.
+        question, answer = QA_LIST[index - 1]
+        return answer
+    except IndexError:
+        return "Lo siento, ese número no corresponde a ninguna pregunta. Por favor, elige un número de la lista."
+    except Exception as e:
+        logging.error(f"Error al obtener la respuesta por índice: {e}")
+        return "Ocurrió un error. Por favor, intenta de nuevo más tarde."
+
+
+# ==================== Funciones para enviar mensajes ====================
+async def send_numbered_menu(to_msisdn: str) -> Dict[str, Any]:
+    """
+    Envía un menú de texto con preguntas numeradas.
+    """
+    menu_text = "¡Hola! Soy tu asistente de Per Capital. Puedes encontrar la respuesta a tu pregunta eligiendo el número correspondiente de la siguiente lista:\n\n"
+    for i, (question, _) in enumerate(QA_LIST, 1):
+        menu_text += f"{i}. {question}\n"
     
-    # Limpiar y estandarizar la pregunta del usuario
-    cleaned_user_q = re.sub(r'[¿?]', '', user_question).strip().lower()
+    menu_text += "\nEnvía el número de la pregunta que te interese."
 
-    for q in QA_DATA.keys():
-        cleaned_qa_q = re.sub(r'[¿?]', '', q).strip().lower()
-        score = fuzz.ratio(cleaned_user_q, cleaned_qa_q)
-        if score > best_score:
-            best_score = score
-            best_match = q
-            
-    # Devuelve la respuesta si la similitud es alta (por ejemplo, > 70)
-    if best_score > 70:
-        return QA_DATA.get(best_match, "No estoy seguro de cómo responder a esa pregunta. Por favor, intente reformularla.")
-    else:
-        # Verifica si hay palabras clave para respuestas específicas, si no se encuentra un buen match
-        if re.search(r"revision|cedula|documentacion|aprobad", cleaned_user_q):
-            return QA_DATA.get("¿Mi usuario esta en revision que debo hacer?", "No estoy seguro de cómo responder a esa pregunta. Por favor, intente reformularla.")
-        if re.search(r"invertir|inversion", cleaned_user_q):
-            return QA_DATA.get("¿Como puedo invertir?", "No estoy seguro de cómo responder a esa pregunta. Por favor, intente reformularla.")
-        if re.search(r"retiro|retirar|rescate|rescatar", cleaned_user_q):
-            return QA_DATA.get("¿Como hago un retiro?", "No estoy seguro de cómo responder a esa pregunta. Por favor, intente reformularla.")
-        
-    return "No estoy seguro de cómo responder a esa pregunta. Por favor, intente reformularla."
+    return await send_text(to_msisdn, menu_text)
 
-
-# ==================== Funciones para enviar mensajes interactivos ====================
-async def send_interactive_menu(to_msisdn: str) -> Dict[str, Any]:
-    """
-    Envía un menú interactivo con botones de las preguntas más comunes.
-    """
-    payload = {
-        "messaging_product": "whatsapp",
-        "to": to_msisdn,
-        "type": "interactive",
-        "interactive": {
-            "type": "button",
-            "body": {
-                "text": "¡Hola! Soy tu asistente de Per Capital. ¿En qué puedo ayudarte hoy? Selecciona una opción del menú:"
-            },
-            "action": {
-                "buttons": [
-                    {
-                        "type": "reply",
-                        "reply": {
-                            "id": "faq_invertir",
-                            "title": "Cómo invertir"
-                        }
-                    },
-                    {
-                        "type": "reply",
-                        "reply": {
-                            "id": "faq_retirar",
-                            "title": "Cómo retirar"
-                        }
-                    },
-                    {
-                        "type": "reply",
-                        "reply": {
-                            "id": "faq_fondo_mutual",
-                            "title": "Qué es el Fondo Mutual"
-                        }
-                    }
-                ]
-            }
-        }
-    }
-    return await _post_messages(payload)
-
-def get_response_by_id(button_id: str) -> str:
-    """
-    Obtiene la respuesta de la base de conocimiento según el ID del botón.
-    """
-    if button_id == "faq_invertir":
-        return QA_DATA.get("¿Como puedo invertir?", "Información no encontrada.")
-    elif button_id == "faq_retirar":
-        return QA_DATA.get("¿Como hago un retiro?", "Información no encontrada.")
-    elif button_id == "faq_fondo_mutual":
-        return QA_DATA.get("¿Que es el Fondo Mutual Abierto?", "Información no encontrada.")
-    else:
-        return "Lo siento, no pude encontrar la respuesta a esa pregunta. Por favor, intenta de nuevo o reformula tu pregunta."
-
-# ==================== Almacenamiento efímero (demo) ====================
-USERS: Dict[str, Dict[str, str]] = {}
-STATE: Dict[str, Dict[str, Any]] = {}
-
-class Step(str, Enum):
-    IDLE = "idle"
-
-def get_user(msisdn: str) -> dict:
-    return USERS.setdefault(msisdn, {"name": msisdn})
 
 # ==================== utilidades WhatsApp ====================
 def verify_signature(signature: Optional[str], body: bytes) -> bool:
@@ -243,25 +177,22 @@ async def receive_webhook(request: Request):
                     from_msisdn = msg.get("from")
                     msg_type = msg.get("type")
                     
-                    # 1. Manejar respuestas de botón (la prioridad más alta)
-                    if msg_type == "interactive":
-                        interactive_data = msg.get("interactive", {})
-                        if interactive_data.get("type") == "button_reply":
-                            button_id = interactive_data.get("button_reply", {}).get("id")
-                            logging.info(f"Respuesta de botón recibida de {from_msisdn}: '{button_id}'")
-                            response_text = get_response_by_id(button_id)
+                    if msg_type == "text":
+                        text = (msg.get("text") or {}).get("body", "") or ""
+                        # Intentar convertir el mensaje a un número.
+                        try:
+                            index = int(text.strip())
+                            response_text = get_answer_by_index(index)
                             await send_text(from_msisdn, response_text)
-                        else:
-                            # Tipo de respuesta interactiva no soportada (ej. lista)
-                            logging.info(f"Tipo de mensaje interactivo no soportado: {interactive_data.get('type')}")
-                            await send_text(from_msisdn, "Lo siento, solo puedo responder a selecciones del menú. Por favor, utiliza los botones para interactuar.")
+                        except ValueError:
+                            # Si no es un número, mostrar el menú nuevamente.
+                            logging.info("Mensaje de texto recibido no es un número. Enviando menú numerado.")
+                            await send_numbered_menu(from_msisdn)
                     
-                    # 2. Para cualquier otro tipo de mensaje (texto, audio, imagen, etc.),
-                    # enviar el menú. Esto satisface la solicitud de enviar el menú
-                    # "apenas reciba cualquier mensaje".
+                    # Para cualquier otro tipo de mensaje, mostrar el menú numerado.
                     else:
-                        logging.info(f"Mensaje recibido de tipo '{msg_type}'. Enviando menú interactivo.")
-                        await send_interactive_menu(from_msisdn)
+                        logging.info(f"Mensaje recibido de tipo '{msg_type}'. Enviando menú numerado.")
+                        await send_numbered_menu(from_msisdn)
 
         return Response(status_code=200)
 
