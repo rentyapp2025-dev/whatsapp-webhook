@@ -68,6 +68,8 @@ QA_CATEGORIZED = {
 
 # Variable global para almacenar el estado de la conversación (categoría actual)
 conversation_state: Dict[str, str] = {}
+# Nuevo diccionario para rastrear si el usuario ha completado la selección inicial
+user_flow_state: Dict[str, str] = {}
 
 
 def get_menu_by_category_index(index: int) -> Optional[Dict[str, str]]:
@@ -100,6 +102,46 @@ def get_answer_by_full_index(category_index: int, question_index: int) -> str:
 
 
 # ==================== Funciones para enviar mensajes ====================
+
+async def send_initial_menu_with_buttons(to_msisdn: str) -> Dict[str, Any]:
+    """
+    Envía un menú interactivo con dos botones para la selección inicial.
+    """
+    payload = {
+        "messaging_product": "whatsapp",
+        "to": to_msisdn,
+        "type": "interactive",
+        "interactive": {
+            "type": "button",
+            "header": {
+                "type": "text",
+                "text": "Bienvenido a Per Capital"
+            },
+            "body": {
+                "text": "¿Cómo te gustaría continuar? Puedes hablar con nuestro asistente virtual o contactar a un agente."
+            },
+            "action": {
+                "buttons": [
+                    {
+                        "type": "reply",
+                        "reply": {
+                            "id": "bot_qa",
+                            "title": "Hablar con el bot"
+                        }
+                    },
+                    {
+                        "type": "reply",
+                        "reply": {
+                            "id": "human_support",
+                            "title": "Contactar a soporte humano"
+                        }
+                    }
+                ]
+            }
+        }
+    }
+    return await _post_messages(payload)
+
 async def send_main_menu(to_msisdn: str) -> Dict[str, Any]:
     """
     Envía el menú principal de categorías.
@@ -220,10 +262,33 @@ async def receive_webhook(request: Request):
                     from_msisdn = msg.get("from")
                     msg_type = msg.get("type")
                     
-                    if msg_type == "text":
+                    if from_msisdn in user_flow_state and user_flow_state[from_msisdn] == "human_support":
+                        # Si el usuario ya seleccionó 'soporte humano', no se hace nada más.
+                        continue
+
+                    if msg_type == "interactive":
+                        interactive_data = msg.get("interactive", {})
+                        if interactive_data.get("type") == "button_reply":
+                            button_id = interactive_data.get("button_reply", {}).get("id")
+                            if button_id == "bot_qa":
+                                user_flow_state[from_msisdn] = "qa"
+                                await send_main_menu(from_msisdn)
+                            elif button_id == "human_support":
+                                user_flow_state[from_msisdn] = "human_support"
+                                await send_text(from_msisdn, "Gracias por contactarnos. Un miembro de nuestro equipo se pondrá en contacto contigo pronto. Esta conversación ha finalizado.")
+                        continue
+                    
+                    if from_msisdn not in user_flow_state:
+                        # Si el usuario es nuevo, envía el menú de selección inicial
+                        logging.info("Usuario nuevo. Enviando menú de selección inicial.")
+                        await send_initial_menu_with_buttons(from_msisdn)
+                        continue
+
+                    # Si el usuario ya está en el flujo de QA, procesa el mensaje de texto
+                    if user_flow_state.get(from_msisdn) == "qa" and msg_type == "text":
                         text = (msg.get("text") or {}).get("body", "") or ""
                         text_lower = text.strip().lower()
-
+                        
                         # Si el usuario quiere volver al menú principal
                         if text_lower == "volver" or text_lower == "menu" or text_lower == "menú":
                             await send_main_menu(from_msisdn)
@@ -252,10 +317,11 @@ async def receive_webhook(request: Request):
                             else:
                                 await send_main_menu(from_msisdn)
                     
-                    # Para cualquier otro tipo de mensaje o el inicio de la conversación, muestra el menú principal
+                    # Para cualquier otro caso (como un mensaje que no sea de texto o fuera de un flujo válido)
+                    # se vuelve a mostrar el menú de selección inicial.
                     else:
-                        logging.info(f"Mensaje recibido de tipo '{msg_type}'. Enviando menú principal.")
-                        await send_main_menu(from_msisdn)
+                        logging.info("Mensaje fuera de flujo esperado. Enviando menú inicial.")
+                        await send_initial_menu_with_buttons(from_msisdn)
 
         return Response(status_code=200)
 
