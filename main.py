@@ -10,13 +10,11 @@ import logging
 from fastapi import FastAPI, Request, Response, HTTPException, Query
 from fastapi.responses import PlainTextResponse
 import httpx
-from fuzzywuzzy import fuzz
 
 # Configurar el logging para ver mensajes detallados
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # Obtener variables de entorno. Es crucial que estas estén configuradas correctamente.
-# Si alguna falta, el programa no podrá funcionar.
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "")
 WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN", "")
 PHONE_NUMBER_ID = os.getenv("PHONE_NUMBER_ID", "")
@@ -32,63 +30,108 @@ if not all([VERIFY_TOKEN, WHATSAPP_TOKEN, PHONE_NUMBER_ID]):
 app = FastAPI(title="WhatsApp Cloud API Webhook (Render/FastAPI)")
 
 # ==================== Documento de Preguntas y Respuestas (base de conocimiento) ====================
-# Extraído de "Preguntas y respuesta Per Capital.docx.pdf"
-QA_DATA = {
-    "¿Mi usuario esta en revision que debo hacer?": "Estimado inversionista por favor enviar numero de cedula para apoyarle. (Se verifica que tenga documentación e información completa y se activa).",
-    "¿Como puedo invertir?": "Primero debe estar registrado y aprobado en la aplicación, luego Ingresa en la opción de negociación >Selecciona suscripción > ingresa el monto que desea invertir > hacer click en suscribir > ingresa método de pago. Una vez pagado se sube el comprobante y en el transcurso del día de hace efectivo al cierre del.dia o al día siguiente hábil.",
-    "¿Que es el Fondo Mutual Abierto?": "El Fondo Mutual Abierto es una cesta llena de diferentes inversiones (acciones, bonos, etc.). Al suscribir estaría comprando acciones y renta fija indirectamente. Puedes ver en que esta diversificado el portafolio dentro de la aplicación.",
-    "¿En que puedo invertir?": "Por ahora puede invertir en el fondo mutual abierto que posee un portafolio diversificado en bolívares en acciones que cotizan en la bolsa de valores y en dólares en papeles comerciales o renta fija.",
-    "¿Que son las Unidades de Inversion (UI)?": "Las Unidades de Inversión (UI) de un fondo mutual abierto son instrumentos que representan una participación proporcional en el patrimonio de dicho fondo. Cada Ul representa una porción del total del fondo, y su valor fluctúa según el rendimiento de los activos que componen el fondo.",
-    "¿Que es el valor de la unidad de inversión (VUI)?": "El Valor de la Unidad de Inversión (VUI) es el precio por unidad que se utiliza para calcular el valor de una inversión. Es el valor de mercado de cada una de las acciones o unidades de inversión que representan una participación en el patrimonio del fondo, y que cambian a diario.",
-    "¿Por que baja el rendimiento?": "El valor de tu inversión está directamente ligado al valor total de los activos del fondo. Si el valor de las inversiones dentro del fondo disminuye, el valor de tu participación también disminuirá. Recuerda que el horizonte de inversión de los Fondos Mutuales es a largo plazo.",
-    "¿QUE HAGO AHORA?": "Una vez suscrito no debe hacer más nada, solo monitorear su inversión, ya que nosotros gestionamos activamente las inversiones. Puede observar en que esta invertido su dinero dentro de la aplicación en la opción de portafolio.",
-    "¿Como recupero la clave?": "Una vez seleccione la opción de 'Recuperar' y le llegara una clave temporal. Deberá ingresarla como nueva clave de su usuario y luego la aplicación le solicitará una nueva clave que deberá confirmar.",
-    "¿Por que tardan tanto en responder o en aprobar?": "Debido al alto tráfico estamos presentando retrasos en la aprobación de registros, estamos trabajando arduamente para aprobarte y que empieces a invertir. Por favor envianos tu cedula escaneada a este correo.",
-    "¿Como compro acciones?": "Próximamente podrá comprar y vender acciones por la aplicación, mientras tanto puede invertir en unidades de inversión en el Fondo Mutual Abierto, cuyo portafolio está compuesto por algunas acciones que están en la bolsa de valores.",
-    "¿En cuanto tiempo veo ganancias?": "Si su horizonte de inversión es a corto plazo no le aconsejamos participar en el Fondo Mutual Abierto. Le sugerimos tenga paciencia ya que los rendimientos esperados en los Fondos Mutuales se esperan a largo plazo.",
-    "¿Comisiones?": "Las comisiones son de 3% por suscripción y 5% de administración anualizado.",
-    "¿Desde cuanto puedo invertir?": "Desde un Bolivar.",
-    "¿Cuanto puedo retirar?": "Desde una Unidad de Inversion.",
-    "¿Como rescato?": "Selecciona rescate > ingresa las unidades de inversión a rescatar > luego calcula selección > selecciona rescatar > siga los pasos.",
-    "¿Como invierto en dolares?": "Puede invertir en un Papel Comercial, que son instrumentos de deuda a corto plazo (menos de un año) emitidos por las empresas en el mercado de valores.",
-    "¿Como invierto en un papel comercial?": "Debe estar registrado con Per Capital y en la Caja Venezolana con cedula, RIF y constancia de trabajo. Adjunto encontrara el link de la Caja Venezolana, una vez termine el registro nos avisa para apoyarle, el depositante deber ser Per Capital.",
-    "¿No me llega el mensaje de texto?": "Por favor intente en otra locación, si persiste el error intente en unas horas o el dia de mañana. En caso de no persistir el error, por favor, intente con otro numero de teléfono y luego lo actualizamos en sistema.",
-    "¿Ya me registre en la Caja Venezolana?": "Por ahora no hace falta estar registrado en la caja venezolana para invertir en el fondo mutual abierto. Próximamente podrá comprar y vender acciones por la aplicación, mientras tanto puede invertir en unidades de inversión en el Fondo Mutual Abierto.",
-    "¿Informacion del fondo mutual abierto y acciones?": "Por ahora puede invertir en el fondo mutual abierto, en el cual posee un portafolio diversificado en acciones que cotizan en la bolsa de valores de caracas y en papeles comerciales. El portafolio podrá verlo dentro de la aplicación en detalle.",
-    "¿Aprobado?": "Su usuario ya se encuentra APROBADO. Recuerde que, si realiza alguna modificación de su información, entra en revisión, por ende, debe notificarnos para apoyarle. Si realiza una suscripción antes de las 12 del mediodía la vera reflejada al cierre del día aproximadamente 5-6 de la tarde.",
-    "¿Como hago un retiro?": "Selecciona rescate > ingresa las unidades de inversión a rescatar > luego calcula selección > selecciona rescatar > siga los pasos que indique la app.",
-    "¿Nunca he rescatado?": "Si usted no ha realizado algún rescate, haga caso omiso al correo enviado. Le sugerimos que ingrese en la aplicación y valide sus fondos."
+# Estructura categorizada de preguntas y respuestas
+QA_CATEGORIZED = {
+    "1. Inversiones": {
+        "1. ¿Como puedo invertir?": "Primero debe estar registrado y aprobado en la aplicación, luego Ingresa en la opción de negociación >Selecciona suscripción > ingresa el monto que desea invertir > hacer click en suscribir > ingresa método de pago. Una vez pagado se sube el comprobante y en el transcurso del día de hace efectivo al cierre del.dia o al día siguiente hábil.",
+        "2. ¿Que es el Fondo Mutual Abierto?": "El Fondo Mutual Abierto es una cesta llena de diferentes inversiones (acciones, bonos, etc.). Al suscribir estaría comprando acciones y renta fija indirectamente. Puedes ver en que esta diversificado el portafolio dentro de la aplicación.",
+        "3. ¿En que puedo invertir?": "Por ahora puede invertir en el fondo mutual abierto que posee un portafolio diversificado en bolívares en acciones que cotizan en la bolsa de valores y en dólares en papeles comerciales o renta fija.",
+        "4. ¿Que son las Unidades de Inversion (UI)?": "Las Unidades de Inversión (UI) de un fondo mutual abierto son instrumentos que representan una participación proporcional en el patrimonio de dicho fondo. Cada Ul representa una porción del total del fondo, y su valor fluctúa según el rendimiento de los activos que componen el fondo.",
+        "5. ¿Que es el valor de la unidad de inversión (VUI)?": "El Valor de la Unidad de Inversión (VUI) es el precio por unidad que se utiliza para calcular el valor de una inversión. Es el valor de mercado de cada una de las acciones o unidades de inversión que representan una participación en el patrimonio del fondo, y que cambian a diario.",
+        "6. ¿Por que baja el rendimiento?": "El valor de tu inversión está directamente ligado al valor total de los activos del fondo. Si el valor de las inversiones dentro del fondo disminuye, el valor de tu participación también disminuirá. Recuerda que el horizonte de inversión de los Fondos Mutuales es a largo plazo.",
+        "7. ¿QUE HAGO AHORA?": "Una vez suscrito no debe hacer más nada, solo monitorear su inversión, ya que nosotros gestionamos activamente las inversiones. Puede observar en que esta invertido su dinero dentro de la aplicación en la opción de portafolio.",
+        "8. ¿Comisiones?": "Las comisiones son de 3% por suscripción y 5% de administración anualizado.",
+        "9. ¿Desde cuanto puedo invertir?": "Desde un Bolivar.",
+        "10. ¿En cuanto tiempo veo ganancias?": "Si su horizonte de inversión es a corto plazo no le aconsejamos participar en el Fondo Mutual Abierto. Le sugerimos tenga paciencia ya que los rendimientos esperados en los Fondos Mutuales se esperan a largo plazo.",
+        "11. ¿Como compro acciones?": "Próximamente podrá comprar y vender acciones por la aplicación, mientras tanto puede invertir en unidades de inversión en el Fondo Mutual Abierto, cuyo portafolio está compuesto por algunas acciones que están en la bolsa de valores.",
+    },
+    "2. Retiros y Transacciones": {
+        "1. ¿Como hago un retiro?": "Selecciona rescate > ingresa las unidades de inversión a rescatar > luego calcula selección > selecciona rescatar > siga los pasos que indique la app.",
+        "2. ¿Nunca he rescatado?": "Si usted no ha realizado algún rescate, haga caso omiso al correo enviado. Le sugerimos que ingrese en la aplicación y valide sus fondos.",
+        "3. ¿Cuanto puedo retirar?": "Desde una Unidad de Inversion.",
+        "4. ¿Como rescato?": "Selecciona rescate > ingresa las unidades de inversión a rescatar > luego calcula selección > selecciona rescatar > siga los pasos.",
+    },
+    "3. Problemas con la Cuenta": {
+        "1. ¿Mi usuario esta en revision que debo hacer?": "Estimado inversionista por favor enviar numero de cedula para apoyarle. (Se verifica que tenga documentación e información completa y se activa).",
+        "2. ¿Como recupero la clave?": "Una vez seleccione la opción de 'Recuperar' y le llegara una clave temporal. Deberá ingresarla como nueva clave de su usuario y luego la aplicación le solicitará una nueva clave que deberá confirmar.",
+        "3. ¿Por que tardan tanto en responder o en aprobar?": "Debido al alto tráfico estamos presentando retrasos en la aprobación de registros, estamos trabajando arduamente para aprobarte y que empieces a invertir. Por favor envianos tu cedula escaneada a este correo.",
+        "4. ¿Aprobado?": "Su usuario ya se encuentra APROBADO. Recuerde que, si realiza alguna modificación de su información, entra en revisión, por ende, debe notificarnos para apoyarle. Si realiza una suscripción antes de las 12 del mediodía la vera reflejada al cierre del día aproximadamente 5-6 de la tarde.",
+        "5. ¿No me llega el mensaje de texto?": "Por favor intente en otra locación, si persiste el error intente en unas horas o el dia de mañana. En caso de no persistir el error, por favor, intente con otro numero de teléfono y luego lo actualizamos en sistema.",
+    },
+    "4. Otros Tipos de Inversión": {
+        "1. ¿Como invierto en dolares?": "Puede invertir en un Papel Comercial, que son instrumentos de deuda a corto plazo (menos de un año) emitidos por las empresas en el mercado de valores.",
+        "2. ¿Como invierto en un papel comercial?": "Debe estar registrado con Per Capital y en la Caja Venezolana con cedula, RIF y constancia de trabajo. Adjunto encontrara el link de la Caja Venezolana, una vez termine el registro nos avisa para apoyarle, el depositante deber ser Per Capital.",
+        "3. ¿Ya me registre en la Caja Venezolana?": "Por ahora no hace falta estar registrado en la caja venezolana para invertir en el fondo mutual abierto. Próximamente podrá comprar y vender acciones por la aplicación, mientras tanto puede invertir en unidades de inversión en el Fondo Mutual Abierto.",
+        "4. ¿Informacion del fondo mutual abierto y acciones?": "Por ahora puede invertir en el fondo mutual abierto, en el cual posee un portafolio diversificado en acciones que cotizan en la bolsa de valores de caracas y en papeles comerciales. El portafolio podrá verlo dentro de la aplicación en detalle.",
+    }
 }
 
-# Convertir el diccionario de preguntas y respuestas en una lista de tuplas para un fácil acceso por índice.
-QA_LIST = list(QA_DATA.items())
+# Variable global para almacenar el estado de la conversación (categoría actual)
+conversation_state: Dict[str, str] = {}
 
-def get_answer_by_index(index: int) -> str:
+
+def get_menu_by_category_index(index: int) -> Optional[Dict[str, str]]:
     """
-    Obtiene la respuesta de la base de conocimiento según el índice proporcionado.
+    Obtiene un submenú de preguntas por el índice de la categoría.
     """
-    try:
-        # El índice se basa en 1, así que restamos 1 para el acceso a la lista.
-        question, answer = QA_LIST[index - 1]
-        return answer
-    except IndexError:
-        return "Lo siento, ese número no corresponde a ninguna pregunta. Por favor, elige un número de la lista."
-    except Exception as e:
-        logging.error(f"Error al obtener la respuesta por índice: {e}")
-        return "Ocurrió un error. Por favor, intenta de nuevo más tarde."
+    categories = list(QA_CATEGORIZED.keys())
+    if 1 <= index <= len(categories):
+        category_name = categories[index - 1]
+        return {
+            "title": category_name,
+            "questions": QA_CATEGORIZED[category_name]
+        }
+    return None
+
+def get_answer_by_full_index(category_index: int, question_index: int) -> str:
+    """
+    Obtiene la respuesta de la base de conocimiento usando el índice de la categoría y la pregunta.
+    """
+    category_menu = get_menu_by_category_index(category_index)
+    if not category_menu:
+        return "Lo siento, la categoría seleccionada no es válida. Por favor, elige una categoría del menú principal."
+    
+    questions = list(category_menu["questions"].keys())
+    if 1 <= question_index <= len(questions):
+        question = questions[question_index - 1]
+        return category_menu["questions"][question]
+    
+    return "Lo siento, el número de pregunta no es válido. Por favor, elige un número del submenú."
 
 
 # ==================== Funciones para enviar mensajes ====================
-async def send_numbered_menu(to_msisdn: str) -> Dict[str, Any]:
+async def send_main_menu(to_msisdn: str) -> Dict[str, Any]:
     """
-    Envía un menú de texto con preguntas numeradas.
+    Envía el menú principal de categorías.
     """
-    menu_text = "¡Hola! Soy tu asistente de Per Capital. Puedes encontrar la respuesta a tu pregunta eligiendo el número correspondiente de la siguiente lista:\n\n"
-    for i, (question, _) in enumerate(QA_LIST, 1):
-        menu_text += f"{i}. {question}\n"
+    menu_text = "¡Hola! Soy tu asistente de Per Capital. Por favor, elige una categoría de la siguiente lista:\n\n"
+    for category in QA_CATEGORIZED.keys():
+        menu_text += f"{category}\n"
     
-    menu_text += "\nEnvía el número de la pregunta que te interese."
+    menu_text += "\nEnvía solo el número de la categoría (ej. '1')."
+    await send_text(to_msisdn, menu_text)
+    # Limpiar el estado de la conversación cuando se envía el menú principal
+    if to_msisdn in conversation_state:
+        del conversation_state[to_msisdn]
+    return {}
 
+async def send_subcategory_menu(to_msisdn: str, category_index: int) -> Dict[str, Any]:
+    """
+    Envía el submenú de preguntas para una categoría.
+    """
+    category_menu = get_menu_by_category_index(category_index)
+    if not category_menu:
+        await send_text(to_msisdn, "Categoría no válida. Por favor, envía un número de categoría válido para ver las preguntas.")
+        return {}
+
+    menu_text = f"Has seleccionado **{category_menu['title']}**\n\nPor favor, elige una pregunta de la siguiente lista:\n\n"
+    for question in category_menu["questions"].keys():
+        menu_text += f"{question}\n"
+    
+    menu_text += "\nEnvía solo el número de la pregunta (ej. '1') o envía 'volver' para regresar al menú principal."
+    
+    # Guardar el estado de la categoría actual para el usuario
+    conversation_state[to_msisdn] = str(category_index)
     return await send_text(to_msisdn, menu_text)
 
 
@@ -179,20 +222,40 @@ async def receive_webhook(request: Request):
                     
                     if msg_type == "text":
                         text = (msg.get("text") or {}).get("body", "") or ""
-                        # Intentar convertir el mensaje a un número.
+                        text_lower = text.strip().lower()
+
+                        # Si el usuario quiere volver al menú principal
+                        if text_lower == "volver" or text_lower == "menu" or text_lower == "menú":
+                            await send_main_menu(from_msisdn)
+                            continue
+
+                        # Manejar la lógica de la conversación basada en el estado
                         try:
-                            index = int(text.strip())
-                            response_text = get_answer_by_index(index)
-                            await send_text(from_msisdn, response_text)
-                        except ValueError:
-                            # Si no es un número, mostrar el menú nuevamente.
-                            logging.info("Mensaje de texto recibido no es un número. Enviando menú numerado.")
-                            await send_numbered_menu(from_msisdn)
+                            choice = int(text_lower)
+                            current_category = conversation_state.get(from_msisdn)
+                            
+                            if current_category is None:
+                                # El usuario está en el menú principal
+                                await send_subcategory_menu(from_msisdn, choice)
+                            else:
+                                # El usuario está en un submenú, busca la respuesta
+                                category_index = int(current_category)
+                                response_text = get_answer_by_full_index(category_index, choice)
+                                await send_text(from_msisdn, response_text)
+                                # Volver al menú principal después de dar la respuesta
+                                await send_main_menu(from_msisdn)
+
+                        except (ValueError, IndexError):
+                            # Si el input no es un número o es inválido, muestra el menú apropiado
+                            if from_msisdn in conversation_state:
+                                await send_subcategory_menu(from_msisdn, int(conversation_state[from_msisdn]))
+                            else:
+                                await send_main_menu(from_msisdn)
                     
-                    # Para cualquier otro tipo de mensaje, mostrar el menú numerado.
+                    # Para cualquier otro tipo de mensaje o el inicio de la conversación, muestra el menú principal
                     else:
-                        logging.info(f"Mensaje recibido de tipo '{msg_type}'. Enviando menú numerado.")
-                        await send_numbered_menu(from_msisdn)
+                        logging.info(f"Mensaje recibido de tipo '{msg_type}'. Enviando menú principal.")
+                        await send_main_menu(from_msisdn)
 
         return Response(status_code=200)
 
