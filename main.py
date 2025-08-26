@@ -333,22 +333,19 @@ async def send_questions_list(to_msisdn: str, category_id: str) -> Dict[str, Any
     # Preparar las filas de preguntas
     rows = []
     for question_id, question_data in category["questions"].items():
-        # Usar el título completo como descripción y una versión corta como título
+        # Usar solo el título completo, sin descripción adicional
         full_title = question_data["title"]
        
-        # Crear título corto (máximo 24 caracteres)
+        # Crear título para mostrar (máximo 24 caracteres para el título)
         if len(full_title) > 24:
-            short_title = full_title[:21] + "..."
+            display_title = full_title[:21] + "..."
         else:
-            short_title = full_title
-       
-        # Usar una descripción genérica para evitar duplicación
-        description = "Toca para ver la respuesta"
+            display_title = full_title
            
         rows.append({
             "id": f"q_{category_id}_{question_id}",
-            "title": short_title,
-            "description": description
+            "title": display_title
+            # NO incluir description para evitar duplicación
         })
 
     payload = {
