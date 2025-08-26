@@ -3,6 +3,7 @@ import hmac
 import hashlib
 import json
 import re
+import asyncio
 from typing import Optional, Any, Dict, List
 import logging
 
@@ -499,32 +500,41 @@ async def process_interactive_message(from_msisdn: str, interactive_data: Dict[s
            
         elif list_id.startswith("q_"):
             # Selección de pregunta
-            parts = list_id.replace("q_", "").split("_", 1)
-            if len(parts) == 2:
-                category_id, question_id = parts
-                
-                # Obtener la pregunta y respuesta de la base de datos
-                category = get_category_by_id(category_id)
-                if category and question_id in category["questions"]:
-                    question_title = category["questions"][question_id]["title"]
-                    answer = category["questions"][question_id]["answer"]
+            try:
+                # Extraer category_id y question_id del list_id
+                parts = list_id.replace("q_", "").split("_", 1)
+                if len(parts) >= 2:
+                    category_id = parts[0]
+                    question_id = parts[1]
                     
-                    # Enviar la pregunta y respuesta sin duplicación
-                    await send_text(from_msisdn, f"❓ *{question_title}*\n\n✅ *Respuesta:*\n{answer}")
+                    logging.info(f"🔍 Procesando pregunta - Category: {category_id}, Question: {question_id}")
+                    
+                    # Obtener la pregunta y respuesta de la base de datos
+                    category = get_category_by_id(category_id)
+                    if category and question_id in category["questions"]:
+                        question_title = category["questions"][question_id]["title"]
+                        answer = category["questions"][question_id]["answer"]
+                        
+                        # Enviar la pregunta y respuesta sin duplicación
+                        await send_text(from_msisdn, f"❓ *{question_title}*\n\n✅ *Respuesta:*\n{answer}")
+                        
+                        # Pequeña pausa antes de enviar opciones
+                        import asyncio
+                        await asyncio.sleep(2)
+                        
+                        # Ofrecer opciones para continuar
+                        await send_text(from_msisdn, "📋 ¿Necesitas información sobre otro tema?")
+                        await send_main_menu_list(from_msisdn)
+                    else:
+                        logging.error(f"❌ Pregunta no encontrada - Category: {category_id}, Question: {question_id}")
+                        await send_text(from_msisdn, "❌ Error: Pregunta no encontrada.")
+                        await send_main_menu_list(from_msisdn)
                 else:
-                    await send_text(from_msisdn, "❌ Error: Pregunta no encontrada.")
+                    logging.error(f"❌ Formato de ID de pregunta inválido: {list_id}")
+                    await send_text(from_msisdn, "❌ Error al procesar la pregunta seleccionada.")
                     await send_main_menu_list(from_msisdn)
-                    return
-               
-                # Pequeña pausa antes de enviar opciones
-                import asyncio
-                await asyncio.sleep(2)
-               
-                # Ofrecer opciones para continuar
-                await send_text(from_msisdn, "📋 ¿Necesitas información sobre otro tema?")
-                await send_main_menu_list(from_msisdn)
-            else:
-                logging.error(f"❌ Formato de ID de pregunta inválido: {list_id}")
+            except Exception as e:
+                logging.error(f"❌ Error procesando pregunta {list_id}: {e}")
                 await send_text(from_msisdn, "❌ Error al procesar la pregunta seleccionada.")
                 await send_main_menu_list(from_msisdn)
         else:
