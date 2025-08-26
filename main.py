@@ -333,19 +333,24 @@ async def send_questions_list(to_msisdn: str, category_id: str) -> Dict[str, Any
     # Preparar las filas de preguntas
     rows = []
     for question_id, question_data in category["questions"].items():
-        # Limitar el título a 24 caracteres para WhatsApp
-        title = question_data["title"]
-        if len(title) > 24:
-            title = title[:21] + "..."
+        # Usar el título completo como descripción y una versión corta como título
+        full_title = question_data["title"]
        
-        # Limitar la descripción a 72 caracteres
-        description = question_data["title"]
-        if len(description) > 72:
-            description = description[:69] + "..."
+        # Crear título corto (máximo 24 caracteres)
+        if len(full_title) > 24:
+            short_title = full_title[:21] + "..."
+        else:
+            short_title = full_title
+       
+        # Usar título completo como descripción (máximo 72 caracteres)
+        if len(full_title) > 72:
+            description = full_title[:69] + "..."
+        else:
+            description = full_title
            
         rows.append({
             "id": f"q_{category_id}_{question_id}",
-            "title": title,
+            "title": short_title,
             "description": description
         })
 
@@ -360,7 +365,7 @@ async def send_questions_list(to_msisdn: str, category_id: str) -> Dict[str, Any
                 "text": category["title"]
             },
             "body": {
-                "text": f"Selecciona la pregunta que te interesa sobre {category['title'].split(' ', 1)[1] if ' ' in category['title'] else category['title']}:\n\n💡 Después de leer la respuesta, podrás volver al menú principal o explorar otras categorías."
+                "text": f"Selecciona la pregunta que te interesa:\n\n💡 Después de leer la respuesta, podrás volver al menú principal."
             },
             "footer": {
                 "text": "Escribe 'volver' para regresar al menú"
@@ -505,17 +510,19 @@ async def process_interactive_message(from_msisdn: str, interactive_data: Dict[s
                 category_id, question_id = parts
                 answer = get_answer_by_ids(category_id, question_id)
                
+                # Enviar la respuesta directamente sin duplicación
                 await send_text(from_msisdn, f"✅ *Respuesta:*\n\n{answer}")
                
                 # Pequeña pausa antes de enviar opciones
                 import asyncio
-                await asyncio.sleep(1)
+                await asyncio.sleep(2)
                
                 # Ofrecer opciones para continuar
-                await send_text(from_msisdn, "📋 ¿Tienes alguna otra consulta?")
+                await send_text(from_msisdn, "📋 ¿Necesitas información sobre otro tema?")
                 await send_main_menu_list(from_msisdn)
             else:
                 logging.error(f"❌ Formato de ID de pregunta inválido: {list_id}")
+                await send_text(from_msisdn, "❌ Error al procesar la pregunta seleccionada.")
                 await send_main_menu_list(from_msisdn)
         else:
             logging.warning(f"⚠️ ID de lista desconocido: {list_id}")
