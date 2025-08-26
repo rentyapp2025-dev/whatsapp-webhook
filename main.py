@@ -32,223 +32,183 @@ app = FastAPI(title="WhatsApp Cloud API Webhook (Render/FastAPI)")
 QA_CATEGORIZED = {
     "per_capital": {
         "title": "🏦 PER CAPITAL",
-        "questions": [
-            {
-                "id": "que_es_per_capital",
+        "questions": {
+            "que_es_per_capital": {
                 "title": "¿Qué es Per Capital?",
                 "answer": "Es un grupo de empresas del Mercado de Valores Venezolano reguladas por la SUNAVAL."
             },
-            {
-                "id": "quien_regula",
+            "quien_regula": {
                 "title": "¿Quién regula a PER CAPITAL?",
                 "answer": "La SUNAVAL (Superintendencia Nacional de Valores)"
             },
-            {
-                "id": "que_es_sunaval",
+            "que_es_sunaval": {
                 "title": "¿Qué es la SUNAVAL?",
                 "answer": "Es quien protege a inversionistas y regula a intermediarios y emisores del Mercado de Valores venezolano"
             },
-            {
-                "id": "bolsa_valores",
+            "bolsa_valores": {
                 "title": "¿Qué es la Bolsa de Valores de Caracas?",
                 "answer": "Es el lugar donde se compran y venden bonos, acciones y otros instrumentos de manera ordenada a través de las Casas de Bolsa y está regulada por la SUNAVAL"
             },
-            {
-                "id": "como_invertir_inicial",
+            "como_invertir_inicial": {
                 "title": "¿Cómo invierto?",
                 "answer": "Para invertir en el Fondo Mutual Abierto de PER CAPITAL debes descargar el app, registrarte, subir recaudos y colocar tus órdenes de compra."
             }
-        ]
+        }
     },
     "fondo_mutual": {
         "title": "💰 FONDO MUTUAL ABIERTO",
-        "questions": [
-            {
-                "id": "que_es_fondo_mutual",
+        "questions": {
+            "que_es_fondo_mutual": {
                 "title": "¿Qué es un Fondo Mutual?",
                 "answer": "Es un instrumento de inversión en grupo donde varias personas ponen dinero en un fondo que es gestionado por expertos y está diseñado para ser diversificado, de bajo riesgo y dirigido a pequeños inversionistas con poca experiencia"
             },
-            {
-                "id": "unidad_inversion",
+            "unidad_inversion": {
                 "title": "¿Qué es una Unidad de Inversión?",
                 "answer": "Es una \"porción\" del fondo. Cuando inviertes adquieres unidades que representan tu parte del fondo."
             },
-            {
-                "id": "que_es_vui",
+            "que_es_vui": {
                 "title": "¿Qué es el VUI?",
                 "answer": "El Valor de la Unidad de Inversión (VUI) es el precio de una Unidad de Inversión. Si el VUI sube tu inversión gana valor. Se calcula diariamente al cierre del día y depende del comportamiento de las inversiones del fondo."
             },
-            {
-                "id": "como_invertir_fondo",
+            "como_invertir_fondo": {
                 "title": "¿Cómo invierto en el fondo?",
                 "answer": "Descarga el app para Android y iOS, regístrate, sube recaudos, acepta los contratos, espera tu aprobación y suscribe Unidades de Inversión cuando quieras y cuantas veces desees"
             },
-            {
-                "id": "monto_minimo",
-                "title": "¿Cuál es el monto mínimo?",
+            "monto_minimo": {
+                "title": "¿Cuál es el monto mínimo de inversión?",
                 "answer": "1 Unidad de Inversión"
             },
-            {
-                "id": "como_gano",
+            "como_gano": {
                 "title": "¿Cómo gano dinero?",
                 "answer": "Ganas por apreciación (subida del VUI) o por dividendo (en caso de que sea decretado)"
             },
-            {
-                "id": "tiempo_ganancia",
+            "tiempo_ganancia": {
                 "title": "¿En cuánto tiempo gano?",
                 "answer": "Ganas a largo plazo, se recomienda medir resultados trimestralmente"
             },
-            {
-                "id": "mas_informacion",
+            "mas_informacion": {
                 "title": "¿Dónde consigo más información?",
                 "answer": "En los prospectos y hojas de términos en www.per-capital.com"
             }
-        ]
+        }
     },
     "app_uso": {
         "title": "📱 USO DE LA APP",
-        "questions": [
-            {
-                "id": "comprar_acciones_bonos",
+        "questions": {
+            "comprar_acciones_bonos": {
                 "title": "¿Puedo comprar acciones y bonos?",
                 "answer": "No, nuestra app es únicamente para invertir en nuestro Fondo Mutual Abierto. Pronto saldrá la nueva versión de nuestra app para negociar"
             },
-            {
-                "id": "como_registro",
+            "como_registro": {
                 "title": "¿Cómo me registro?",
                 "answer": "Descarga el app, completa 100% de los datos, acepta los contratos, sube tus recaudos como Cédula de Identidad y Selfie y espera tu aprobación."
             },
-            {
-                "id": "tiempo_aprobacion",
+            "tiempo_aprobacion": {
                 "title": "¿Cuánto tarda mi aprobación?",
                 "answer": "De 2 a 5 días hábiles siempre que hayas completado 100% de registro y recaudos"
             },
-            {
-                "id": "no_aprobacion",
+            "no_aprobacion": {
                 "title": "¿Qué hago si no me aprueban?",
                 "answer": "Revisa que hayas completado 100% del registro y recaudos, sino contáctanos en SOPORTE"
             },
-            {
-                "id": "menor_edad",
+            "menor_edad": {
                 "title": "¿Puedo invertir si soy menor de edad?",
                 "answer": "Debes dirigirte a nuestras oficinas y registrarte con tu representante legal"
             },
-            {
-                "id": "modificar_datos",
-                "title": "¿Puedo modificar mis datos?",
+            "modificar_datos": {
+                "title": "¿Puedo modificar alguno de mis datos?",
                 "answer": "Sí, pero por exigencia de la ley entras nuevamente en revisión"
             },
-            {
-                "id": "cuenta_caja_venezolana",
-                "title": "¿Necesito cuenta en Caja Venezolana?",
+            "cuenta_caja_venezolana": {
+                "title": "¿Debo tener cuenta en la Caja Venezolana?",
                 "answer": "No, para invertir en nuestro Fondo Mutual Abierto no es necesaria la cuenta en la CVV"
             },
-            {
-                "id": "como_suscribir",
+            "como_suscribir": {
                 "title": "¿Cómo suscribo (compro)?",
                 "answer": "Haz click en Negociación > Suscripción > Monto a invertir > Suscribir > Método de Pago. Recuerda pagar desde TU cuenta bancaria y subir comprobante de pago"
             },
-            {
-                "id": "como_pagar",
+            "como_pagar": {
                 "title": "¿Cómo pago mi suscripción?",
                 "answer": "Debes pagar desde TU cuenta bancaria vía Pago Móvil. Y recuerda subir comprobante. IMPORTANTE: no se aceptan pagos de terceros."
             },
-            {
-                "id": "pago_terceros",
+            "pago_terceros": {
                 "title": "¿Puede pagar alguien por mí?",
                 "answer": "No, la ley prohíbe los pagos de terceros. Siempre debes pagar desde tu cuenta bancaria."
             },
-            {
-                "id": "ver_inversion",
+            "ver_inversion": {
                 "title": "¿Cómo veo mi inversión?",
                 "answer": "En el Home en la sección Mi Cuenta"
             },
-            {
-                "id": "cuando_ver_inversion",
+            "cuando_ver_inversion": {
                 "title": "¿Cuándo veo mi inversión?",
                 "answer": "Al cierre del sistema en días hábiles bancarios después del cierre de mercado y la publicación de tasas del Banco Central de Venezuela."
             },
-            {
-                "id": "comisiones",
+            "comisiones": {
                 "title": "¿Cuáles son las comisiones?",
                 "answer": "3% flat Suscripción, 3% flat Rescate y 5% anual Administración"
             },
-            {
-                "id": "como_rescatar",
+            "como_rescatar": {
                 "title": "¿Cómo rescato (vendo)?",
                 "answer": "Haz click en Negociación > Rescate > Unidades a Rescatar > Rescatar. Recuerda se enviarán fondos a TU cuenta bancaria"
             },
-            {
-                "id": "cuando_pagan_rescates",
+            "cuando_pagan_rescates": {
                 "title": "¿Cuándo me pagan mis rescates?",
                 "answer": "Al próximo día hábil bancario en horario de mercado"
             },
-            {
-                "id": "cuando_rescatar",
+            "cuando_rescatar": {
                 "title": "¿Cuándo puedo rescatar?",
                 "answer": "Cuando tú quieras, y se liquida en días hábiles bancarios."
             },
-            {
-                "id": "actualizacion_posicion",
+            "actualizacion_posicion": {
                 "title": "¿Cuándo se actualiza mi posición?",
                 "answer": "Al cierre del sistema en días hábiles bancarios después del cierre de mercado y la publicación de tasas del Banco Central de Venezuela."
             },
-            {
-                "id": "por_que_varia_posicion",
+            "por_que_varia_posicion": {
                 "title": "¿Por qué varía mi posición?",
                 "answer": "Tu saldo y rendimiento sube si suben los precios de las inversiones del fondo, se reciben dividendos o cupones y bajan si estos precios caen."
             },
-            {
-                "id": "ver_historico",
+            "ver_historico": {
                 "title": "¿Dónde veo mi histórico?",
                 "answer": "En la sección Historial"
             },
-            {
-                "id": "ver_reportes",
+            "ver_reportes": {
                 "title": "¿Dónde veo reportes?",
                 "answer": "En la sección Documentos > Reportes > Año > Trimestre"
             }
-        ]
+        }
     },
     "riesgos_soporte": {
         "title": "⚠️ RIESGOS Y SOPORTE",
-        "questions": [
-            {
-                "id": "riesgos_inversion",
-                "title": "¿Cuáles son los riesgos?",
+        "questions": {
+            "riesgos_inversion": {
+                "title": "¿Cuáles son los riesgos al invertir?",
                 "answer": "Todas las inversiones están sujetas a riesgos y la pérdida de capital es posible. Algunos riesgos son: riesgo de mercado, riesgo país, riesgo cambiario, riesgo sector, entre otros."
             },
-            {
-                "id": "en_revision",
+            "en_revision": {
                 "title": "Estoy en revisión, ¿qué hago?",
                 "answer": "Asegúrate de haber completado 100% datos y recaudos y espera tu aprobación. Si tarda más de lo habitual contáctanos en SOPORTE"
             },
-            {
-                "id": "no_llega_sms",
+            "no_llega_sms": {
                 "title": "No me llega el SMS",
                 "answer": "Asegúrate de tener buena señal y de que hayas colocado correctamente un número telefónico venezolano"
             },
-            {
-                "id": "no_llega_correo",
+            "no_llega_correo": {
                 "title": "No me llega el correo",
                 "answer": "Asegúrate de no dejar espacios al final cuando escribiste tu correo electrónico"
             },
-            {
-                "id": "no_descarga_app",
+            "no_descarga_app": {
                 "title": "No logro descargar el App",
                 "answer": "Asegúrate de que tu app store esté configurada en la región de Venezuela"
             },
-            {
-                "id": "no_abre_app",
+            "no_abre_app": {
                 "title": "No me abre el App",
                 "answer": "Asegúrate de tener la versión actualizada y que tu tienda de apps esté configurada en la región de Venezuela"
             },
-            {
-                "id": "recuperar_clave",
+            "recuperar_clave": {
                 "title": "¿Cómo recupero mi clave?",
                 "answer": "Selecciona Recuperar, te llegará una clave temporal para ingresar y luego actualiza tu nueva clave"
             }
-        ]
+        }
     }
 }
 
@@ -267,12 +227,11 @@ def get_answer_by_ids(category_id: str, question_id: str) -> str:
     if not category:
         return "Lo siento, la categoría seleccionada no es válida."
    
-    # Buscar la pregunta en la lista
-    for question in category["questions"]:
-        if question["id"] == question_id:
-            return question["answer"]
+    question = category["questions"].get(question_id)
+    if not question:
+        return "Lo siento, la pregunta seleccionada no es válida."
    
-    return "Lo siento, la pregunta seleccionada no es válida."
+    return question["answer"]
 
 # ==================== Funciones para enviar mensajes ====================
 
@@ -371,22 +330,25 @@ async def send_questions_list(to_msisdn: str, category_id: str) -> Dict[str, Any
         await send_main_menu_list(to_msisdn)
         return {}
 
-    # Preparar las filas de preguntas desde la lista
+    # Preparar las filas de preguntas
     rows = []
-    for question in category["questions"]:
-        question_id = question["id"]
-        title = question["title"]
+    for question_id, question_data in category["questions"].items():
+        # Usar el título completo como descripción y una versión corta como título
+        full_title = question_data["title"]
        
-        # Asegurar que el título no exceda 24 caracteres
-        if len(title) > 24:
-            display_title = title[:21] + "..."
+        # Crear título corto (máximo 24 caracteres)
+        if len(full_title) > 24:
+            short_title = full_title[:21] + "..."
         else:
-            display_title = title
+            short_title = full_title
+       
+        # Usar una descripción genérica en lugar del título completo para evitar duplicación
+        description = "Toca para ver la respuesta"
            
         rows.append({
             "id": f"q_{category_id}_{question_id}",
-            "title": display_title,
-            "description": title  # Descripción completa
+            "title": short_title,
+            "description": description
         })
 
     payload = {
@@ -663,7 +625,6 @@ async def status_endpoint():
             "APP_SECRET": "✅" if APP_SECRET else "❌"
         },
         "qa_categories": list(QA_CATEGORIZED.keys()),
-        "total_questions": sum(len(cat["questions"]) for cat in QA_CATEGORIZED.values()),
         "total_questions": sum(len(cat["questions"]) for cat in QA_CATEGORIZED.values()),
         "active_conversations": len(conversation_state),
         "graph_api_version": GRAPH_API_VERSION
