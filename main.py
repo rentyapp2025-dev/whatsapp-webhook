@@ -208,57 +208,6 @@ async def send_main_menu(to_msisdn: str) -> Dict[str, Any]:
     return await send_text(to_msisdn, menu_text)
 
 
-
-async def send_subcategory_menu(to_msisdn: str, category_index: int) -> Dict[str, Any]:
-    """
-    Envía el submenú de preguntas como list message para una categoría específica.
-    """
-    category_menu = get_menu_by_category_index(category_index)
-    if not category_menu:
-        await send_text(to_msisdn, "❌ Categoría no válida. Por favor, envía un número de categoría válido.")
-        await send_main_menu(to_msisdn)
-        return {}
-
-    # Construir el mensaje tipo lista
-    sections = [
-        {
-            "title": category_menu["title"],
-            "rows": [
-                {
-                    "id": f"q_{category_index}_{i+1}",
-                    "title": re.sub(r'^\d+\.\s*', '', question),
-                    "description": "Selecciona para ver la respuesta"
-                }
-                for i, question in enumerate(category_menu["questions"].keys())
-            ]
-        }
-    ]
-
-    payload = {
-        "messaging_product": "whatsapp",
-        "to": to_msisdn,
-        "type": "interactive",
-        "interactive": {
-            "type": "list",
-            "header": {
-                "type": "text",
-                "text": f"📚 {category_menu['title']}"
-            },
-            "body": {
-                "text": "Selecciona una pregunta para ver la respuesta."
-            },
-            "footer": {
-                "text": "Puedes escribir 'volver' para regresar al menú principal."
-            },
-            "action": {
-                "button": "Ver preguntas",
-                "sections": sections
-            }
-        }
-    }
-
-    conversation_state[to_msisdn] = str(category_index)
-    return await _post_messages(payload)
 async def send_subcategory_menu(to_msisdn: str, category_index: int) -> Dict[str, Any]:
     """
     Envía el submenú de preguntas para una categoría específica.
@@ -650,4 +599,3 @@ if __name__ == "__main__":
         questions_count = len(QA_CATEGORIZED[category])
         print(f"   • {category}: {questions_count} preguntas")
     print("✅ Bot listo para recibir mensajes!")
-    
