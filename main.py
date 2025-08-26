@@ -238,13 +238,13 @@ async def send_subcategory_menu(to_msisdn: str, category_index: int) -> Dict[str
             "type": "list",
             "header": {
                 "type": "text",
-                "text": f"📚 {category_menu['title']}"
+                "text": f"f4da {category_menu['title']}"
             },
             "body": {
                 "text": "Selecciona una pregunta para ver la respuesta."
             },
             "footer": {
-                "text": "Escribe 'volver' para regresar al menú principal."
+                "text": "Puedes escribir 'volver' para regresar al menú principal."
             },
             "action": {
                 "button": "Ver preguntas",
@@ -485,7 +485,7 @@ async def process_interactive_message(from_msisdn: str, interactive_data: Dict[s
             await send_text(from_msisdn, f"✅ *Respuesta:*{response_text}")
             import asyncio
             await asyncio.sleep(1)
-            await send_text(from_msisdn, "📋 ¿Tienes alguna otra consulta?")
+            await send_text(from_msisdn, "f4cb ¿Tienes alguna otra consulta?")
             await send_main_menu(from_msisdn)
         else:
             await send_text(from_msisdn, "❌ No se pudo interpretar tu selección. Intenta nuevamente.")
