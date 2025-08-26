@@ -342,7 +342,7 @@ async def send_questions_list(to_msisdn: str, category_id: str) -> Dict[str, Any
         else:
             short_title = full_title
        
-        # Usar una descripción genérica en lugar del título completo para evitar duplicación
+        # Usar una descripción genérica para evitar duplicación
         description = "Toca para ver la respuesta"
            
         rows.append({
@@ -505,10 +505,19 @@ async def process_interactive_message(from_msisdn: str, interactive_data: Dict[s
             parts = list_id.replace("q_", "").split("_", 1)
             if len(parts) == 2:
                 category_id, question_id = parts
-                answer = get_answer_by_ids(category_id, question_id)
-               
-                # Enviar la respuesta directamente sin duplicación
-                await send_text(from_msisdn, f"✅ *Respuesta:*\n\n{answer}")
+                
+                # Obtener la pregunta y respuesta de la base de datos
+                category = get_category_by_id(category_id)
+                if category and question_id in category["questions"]:
+                    question_title = category["questions"][question_id]["title"]
+                    answer = category["questions"][question_id]["answer"]
+                    
+                    # Enviar la pregunta y respuesta sin duplicación
+                    await send_text(from_msisdn, f"❓ *{question_title}*\n\n✅ *Respuesta:*\n{answer}")
+                else:
+                    await send_text(from_msisdn, "❌ Error: Pregunta no encontrada.")
+                    await send_main_menu_list(from_msisdn)
+                    return
                
                 # Pequeña pausa antes de enviar opciones
                 import asyncio
