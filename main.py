@@ -242,7 +242,7 @@ async def send_subcategory_menu(to_msisdn: str, category_index: int) -> Dict[str
             "type": "list",
             "header": {
                 "type": "text",
-                "text": f"f4da {category_menu['title']}"
+                "text": f"📚 {category_menu['title']}"
             },
             "body": {
                 "text": "Selecciona una pregunta para ver la respuesta."
