@@ -438,136 +438,92 @@ def _extract_interactive_candidate(obj: Dict) -> Optional[str]:
             return raw
     return None
 
-def _strip_index_prefix(s: str) -> str:
-    return re.sub(r'^\s*\d+\s*[\.\-\)\:]?\s*', '', s or '')
+async def handle_feedback(from_number: str, reply_id: str):
+    """Handle Yes/No feedback responses"""
+    try:
+        if reply_id == "yes":
+            response = "¡Gracias por tu confirmación! 😊"
+        elif reply_id == "no":
+            response = "Entiendo, gracias por tu respuesta. 👍"
+        else:
+            response = "No entendí tu respuesta."
+        
+        await send_message(build_text_message(from_number, response))
+        await asyncio.sleep(1.0)
+        await send_main_menu(from_number)
+
+    except Exception as e:
+        logger.error(f"Error in handle_feedback: {e}")
+        await send_main_menu(from_number)
+
+
+async def handle_rating(from_number: str, reply_id: str):
+    """Handle rating button responses (rating_1 .. rating_5)"""
+    try:
+        rating_value = reply_id.replace("rating_", "")
+        response = f"¡Gracias por calificarnos con {rating_value} ⭐!"
+        
+        await send_message(build_text_message(from_number, response))
+        await asyncio.sleep(1.0)
+        await send_main_menu(from_number)
+
+    except Exception as e:
+        logger.error(f"Error in handle_rating: {e}")
+        await send_main_menu(from_number)
 
 async def process_interactive_message(from_number: str, interactive_data: Dict):
-    """
-    Handle interactive messages robustly. interactive_data may contain:
-    - { "type": "list_reply", "list_reply": { "id": "...", "title": "..."} }
-    - { "type": "button_reply", "button_reply": { "id": "...", "title": "..."} }
-    - or nested/variant shapes received from webhook
-    """
-    logger.info("[interactive] from=%s data_keys=%s", from_number, list(interactive_data.keys()))
-    # determine type
-    msg_type = interactive_data.get("type")
-    if not msg_type:
-        if "list_reply" in interactive_data:
-            msg_type = "list_reply"
-        elif "button_reply" in interactive_data:
-            msg_type = "button_reply"
-        else:
-            # sometimes whatsapp nests interactive: { "interactive": { "list_reply": { ... } } }
-            if any(k in interactive_data for k in ("list_reply", "button_reply")):
-                msg_type = "list_reply" if "list_reply" in interactive_data else "button_reply"
+    """Handle interactive messages (buttons and lists)"""
+    try:
+        interactive_type = interactive_data.get("type")
+        logger.info(f"Interactive type: {interactive_type} from {from_number}")
 
-    # extract candidate entity
-    candidate = None
-    if msg_type == "list_reply":
-        candidate = _extract_interactive_candidate(interactive_data.get("list_reply", {}) or interactive_data)
-        logger.info("[interactive][list_reply] candidate=%s", candidate)
-        if not candidate:
-            await send_message(build_text_message(from_number, "No pude leer tu selección. Intentemos de nuevo."))
-            await send_main_menu(from_number)
-            return
+        if interactive_type == "list_reply":
+            list_reply = interactive_data.get("list_reply", {})
+            reply_id = list_reply.get("id")
+            reply_title = list_reply.get("title")
+            logger.info(f"List reply from {from_number}: {reply_id} - {reply_title}")
 
-        sel = candidate
-        # direct question id (we used ::Q) or previously generated
-        if sel in QUESTION_ID_MAP or "::Q" in sel:
-            await send_answer(from_number, sel)
-            return
-
-        # virtual app
-        if sel.upper() in ("APP_MAIN", "APP_GENERAL"):
-            await send_app_submenu(from_number)
-            return
-
-        # try as category
-        mapped = find_category_key(sel, allow_fuzzy=True)
-        if mapped:
-            await send_category_questions(from_number, mapped)
-            return
-
-        # try index resolution using session category
-        session_cat = user_sessions.get(from_number, {}).get("category")
-        if session_cat and session_cat in KNOWLEDGE_BASE:
-            # if candidate starts with a number like "1." resolve index
-            m = re.match(r'^\s*(\d+)', candidate or "")
-            if m:
-                idx = int(m.group(1)) - 1
-                qlist = list(KNOWLEDGE_BASE[session_cat].items())
-                if 0 <= idx < len(qlist):
-                    q_text, q_answer = qlist[idx]
-                    gen_id = _make_question_id(session_cat, idx)
-                    QUESTION_ID_MAP.setdefault(gen_id, {"category": session_cat, "text": q_text, "answer": q_answer})
-                    await send_answer(from_number, gen_id)
-                    return
-            stripped = _strip_index_prefix(candidate)
-            norm_stripped = _normalize_key(stripped)
-            for q_text, q_answer in KNOWLEDGE_BASE[session_cat].items():
-                if _normalize_key(q_text).startswith(norm_stripped) or norm_stripped.startswith(_normalize_key(q_text)[:max(5, len(_normalize_key(q_text))//2)]):
-                    idx = list(KNOWLEDGE_BASE[session_cat].keys()).index(q_text)
-                    gen_id = _make_question_id(session_cat, idx)
-                    QUESTION_ID_MAP.setdefault(gen_id, {"category": session_cat, "text": q_text, "answer": q_answer})
-                    await send_answer(from_number, gen_id)
-                    return
-
-        # last resort: try matching question text across KB
-        await send_answer(from_number, sel)
-        return
-
-    elif msg_type == "button_reply":
-        candidate = _extract_interactive_candidate(interactive_data.get("button_reply", {}) or interactive_data)
-        logger.info("[interactive][button_reply] candidate=%s", candidate)
-        if not candidate:
-            await send_message(build_text_message(from_number, "No pude leer tu selección. Intentemos de nuevo."))
-            await send_main_menu(from_number)
-            return
-        bid = candidate
-
-        # predefined flows
-        if bid.upper() == "YES" or bid.upper() == "SI" or bid.upper() == "SÍ":
-            await send_main_menu(from_number)
-            return
-        if bid.upper() == "NO":
-            await send_rating_request(from_number)
-            return
-        if bid.upper().startswith("RATE_"):
-            await handle_rating(from_number, bid.upper())
-            return
-
-        # if looks like question id
-        if bid in QUESTION_ID_MAP or "::Q" in bid:
-            await send_answer(from_number, bid)
-            return
-
-        # try index resolution as with list_reply
-        session_cat = user_sessions.get(from_number, {}).get("category")
-        m = re.match(r'^\s*(\d+)', bid or "")
-        if session_cat and session_cat in KNOWLEDGE_BASE and m:
-            idx = int(m.group(1)) - 1
-            qlist = list(KNOWLEDGE_BASE[session_cat].items())
-            if 0 <= idx < len(qlist):
-                q_text, q_answer = qlist[idx]
-                gen_id = _make_question_id(session_cat, idx)
-                QUESTION_ID_MAP.setdefault(gen_id, {"category": session_cat, "text": q_text, "answer": q_answer})
-                await send_answer(from_number, gen_id)
+            if not reply_id:
+                logger.warning("List reply without id")
+                await send_main_menu(from_number)
                 return
 
-        # try category mapping
-        mapped = find_category_key(bid, allow_fuzzy=True)
-        if mapped:
-            await send_category_questions(from_number, mapped)
-            return
+            # Categorías → enviar preguntas
+            if reply_id.startswith("cat_"):
+                await send_category_questions(from_number, reply_id)
+            # Preguntas → enviar respuesta
+            elif reply_id.startswith("q_"):
+                await send_answer(from_number, reply_id)
+            else:
+                logger.info(f"Unknown list reply id: {reply_id}")
+                await send_main_menu(from_number)
 
-        # fallback try answer by text
-        await send_answer(from_number, bid)
-        return
+        elif interactive_type == "button_reply":
+            button_reply = interactive_data.get("button_reply", {})
+            reply_id = button_reply.get("id")
+            reply_title = button_reply.get("title")
+            logger.info(f"Button reply from {from_number}: {reply_id} - {reply_title}")
 
-    else:
-        logger.warning("Unknown interactive shape for %s. data: %s", from_number, interactive_data)
+            if not reply_id:
+                logger.warning("Button reply without id")
+                await send_main_menu(from_number)
+                return
+
+            # Feedback botones
+            if reply_id in ["yes", "no"]:
+                await handle_feedback(from_number, reply_id)
+            elif reply_id.startswith("rating_"):
+                await handle_rating(from_number, reply_id)
+            else:
+                await send_main_menu(from_number)
+
+        else:
+            logger.warning(f"Unknown interactive type: {interactive_type}")
+            await send_main_menu(from_number)
+
+    except Exception as e:
+        logger.error(f"Error in process_interactive_message: {e}")
         await send_main_menu(from_number)
-        return
 
 # -------------------- Webhook signature --------------------
 def verify_webhook_signature(payload: bytes, signature: str) -> bool:
