@@ -1,4 +1,3 @@
-# main.py
 import os
 import json
 import re
@@ -140,6 +139,38 @@ def find_category_key(selection_id: str, allow_fuzzy: bool = False) -> Optional[
             if norm_candidate in nk or nk in norm_candidate:
                 return k
     return None
+
+# --- NUEVO: helpers de routing ---
+def _is_category_id(candidate: str) -> Optional[str]:
+    """Devuelve el nombre de categoría mapeado si 'candidate' parece ser categoría."""
+    if not candidate:
+        return None
+    cid = candidate.strip()
+    if cid in ("APP_MAIN", "APP_GENERAL"):
+        return cid
+    mapped = find_category_key(cid, allow_fuzzy=True)
+    return mapped
+
+def _is_question_id(candidate: str) -> bool:
+    """Verdadero si el id apunta a una pregunta conocida."""
+    if not candidate:
+        return False
+    cid = candidate.strip()
+    if cid in QUESTION_ID_MAP:
+        return True
+    if "::Q" in cid:
+        return True
+    # También admitir que venga el texto de la pregunta normalizado
+    norm_in = _normalize_key(cid)
+    for data in QUESTION_ID_MAP.values():
+        if _normalize_key(data.get("text", "")) == norm_in:
+            return True
+    # Y buscar directo en la KB por texto
+    for qa_map in KNOWLEDGE_BASE.values():
+        for q_text in qa_map.keys():
+            if _normalize_key(q_text) == norm_in:
+                return True
+    return False
 
 # -------------------- Builders --------------------
 def build_text_message(to: str, text: str) -> Dict:
@@ -317,14 +348,14 @@ async def send_answer(to: str, question_id: str):
             if _normalize_key(data.get("text", "")) == norm_in:
                 qdata = data
                 break
-        if not qdata:
-            for cat_key, qa_map in KNOWLEDGE_BASE.items():
-                for q_text, q_answer in qa_map.items():
-                    if _normalize_key(q_text) == norm_in:
-                        qdata = {"category": cat_key, "text": q_text, "answer": q_answer}
-                        break
-                if qdata:
+    if not qdata:
+        for cat_key, qa_map in KNOWLEDGE_BASE.items():
+            for q_text, q_answer in qa_map.items():
+                if _normalize_key(q_text) == norm_in:
+                    qdata = {"category": cat_key, "text": q_text, "answer": q_answer}
                     break
+            if qdata:
+                break
 
     # fallback: if looks like generated "CAT::Qn"
     if not qdata and "::Q" in (question_id or ""):
@@ -371,24 +402,6 @@ async def send_rating_request(to: str):
     payload = build_reply_button_message(to=to, body="¡Gracias por usar nuestro asistente virtual! 😊\n\n¿Cómo calificarías la ayuda recibida?", buttons=buttons)
     await send_message(payload)
     user_sessions[to] = {"state": "rating", "last_interaction": datetime.now().isoformat()}
-
-async def handle_rating(to: str, rating_id: str):
-    rating_map = {
-        "RATE_EXCELLENT": "Excelente",
-        "RATE_GOOD": "Bien",
-        "RATE_NEEDS_IMPROVEMENT": "Necesita mejorar"
-    }
-    rating = rating_map.get(rating_id, "Desconocida")
-    user_ratings.append({"user": to, "rating": rating, "timestamp": datetime.now().isoformat()})
-    thank_you = (
-        f"¡Gracias por tu calificación: *{rating}*! 🙏\n\n"
-        "Tu opinión es muy importante para nosotros.\n\n"
-        "Si necesitas más ayuda en el futuro, escríbenos. ¡Que tengas un excelente día! 😊"
-    )
-    await send_message(build_text_message(to, thank_you))
-    if to in user_sessions:
-        del user_sessions[to]
-    logger.info("Saved rating %s for user %s", rating, to)
 
 # -------------------- Message processing (text & interactive) --------------------
 def is_greeting(text: str) -> bool:
@@ -438,88 +451,123 @@ def _extract_interactive_candidate(obj: Dict) -> Optional[str]:
             return raw
     return None
 
+# --- REEMPLAZO: handler de feedback unificado (Sí/No) ---
 async def handle_feedback(from_number: str, reply_id: str):
-    """Handle Yes/No feedback responses"""
-    try:
-        if reply_id == "yes":
-            response = "¡Gracias por tu confirmación! 😊"
-        elif reply_id == "no":
-            response = "Entiendo, gracias por tu respuesta. 👍"
-        else:
-            response = "No entendí tu respuesta."
-        
-        await send_message(build_text_message(from_number, response))
-        await asyncio.sleep(1.0)
-        await send_main_menu(from_number)
+    """Maneja botones Sí/No (case-insensitive)."""
+    rid = (reply_id or "").strip().lower()
+    if rid in ("yes", "sí", "si"):
+        response = "¡Gracias por tu confirmación! 😊"
+    elif rid == "no":
+        response = "Entiendo, gracias por tu respuesta. 👍"
+    else:
+        response = "No entendí tu respuesta."
+    await send_message(build_text_message(from_number, response))
+    await asyncio.sleep(1.0)
+    await send_main_menu(from_number)
 
-    except Exception as e:
-        logger.error(f"Error in handle_feedback: {e}")
-        await send_main_menu(from_number)
+# --- NUEVO: handler de rating unificado ---
+async def handle_rating_buttons(from_number: str, reply_id: str):
+    """
+    Acepta tanto RATE_* (RATE_EXCELLENT/GOOD/NEEDS_IMPROVEMENT)
+    como rating_* (rating_1..rating_5).
+    """
+    rid = (reply_id or "").strip()
+    rid_upper = rid.upper()
 
+    # Mapa para RATE_*
+    rate_map = {
+        "RATE_EXCELLENT": "Excelente",
+        "RATE_GOOD": "Bien",
+        "RATE_NEEDS_IMPROVEMENT": "Necesita mejorar",
+    }
 
-async def handle_rating(from_number: str, reply_id: str):
-    """Handle rating button responses (rating_1 .. rating_5)"""
-    try:
-        rating_value = reply_id.replace("rating_", "")
-        response = f"¡Gracias por calificarnos con {rating_value} ⭐!"
-        
-        await send_message(build_text_message(from_number, response))
-        await asyncio.sleep(1.0)
-        await send_main_menu(from_number)
+    if rid_upper in rate_map:
+        rating = rate_map[rid_upper]
+        user_ratings.append({"user": from_number, "rating": rating, "timestamp": datetime.now().isoformat()})
+        msg = f"¡Gracias por tu calificación: *{rating}*! 🙏"
+    elif rid.lower().startswith("rating_"):
+        value = rid.lower().replace("rating_", "")
+        msg = f"¡Gracias por calificarnos con {value} ⭐!"
+        user_ratings.append({"user": from_number, "rating": f"{value} estrellas", "timestamp": datetime.now().isoformat()})
+    else:
+        msg = "Gracias por tu valoración."
+    await send_message(build_text_message(from_number, msg))
+    await asyncio.sleep(1.0)
+    await send_main_menu(from_number)
 
-    except Exception as e:
-        logger.error(f"Error in handle_rating: {e}")
-        await send_main_menu(from_number)
-
+# --- REEMPLAZO: router robusto para interactivos ---
 async def process_interactive_message(from_number: str, interactive_data: Dict):
-    """Handle interactive messages (buttons and lists)"""
+    """Handle interactive messages (buttons and lists) con IDs flexibles."""
     try:
         interactive_type = interactive_data.get("type")
         logger.info(f"Interactive type: {interactive_type} from {from_number}")
 
+        # Extraer id y title de forma robusta
+        reply_id, reply_title = None, None
         if interactive_type == "list_reply":
-            list_reply = interactive_data.get("list_reply", {})
-            reply_id = list_reply.get("id")
-            reply_title = list_reply.get("title")
-            logger.info(f"List reply from {from_number}: {reply_id} - {reply_title}")
-
-            if not reply_id:
-                logger.warning("List reply without id")
-                await send_main_menu(from_number)
-                return
-
-            # Categorías → enviar preguntas
-            if reply_id.startswith("cat_"):
-                await send_category_questions(from_number, reply_id)
-            # Preguntas → enviar respuesta
-            elif reply_id.startswith("q_"):
-                await send_answer(from_number, reply_id)
-            else:
-                logger.info(f"Unknown list reply id: {reply_id}")
-                await send_main_menu(from_number)
-
+            obj = interactive_data.get("list_reply", {}) or {}
+            reply_id = obj.get("id") or _extract_interactive_candidate(obj)
+            reply_title = obj.get("title")
         elif interactive_type == "button_reply":
-            button_reply = interactive_data.get("button_reply", {})
-            reply_id = button_reply.get("id")
-            reply_title = button_reply.get("title")
-            logger.info(f"Button reply from {from_number}: {reply_id} - {reply_title}")
-
-            if not reply_id:
-                logger.warning("Button reply without id")
-                await send_main_menu(from_number)
-                return
-
-            # Feedback botones
-            if reply_id in ["yes", "no"]:
-                await handle_feedback(from_number, reply_id)
-            elif reply_id.startswith("rating_"):
-                await handle_rating(from_number, reply_id)
-            else:
-                await send_main_menu(from_number)
-
+            obj = interactive_data.get("button_reply", {}) or {}
+            reply_id = obj.get("id") or _extract_interactive_candidate(obj)
+            reply_title = obj.get("title")
         else:
             logger.warning(f"Unknown interactive type: {interactive_type}")
             await send_main_menu(from_number)
+            return
+
+        logger.info(f"Interactive reply from {from_number}: id={reply_id} title={reply_title}")
+        if not reply_id:
+            logger.warning("Interactive reply without id")
+            await send_main_menu(from_number)
+            return
+
+        # Normalización básica
+        rid = reply_id.strip()
+        rid_upper = rid.upper()
+
+        # 1) Sí/No
+        if rid_upper in ("YES", "NO", "SÍ", "SI"):
+            await handle_feedback(from_number, rid)
+            return
+
+        # 2) Rating (RATE_* o rating_*)
+        if rid_upper.startswith("RATE_") or rid.lower().startswith("rating_"):
+            await handle_rating_buttons(from_number, rid)
+            return
+
+        # 3) Categorías (APP_MAIN/APP_GENERAL o nombres de categoría normalizados)
+        mapped_cat = _is_category_id(rid)
+        if mapped_cat:
+            # APP_MAIN y APP_GENERAL deben abrir un "resumen" de preguntas de App
+            if mapped_cat in ("APP_MAIN", "APP_GENERAL"):
+                await send_category_questions(from_number, "APP_GENERAL")
+            else:
+                await send_category_questions(from_number, mapped_cat)
+            return
+
+        # 4) Preguntas (IDs con ::Q, entries en QUESTION_ID_MAP, o texto de la pregunta)
+        if _is_question_id(rid):
+            await send_answer(from_number, rid)
+            return
+
+        # Fallback: intenta por título si viene algo útil
+        if reply_title:
+            mapped_cat = _is_category_id(reply_title)
+            if mapped_cat:
+                if mapped_cat in ("APP_MAIN", "APP_GENERAL"):
+                    await send_category_questions(from_number, "APP_GENERAL")
+                else:
+                    await send_category_questions(from_number, mapped_cat)
+                return
+            if _is_question_id(reply_title):
+                await send_answer(from_number, reply_title)
+                return
+
+        # Si nada matchea, volvemos al menú
+        logger.info(f"Unknown interactive reply id: {rid}")
+        await send_main_menu(from_number)
 
     except Exception as e:
         logger.error(f"Error in process_interactive_message: {e}")
