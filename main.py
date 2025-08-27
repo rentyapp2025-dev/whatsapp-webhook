@@ -127,12 +127,10 @@ def _make_question_id(category_key: str, idx: int) -> str:
 def find_category_key(selection_id: str, allow_fuzzy: bool = False) -> Optional[str]:
     if not selection_id:
         return None
-    # if it's a generated question id, not a category
     if "::Q" in selection_id:
         return None
     sel_candidate = selection_id.strip()
     norm_candidate = _normalize_key(sel_candidate)
-    # try exact by key or normalized equality
     for k in KNOWLEDGE_BASE.keys():
         if selection_id == k or _normalize_key(k) == norm_candidate or _normalize_key(k) == _normalize_key(selection_id):
             return k
@@ -204,8 +202,6 @@ def build_reply_button_message(to: str, body: str, buttons: List[Dict]) -> Dict:
 
 # -------------------- Sending / HTTP --------------------
 async def send_message(payload: Dict) -> bool:
-    """Send message to WhatsApp via Graph API."""
-    # sanity: ensure token and phone id present
     if not WHATSAPP_TOKEN or not PHONE_NUMBER_ID or "your_" in WHATSAPP_TOKEN.lower():
         logger.error("Missing or placeholder credentials - message not sent.")
         return False
@@ -324,8 +320,8 @@ async def send_category_questions(to: str, category_id: str):
         rows = []
         for i, q in enumerate(questions_local):
             title_short = q["text"] if len(q["text"]) <= 24 else q["text"][:21] + "..."
-            desc = q["text"] if len(q["text"]) <= 72 else q["text"][:69] + "..."
-            rows.append({"id": q["id"], "title": title_short, "description": desc})
+            # Importante: NO enviar description para evitar duplicado visual
+            rows.append({"id": q["id"], "title": title_short})
         sections = [{"title": category_title, "rows": rows}]
         payload = build_interactive_list_message(to=to, header=category_title, body="Selecciona tu pregunta:", sections=sections)
 
@@ -564,7 +560,6 @@ async def verify_webhook(request: Request):
     hub_challenge = request.query_params.get("hub.challenge")
     if hub_mode == "subscribe" and hub_token == VERIFY_TOKEN:
         logger.info("Webhook verified")
-        # WhatsApp/Meta exige texto plano del challenge
         return PlainTextResponse(content=hub_challenge or "")
     logger.error("Webhook verification failed")
     raise HTTPException(status_code=403, detail="Forbidden")
