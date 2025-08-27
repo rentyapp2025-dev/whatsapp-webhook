@@ -10,7 +10,7 @@ from typing import Dict, List, Optional, Any
 from datetime import datetime
 
 from fastapi import FastAPI, Request, HTTPException, BackgroundTasks
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 import httpx
 
 # -------------------- Logging --------------------
@@ -29,7 +29,8 @@ APP_SECRET = os.getenv("APP_SECRET", "")  # optional, but recommended
 GRAPH_API_URL = f"https://graph.facebook.com/v18.0/{PHONE_NUMBER_ID}/messages"
 HEADERS = {
     "Authorization": f"Bearer {WHATSAPP_TOKEN}",
-    "Content-Type": "application/json"
+    "Content-Type": "application/json",
+    "Accept": "application/json",
 }
 
 # -------------------- App & State --------------------
@@ -109,6 +110,8 @@ def _normalize_key(s: str) -> str:
     if not s:
         return ""
     s = s.strip()
+    # TRUCO: tratar '_' como espacio para que PER_CAPITAL ≈ "PER CAPITAL"
+    s = s.replace("_", " ")
     s_norm = unicodedata.normalize("NFKD", s)
     s_no_accents = "".join(ch for ch in s_norm if not unicodedata.combining(ch))
     filtered = "".join(ch for ch in s_no_accents if ch.isalnum() or ch.isspace())
@@ -127,7 +130,7 @@ def find_category_key(selection_id: str, allow_fuzzy: bool = False) -> Optional[
     # if it's a generated question id, not a category
     if "::Q" in selection_id:
         return None
-    sel_candidate = selection_id.replace("_", " ").strip()
+    sel_candidate = selection_id.strip()
     norm_candidate = _normalize_key(sel_candidate)
     # try exact by key or normalized equality
     for k in KNOWLEDGE_BASE.keys():
@@ -140,9 +143,8 @@ def find_category_key(selection_id: str, allow_fuzzy: bool = False) -> Optional[
                 return k
     return None
 
-# --- NUEVO: helpers de routing ---
+# --- helpers de routing ---
 def _is_category_id(candidate: str) -> Optional[str]:
-    """Devuelve el nombre de categoría mapeado si 'candidate' parece ser categoría."""
     if not candidate:
         return None
     cid = candidate.strip()
@@ -152,7 +154,6 @@ def _is_category_id(candidate: str) -> Optional[str]:
     return mapped
 
 def _is_question_id(candidate: str) -> bool:
-    """Verdadero si el id apunta a una pregunta conocida."""
     if not candidate:
         return False
     cid = candidate.strip()
@@ -160,12 +161,10 @@ def _is_question_id(candidate: str) -> bool:
         return True
     if "::Q" in cid:
         return True
-    # También admitir que venga el texto de la pregunta normalizado
     norm_in = _normalize_key(cid)
     for data in QUESTION_ID_MAP.values():
         if _normalize_key(data.get("text", "")) == norm_in:
             return True
-    # Y buscar directo en la KB por texto
     for qa_map in KNOWLEDGE_BASE.values():
         for q_text in qa_map.keys():
             if _normalize_key(q_text) == norm_in:
@@ -214,7 +213,7 @@ async def send_message(payload: Dict) -> bool:
         async with httpx.AsyncClient(timeout=30.0) as client:
             r = await client.post(GRAPH_API_URL, headers=HEADERS, json=payload)
             r.raise_for_status()
-            logger.info("Sent message to %s, type=%s", payload.get("to"), payload.get("type"))
+            logger.info("Sent message to %s, type=%s, payload_keys=%s", payload.get("to"), payload.get("type"), list(payload.keys()))
             return True
     except httpx.HTTPStatusError as e:
         logger.error("WhatsApp API returned %s: %s", e.response.status_code, e.response.text)
@@ -224,7 +223,6 @@ async def send_message(payload: Dict) -> bool:
         return False
 
 async def send_typing_and_wait(to: str, seconds: float = 1.5):
-    # Simulate typing by waiting; optionally could send read receipts if API used
     await asyncio.sleep(0.3)
     await asyncio.sleep(seconds)
 
@@ -242,10 +240,10 @@ async def send_welcome_sequence(to: str):
 
 async def send_main_menu(to: str):
     rows = []
-    # add app virtual item first
     rows.append({"id": "APP_MAIN", "title": "App Per Capital", "description": "Registro, suscripción, rescate y más"})
     for k in KNOWLEDGE_BASE.keys():
-        rows.append({"id": _category_to_id(k), "title": k, "description": f"Información sobre {k}"})
+        title_short = k if len(k) <= 24 else k[:21] + "..."
+        rows.append({"id": _category_to_id(k), "title": title_short, "description": f"Información sobre {k}"})
     sections = [{"title": "Categorías disponibles", "rows": rows}]
     payload = build_interactive_list_message(
         to=to,
@@ -257,7 +255,6 @@ async def send_main_menu(to: str):
     user_sessions[to] = {"state": "main_menu", "last_interaction": datetime.now().isoformat()}
 
 async def send_app_submenu(to: str):
-    # collect app-related categories
     app_keys = []
     for k in KNOWLEDGE_BASE.keys():
         kn = _normalize_key(k)
@@ -265,7 +262,7 @@ async def send_app_submenu(to: str):
             app_keys.append(k)
     if not app_keys:
         app_keys = ["REGISTRO", "SUSCRIPCIÓN", "RESCATE", "POSICIÓN"]
-    rows = [{"id": _category_to_id(k), "title": k, "description": f"Consultas sobre {k}"} for k in app_keys if k in KNOWLEDGE_BASE]
+    rows = [{"id": _category_to_id(k), "title": (k if len(k) <= 24 else k[:21] + "..."), "description": f"Consultas sobre {k}"} for k in app_keys if k in KNOWLEDGE_BASE]
     sections = [{"title": "Opciones de la App", "rows": rows}]
     payload = build_interactive_list_message(
         to=to,
@@ -277,9 +274,7 @@ async def send_app_submenu(to: str):
     user_sessions[to] = {"state": "app_submenu", "last_interaction": datetime.now().isoformat()}
 
 async def send_category_questions(to: str, category_id: str):
-    # support an APP_GENERAL virtual id
     if category_id == "APP_MAIN" or category_id == "APP_GENERAL":
-        # combine relevant sections
         combined = {}
         for k in KNOWLEDGE_BASE.keys():
             kn = _normalize_key(k)
@@ -291,7 +286,6 @@ async def send_category_questions(to: str, category_id: str):
     else:
         mapped = find_category_key(category_id, allow_fuzzy=True)
         if not mapped:
-            # try reversing underscores
             mapped = find_category_key(category_id.replace("_", " "), allow_fuzzy=True)
         if not mapped:
             await send_message(build_text_message(to, "Lo siento, no pude encontrar esa categoría."))
@@ -301,7 +295,6 @@ async def send_category_questions(to: str, category_id: str):
         category_title = mapped
         session_key = mapped
 
-    # build question list and populate QUESTION_ID_MAP
     questions_local = []
     for i, (q_text, q_answer) in enumerate(category_map.items()):
         qid = _make_question_id(category_title, i)
@@ -322,16 +315,17 @@ async def send_category_questions(to: str, category_id: str):
         buttons = []
         for i, q in enumerate(questions_local[:3]):
             title = q["text"]
-            if len(title) > 40:
-                title = title[:37] + "..."
-            buttons.append({"type": "reply", "reply": {"id": q["id"], "title": f"{i+1}. {title}"}})
+            # WhatsApp Reply Button title: máx 20 chars
+            if len(title) > 20:
+                title = title[:17] + "..."
+            buttons.append({"type": "reply", "reply": {"id": q["id"], "title": title}})
         payload = build_reply_button_message(to=to, body=f"*{category_title}*\n\nSelecciona tu pregunta:", buttons=buttons)
     else:
         rows = []
         for i, q in enumerate(questions_local):
             title_short = q["text"] if len(q["text"]) <= 24 else q["text"][:21] + "..."
             desc = q["text"] if len(q["text"]) <= 72 else q["text"][:69] + "..."
-            rows.append({"id": q["id"], "title": f"{i+1}. {title_short}", "description": desc})
+            rows.append({"id": q["id"], "title": title_short, "description": desc})
         sections = [{"title": category_title, "rows": rows}]
         payload = build_interactive_list_message(to=to, header=category_title, body="Selecciona tu pregunta:", sections=sections)
 
@@ -339,10 +333,8 @@ async def send_category_questions(to: str, category_id: str):
     user_sessions[to] = {"state": "questions_menu", "category": session_key, "last_interaction": datetime.now().isoformat()}
 
 async def send_answer(to: str, question_id: str):
-    # Resolve qdata from QUESTION_ID_MAP or from KB by normalized matching
     qdata = QUESTION_ID_MAP.get(question_id)
     if not qdata:
-        # try normalized exact match across question texts
         norm_in = _normalize_key(question_id or "")
         for qid, data in QUESTION_ID_MAP.items():
             if _normalize_key(data.get("text", "")) == norm_in:
@@ -351,13 +343,12 @@ async def send_answer(to: str, question_id: str):
     if not qdata:
         for cat_key, qa_map in KNOWLEDGE_BASE.items():
             for q_text, q_answer in qa_map.items():
-                if _normalize_key(q_text) == norm_in:
+                if _normalize_key(q_text) == _normalize_key(question_id or ""):
                     qdata = {"category": cat_key, "text": q_text, "answer": q_answer}
                     break
             if qdata:
                 break
 
-    # fallback: if looks like generated "CAT::Qn"
     if not qdata and "::Q" in (question_id or ""):
         try:
             cat_part = question_id.split("::Q")[0]
@@ -397,7 +388,7 @@ async def send_rating_request(to: str):
     buttons = [
         {"type": "reply", "reply": {"id": "RATE_EXCELLENT", "title": "Excelente"}},
         {"type": "reply", "reply": {"id": "RATE_GOOD", "title": "Bien"}},
-        {"type": "reply", "reply": {"id": "RATE_NEEDS_IMPROVEMENT", "title": "Necesita mejorar"}}
+        {"type": "reply", "reply": {"id": "RATE_NEEDS_IMPROVEMENT", "title": "Mejorar"}}
     ]
     payload = build_reply_button_message(to=to, body="¡Gracias por usar nuestro asistente virtual! 😊\n\n¿Cómo calificarías la ayuda recibida?", buttons=buttons)
     await send_message(payload)
@@ -425,15 +416,12 @@ async def process_text_message(from_number: str, text: str, message_id: Optional
 
 # robust interactive parsing
 def _extract_interactive_candidate(obj: Dict) -> Optional[str]:
-    # Accept dicts from list_reply or button_reply
     if not obj:
         return None
-    # common keys
     for key in ("id", "title", "payload", "name", "value"):
         v = obj.get(key)
         if isinstance(v, str) and v.strip():
             raw = v.strip()
-            # if it's JSON-encoded, try parse
             if raw.startswith("{") and raw.endswith("}"):
                 try:
                     parsed = json.loads(raw)
@@ -442,18 +430,14 @@ def _extract_interactive_candidate(obj: Dict) -> Optional[str]:
                             return str(parsed.get(k2)).strip()
                 except Exception:
                     pass
-            # clean up common separators that clients sometimes append
             raw = raw.replace("%3A%3A", "::")
-            # remove trailing descriptions separated by " - " or " | "
             for sep in [" - ", " | ", "\n", "Información sobre", "Information about"]:
                 if sep in raw:
                     raw = raw.split(sep)[0].strip()
             return raw
     return None
 
-# --- REEMPLAZO: handler de feedback unificado (Sí/No) ---
 async def handle_feedback(from_number: str, reply_id: str):
-    """Maneja botones Sí/No (case-insensitive)."""
     rid = (reply_id or "").strip().lower()
     if rid in ("yes", "sí", "si"):
         response = "¡Gracias por tu confirmación! 😊"
@@ -465,22 +449,14 @@ async def handle_feedback(from_number: str, reply_id: str):
     await asyncio.sleep(1.0)
     await send_main_menu(from_number)
 
-# --- NUEVO: handler de rating unificado ---
 async def handle_rating_buttons(from_number: str, reply_id: str):
-    """
-    Acepta tanto RATE_* (RATE_EXCELLENT/GOOD/NEEDS_IMPROVEMENT)
-    como rating_* (rating_1..rating_5).
-    """
     rid = (reply_id or "").strip()
     rid_upper = rid.upper()
-
-    # Mapa para RATE_*
     rate_map = {
         "RATE_EXCELLENT": "Excelente",
         "RATE_GOOD": "Bien",
         "RATE_NEEDS_IMPROVEMENT": "Necesita mejorar",
     }
-
     if rid_upper in rate_map:
         rating = rate_map[rid_upper]
         user_ratings.append({"user": from_number, "rating": rating, "timestamp": datetime.now().isoformat()})
@@ -495,14 +471,11 @@ async def handle_rating_buttons(from_number: str, reply_id: str):
     await asyncio.sleep(1.0)
     await send_main_menu(from_number)
 
-# --- REEMPLAZO: router robusto para interactivos ---
 async def process_interactive_message(from_number: str, interactive_data: Dict):
-    """Handle interactive messages (buttons and lists) con IDs flexibles."""
     try:
         interactive_type = interactive_data.get("type")
-        logger.info(f"Interactive type: {interactive_type} from {from_number}")
+        logger.info(f"Interactive type: {interactive_type} from {from_number} | payload={interactive_data}")
 
-        # Extraer id y title de forma robusta
         reply_id, reply_title = None, None
         if interactive_type == "list_reply":
             obj = interactive_data.get("list_reply", {}) or {}
@@ -523,36 +496,29 @@ async def process_interactive_message(from_number: str, interactive_data: Dict):
             await send_main_menu(from_number)
             return
 
-        # Normalización básica
         rid = reply_id.strip()
         rid_upper = rid.upper()
 
-        # 1) Sí/No
         if rid_upper in ("YES", "NO", "SÍ", "SI"):
             await handle_feedback(from_number, rid)
             return
 
-        # 2) Rating (RATE_* o rating_*)
         if rid_upper.startswith("RATE_") or rid.lower().startswith("rating_"):
             await handle_rating_buttons(from_number, rid)
             return
 
-        # 3) Categorías (APP_MAIN/APP_GENERAL o nombres de categoría normalizados)
         mapped_cat = _is_category_id(rid)
         if mapped_cat:
-            # APP_MAIN y APP_GENERAL deben abrir un "resumen" de preguntas de App
             if mapped_cat in ("APP_MAIN", "APP_GENERAL"):
                 await send_category_questions(from_number, "APP_GENERAL")
             else:
                 await send_category_questions(from_number, mapped_cat)
             return
 
-        # 4) Preguntas (IDs con ::Q, entries en QUESTION_ID_MAP, o texto de la pregunta)
         if _is_question_id(rid):
             await send_answer(from_number, rid)
             return
 
-        # Fallback: intenta por título si viene algo útil
         if reply_title:
             mapped_cat = _is_category_id(reply_title)
             if mapped_cat:
@@ -565,7 +531,6 @@ async def process_interactive_message(from_number: str, interactive_data: Dict):
                 await send_answer(from_number, reply_title)
                 return
 
-        # Si nada matchea, volvemos al menú
         logger.info(f"Unknown interactive reply id: {rid}")
         await send_main_menu(from_number)
 
@@ -581,7 +546,6 @@ def verify_webhook_signature(payload: bytes, signature: str) -> bool:
     if not signature:
         logger.error("No signature header provided")
         return False
-    # signature header usually like: "sha256=..."
     try:
         sig_value = signature
         if sig_value.startswith("sha256="):
@@ -600,8 +564,8 @@ async def verify_webhook(request: Request):
     hub_challenge = request.query_params.get("hub.challenge")
     if hub_mode == "subscribe" and hub_token == VERIFY_TOKEN:
         logger.info("Webhook verified")
-        # return as plain text integer or string challenge
-        return JSONResponse(content=int(hub_challenge) if hub_challenge and hub_challenge.isdigit() else hub_challenge)
+        # WhatsApp/Meta exige texto plano del challenge
+        return PlainTextResponse(content=hub_challenge or "")
     logger.error("Webhook verification failed")
     raise HTTPException(status_code=403, detail="Forbidden")
 
@@ -610,7 +574,6 @@ async def handle_webhook(request: Request, background_tasks: BackgroundTasks):
     try:
         body = await request.body()
         signature = request.headers.get("X-Hub-Signature-256", "")
-        # verify signature
         if not verify_webhook_signature(body, signature):
             logger.error("Invalid signature")
             raise HTTPException(status_code=403, detail="Invalid signature")
@@ -620,16 +583,12 @@ async def handle_webhook(request: Request, background_tasks: BackgroundTasks):
             for entry in data.get("entry", []):
                 for change in entry.get("changes", []):
                     value = change.get("value", {})
-                    # messages
                     if "messages" in value:
                         for message in value["messages"]:
-                            # schedule processing in background
                             try:
                                 background_tasks.add_task(process_message, message)
                             except Exception:
-                                # fallback to asyncio.create_task
                                 asyncio.create_task(process_message(message))
-                    # statuses (delivery/read) - just log for now
                     if "statuses" in value:
                         for status in value["statuses"]:
                             logger.info("Status update: %s", status)
@@ -643,7 +602,6 @@ async def handle_webhook(request: Request, background_tasks: BackgroundTasks):
 
 # central message processor (invoked from background task)
 async def process_message(message: Dict):
-    """Process a single incoming message (text, interactive, media...)"""
     try:
         from_number = message.get("from")
         message_id = message.get("id")
@@ -667,7 +625,6 @@ async def process_message(message: Dict):
             await send_main_menu(from_number)
             return
 
-        # fallback: unknown types
         logger.info("Unsupported message type: %s", message_type)
         await send_main_menu(from_number)
     except Exception as e:
@@ -701,7 +658,7 @@ async def health_check():
     return {
         "status": "healthy",
         "service": "Per Capital WhatsApp Chatbot",
-        "version": "1.0.0",
+        "version": "1.0.1",
         "active_sessions": len(user_sessions),
         "total_ratings": len(user_ratings),
         "total_questions": total_questions
