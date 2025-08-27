@@ -1,665 +1,827 @@
 import os
+import json
+import time
+import asyncio
+import logging
 import hmac
 import hashlib
-import json
-import re
-from typing import Optional, Any, Dict, List
-import logging
+from typing import Dict, List, Optional, Any
+from datetime import datetime
 
-from fastapi import FastAPI, Request, Response, HTTPException, Query
-from fastapi.responses import PlainTextResponse
+from fastapi import FastAPI, Request, HTTPException, BackgroundTasks
+from fastapi.responses import JSONResponse
 import httpx
 
-# Configurar el logging para ver mensajes detallados
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
-# Obtener variables de entorno. Es crucial que estas estén configuradas correctamente.
-VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "")
-WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN", "")
-PHONE_NUMBER_ID = os.getenv("PHONE_NUMBER_ID", "")
-APP_SECRET = os.getenv("APP_SECRET", "").encode("utf-8") if os.getenv("APP_SECRET") else b""
-GRAPH_API_VERSION = os.getenv("GRAPH_API_VERSION", "v20.0")
-GRAPH_BASE = f"https://graph.facebook.com/{GRAPH_API_VERSION}"
+# Environment variables
+WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN", "your_whatsapp_token_here")
+PHONE_NUMBER_ID = os.getenv("PHONE_NUMBER_ID", "your_phone_number_id_here")
+VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "your_verify_token_here")
+APP_SECRET = os.getenv("APP_SECRET", "your_app_secret_here")
 
-# Verificar que las variables de entorno cruciales estén presentes
-if not all([VERIFY_TOKEN, WHATSAPP_TOKEN, PHONE_NUMBER_ID]):
-    logging.error("Faltan variables de entorno cruciales: VERIFY_TOKEN, WHATSAPP_TOKEN, o PHONE_NUMBER_ID no están configuradas.")
-    logging.info("Asegúrate de configurar estas variables en tu entorno de despliegue (por ejemplo, en Render.com).")
+# WhatsApp API configuration
+GRAPH_API_URL = f"https://graph.facebook.com/v18.0/{PHONE_NUMBER_ID}/messages"
+HEADERS = {
+    "Authorization": f"Bearer {WHATSAPP_TOKEN}",
+    "Content-Type": "application/json"
+}
 
-app = FastAPI(title="WhatsApp Cloud API Webhook (Render/FastAPI)")
+# Initialize FastAPI app
+app = FastAPI(title="Per Capital WhatsApp Chatbot")
 
-# ==================== Documento de Preguntas y Respuestas (base de conocimiento) ====================
-# Estructura categorizada de preguntas y respuestas
-QA_CATEGORIZED = {
-    "1. Inversiones": {
-        "1. ¿Como puedo invertir?": "Primero debe estar registrado y aprobado en la aplicación, luego Ingresa en la opción de negociación >Selecciona suscripción > ingresa el monto que desea invertir > hacer click en suscribir > ingresa método de pago. Una vez pagado se sube el comprobante y en el transcurso del día de hace efectivo al cierre del.dia o al día siguiente hábil.",
-        "2. ¿Que es el Fondo Mutual Abierto?": "El Fondo Mutual Abierto es una cesta llena de diferentes inversiones (acciones, bonos, etc.). Al suscribir estaría comprando acciones y renta fija indirectamente. Puedes ver en que esta diversificado el portafolio dentro de la aplicación.",
-        "3. ¿En que puedo invertir?": "Por ahora puede invertir en el fondo mutual abierto que posee un portafolio diversificado en bolívares en acciones que cotizan en la bolsa de valores y en dólares en papeles comerciales o renta fija.",
-        "4. ¿Que son las Unidades de Inversion (UI)?": "Las Unidades de Inversión (UI) de un fondo mutual abierto son instrumentos que representan una participación proporcional en el patrimonio de dicho fondo. Cada Ul representa una porción del total del fondo, y su valor fluctúa según el rendimiento de los activos que componen el fondo.",
-        "5. ¿Que es el valor de la unidad de inversión (VUI)?": "El Valor de la Unidad de Inversión (VUI) es el precio por unidad que se utiliza para calcular el valor de una inversión. Es el valor de mercado de cada una de las acciones o unidades de inversión que representan una participación en el patrimonio del fondo, y que cambian a diario.",
-        "6. ¿Por que baja el rendimiento?": "El valor de tu inversión está directamente ligado al valor total de los activos del fondo. Si el valor de las inversiones dentro del fondo disminuye, el valor de tu participación también disminuirá. Recuerda que el horizonte de inversión de los Fondos Mutuales es a largo plazo.",
-        "7. ¿QUE HAGO AHORA?": "Una vez suscrito no debe hacer más nada, solo monitorear su inversión, ya que nosotros gestionamos activamente las inversiones. Puede observar en que esta invertido su dinero dentro de la aplicación en la opción de portafolio.",
-        "8. ¿Comisiones?": "Las comisiones son de 3% por suscripción y 5% de administración anualizado.",
-        "9. ¿Desde cuanto puedo invertir?": "Desde un Bolivar.",
-        "10. ¿En cuanto tiempo veo ganancias?": "Si su horizonte de inversión es a corto plazo no le aconsejamos participar en el Fondo Mutual Abierto. Le sugerimos tenga paciencia ya que los rendimientos esperados en los Fondos Mutuales se esperan a largo plazo.",
-        "11. ¿Como compro acciones?": "Próximamente podrá comprar y vender acciones por la aplicación, mientras tanto puede invertir en unidades de inversión en el Fondo Mutual Abierto, cuyo portafolio está compuesto por algunas acciones que están en la bolsa de valores.",
+# Global state management (in production, use Redis or database)
+user_sessions: Dict[str, Dict] = {}
+user_ratings: List[Dict] = []
+
+# ==================== DATA STRUCTURE ====================
+
+KNOWLEDGE_BASE = {
+    "PER_CAPITAL": {
+        "id": "PER_CAPITAL",
+        "title": "Per Capital",
+        "questions": [
+            {"id": "Q1_PC", "text": "¿Que es Per Capital?", "answer": "Es un grupo de empresas del Mercado de Valores Venezolano reguladas por la SUNAVAL."},
+            {"id": "Q2_PC", "text": "¿Quien regula a PER CAPITAL?", "answer": "La SUNAVAL (Superintendencia Nacional de Valores)"},
+            {"id": "Q3_PC", "text": "¿Que es la SUNAVAL?", "answer": "Es quien protege a inversionistas y regula a intermediarios y emisores del Mercado de Valores venezolano"},
+            {"id": "Q4_PC", "text": "¿Que es la Bolsa de Valores de Caracas?", "answer": "Es el lugar donde se compran y venden bonos, acciones y otros instrumentos de manera ordenada a traves de las Casas de Bolsa y esta regulada por la SUNAVAL"},
+            {"id": "Q5_PC", "text": "¿Como invierto?", "answer": "Para invertir en el Fondo Mutual Abierto de PER CAPITAL debes descargar el app, registrate, subir recaudos y colocar tus ordenes de compra."}
+        ]
     },
-    "2. Retiros y Transacciones": {
-        "1. ¿Como hago un retiro?": "Selecciona rescate > ingresa las unidades de inversión a rescatar > luego calcula selección > selecciona rescatar > siga los pasos que indique la app.",
-        "2. ¿Nunca he rescatado?": "Si usted no ha realizado algún rescate, haga caso omiso al correo enviado. Le sugerimos que ingrese en la aplicación y valide sus fondos.",
-        "3. ¿Cuanto puedo retirar?": "Desde una Unidad de Inversion.",
-        "4. ¿Como rescato?": "Selecciona rescate > ingresa las unidades de inversión a rescatar > luego calcula selección > selecciona rescatar > siga los pasos.",
+    "FONDO_MUTUAL": {
+        "id": "FONDO_MUTUAL",
+        "title": "Fondo Mutual Abierto",
+        "questions": [
+            {"id": "Q1_FMA", "text": "¿Que es un Fondo Mutual?", "answer": "Es un instrumento de inversion en grupo donde varias personas ponen dinero en un fondo que es gestionado por expertos y esta disenado para ser diversificado, de bajo riesgo y dirigido a pequenos inversionistas con poca experiencia"},
+            {"id": "Q2_FMA", "text": "¿Que es una Unidad de Inversion?", "answer": "Es una 'porcion' del fondo. Cuando inviertes adquieres unidades que representan tu parte del fondo."},
+            {"id": "Q3_FMA", "text": "¿Que es el VUI?", "answer": "El Valor de la Unidad de Inversion (VUI) es el precio de una Unidad de Inversion. Si el VUI sube tu inversion gana valor. Se calcula diariamente al cierre del dia y depende del comportamiento de las inversiones del fondo."},
+            {"id": "Q4_FMA", "text": "¿Como invierto?", "answer": "Descarga el app para Android y IOS, registrate, sube recaudos, acepta los contratos, espera tu aprobacion y suscribe Unidades de Inversion cuando quieras y cuantas veces desees"},
+            {"id": "Q5_FMA", "text": "¿Cual es el monto minimo de inversion?", "answer": "1 Unidad de Inversion"},
+            {"id": "Q6_FMA", "text": "¿Como gano?", "answer": "Ganas por apreciacion (subida del VUI) o por dividendo (en caso de que sea decretado)"},
+            {"id": "Q7_FMA", "text": "¿En cuanto tiempo gano?", "answer": "Ganas a largo plazo, se recomienda medir resultados trimestralmente"},
+            {"id": "Q8_FMA", "text": "¿Donde consigo mas informacion?", "answer": "En los prospectos y hojas de terminos en www.per-capital.com"}
+        ]
     },
-    "3. Problemas con la Cuenta": {
-        "1. ¿Mi usuario esta en revision que debo hacer?": "Estimado inversionista por favor enviar numero de cedula para apoyarle. (Se verifica que tenga documentación e información completa y se activa).",
-        "2. ¿Como recupero la clave?": "Una vez seleccione la opción de 'Recuperar' y le llegara una clave temporal. Deberá ingresarla como nueva clave de su usuario y luego la aplicación le solicitará una nueva clave que deberá confirmar.",
-        "3. ¿Por que tardan tanto en responder o en aprobar?": "Debido al alto tráfico estamos presentando retrasos en la aprobación de registros, estamos trabajando arduamente para aprobarte y que empieces a invertir. Por favor envianos tu cedula escaneada a este correo.",
-        "4. ¿Aprobado?": "Su usuario ya se encuentra APROBADO. Recuerde que, si realiza alguna modificación de su información, entra en revisión, por ende, debe notificarnos para apoyarle. Si realiza una suscripción antes de las 12 del mediodía la vera reflejada al cierre del día aproximadamente 5-6 de la tarde.",
-        "5. ¿No me llega el mensaje de texto?": "Por favor intente en otra locación, si persiste el error intente en unas horas o el dia de mañana. En caso de no persistir el error, por favor, intente con otro numero de teléfono y luego lo actualizamos en sistema.",
+    "APP_GENERAL": {
+        "id": "APP_GENERAL",
+        "title": "Información General de la App",
+        "questions": [
+            {"id": "Q1_APP_GEN", "text": "¿Puedo comprar acciones y bonos?", "answer": "No, nuestra app es únicamente para invertir en nuestro Fondo Mutual Abierto. Pronto saldrá la nueva versión de nuestra app para negociar"}
+        ]
     },
-    "4. Otros Tipos de Inversión": {
-        "1. ¿Como invierto en dolares?": "Puede invertir en un Papel Comercial, que son instrumentos de deuda a corto plazo (menos de un año) emitidos por las empresas en el mercado de valores.",
-        "2. ¿Como invierto en un papel comercial?": "Debe estar registrado con Per Capital y en la Caja Venezolana con cedula, RIF y constancia de trabajo. Adjunto encontrara el link de la Caja Venezolana, una vez termine el registro nos avisa para apoyarle, el depositante deber ser Per Capital.",
-        "3. ¿Ya me registre en la Caja Venezolana?": "Por ahora no hace falta estar registrado en la caja venezolana para invertir en el fondo mutual abierto. Próximamente podrá comprar y vender acciones por la aplicación, mientras tanto puede invertir en unidades de inversión en el Fondo Mutual Abierto.",
-        "4. ¿Informacion del fondo mutual abierto y acciones?": "Por ahora puede invertir en el fondo mutual abierto, en el cual posee un portafolio diversificado en acciones que cotizan en la bolsa de valores de caracas y en papeles comerciales. El portafolio podrá verlo dentro de la aplicación en detalle.",
+    "APP_REGISTRO": {
+        "id": "APP_REGISTRO",
+        "title": "Registro en la App",
+        "questions": [
+            {"id": "Q1_APP_REG", "text": "¿Como me registro?", "answer": "Descarga el app, completa 100% de los datos, acepta los contratos, sube tus recaudos como Cedula de Identidad y Selfie y espera tu aprobacion."},
+            {"id": "Q2_APP_REG", "text": "¿Cuanto tarda mi aprobacion?", "answer": "De 2 a 5 dias habiles siempre que hayas completado 100% de registro y recaudos"},
+            {"id": "Q3_APP_REG", "text": "¿Que hago si no me aprueban?", "answer": "Revisa que hayas completado 100% del registro y recaudos, sino contactanos en SOPORTE"},
+            {"id": "Q4_APP_REG", "text": "¿Puedo invertir si soy menor de edad?", "answer": "Debes dirigirte a nuestras oficinas y registrarte con tu representante legal"},
+            {"id": "Q5_APP_REG", "text": "¿Puedo modificar alguno de mis datos?", "answer": "Si, pero por exigencia del ley entras nuevamente en revision"},
+            {"id": "Q6_APP_REG", "text": "¿Debo tener cuenta en la Caja Venezolana?", "answer": "No, para invertir en nuestro Fondo Mutual Abierto no es necesaria la cuenta en la CVV"}
+        ]
+    },
+    "APP_SUSCRIPCION": {
+        "id": "APP_SUSCRIPCION",
+        "title": "Suscripción",
+        "questions": [
+            {"id": "Q1_APP_SUS", "text": "¿Como suscribo (compro)?", "answer": "Haz click en Negociacion > Suscripcion > Monto a invertir > Suscribir > Metodo de Pago. Recuerda pagar desde TU cuenta bancaria y subir comprobante de pago"},
+            {"id": "Q2_APP_SUS", "text": "¿Como pago mi suscripcion?", "answer": "Debes pagar desde TU cuenta bancaria via Pago Movil. Y recuerda subir comprobante. IMPORTANTE: no se aceptan pagos de terceros."},
+            {"id": "Q3_APP_SUS", "text": "¿Puede pagar alguien por mi?", "answer": "No, la ley prohibe los pagos de terceros. Siempre debes pagar desde tu cuenta bancaria."},
+            {"id": "Q4_APP_SUS", "text": "¿Como veo mi inversion?", "answer": "En el Home en la seccion Mi Cuenta"},
+            {"id": "Q5_APP_SUS", "text": "¿Cuando veo mi inversion?", "answer": "Al cierre del sistema en dias habiles bancarios despues del cierre de mercado y la publicacion de tasas del Banco Central de Venezuela."},
+            {"id": "Q6_APP_SUS", "text": "¿Cuales son las comisiones?", "answer": "3% flat Suscripcion, 3% flat Rescate y 5% anual Administracion"},
+            {"id": "Q7_APP_SUS", "text": "¿Que hago despues de suscribir?", "answer": "Monitorea tu inversion desde el app"},
+            {"id": "Q8_APP_SUS", "text": "¿Debo invertir siempre el mismo monto?", "answer": "No, puedes invertir el monto que desees"},
+            {"id": "Q9_APP_SUS", "text": "¿Puedo invertir cuando quiera?", "answer": "Si, puedes invertir cuando quieras, las veces que quieras"}
+        ]
+    },
+    "APP_RESCATE": {
+        "id": "APP_RESCATE",
+        "title": "Rescate",
+        "questions": [
+            {"id": "Q1_APP_RES", "text": "¿Como rescato (vendo)?", "answer": "Haz click en Negociacion > Rescate > Unidades a Rescatar > Rescatar. Recuerda se enviaran fondos a TU cuenta bancaria"},
+            {"id": "Q2_APP_RES", "text": "¿Cuando me pagan mis rescates (ventas)?", "answer": "Al proximo dia habil bancario en horario de mercado"},
+            {"id": "Q3_APP_RES", "text": "¿Como veo el saldo de mi inversion?", "answer": "En el Home en la seccion Mi Cuenta"},
+            {"id": "Q4_APP_RES", "text": "¿Cuando veo el saldo de mi inversion?", "answer": "Al cierre del sistema en dias habiles bancarios despues del cierre de mercado y la publicacion de tasas del Banco Central de Venezuela."},
+            {"id": "Q5_APP_RES", "text": "¿Cuando puedo Rescatar?", "answer": "Cuando tu quieras, y se liquida en dias habiles bancarios."},
+            {"id": "Q6_APP_RES", "text": "¿Cuales son las comisiones?", "answer": "3% flat Suscripcion, 3% flat Rescate y 5% anual Administracion"}
+        ]
+    },
+    "APP_POSICION": {
+        "id": "APP_POSICION",
+        "title": "Posición (Saldo)",
+        "questions": [
+            {"id": "Q1_APP_POS", "text": "¿Cuando se actualiza mi posicion (saldo)?", "answer": "Al cierre del sistema en dias habiles bancarios despues del cierre de mercado y la publicacion de tasas del Banco Central de Venezuela."},
+            {"id": "Q2_APP_POS", "text": "¿Por que varia mi posicion (saldo)?", "answer": "Tu saldo y rendimiento sube si suben los precios de las inversiones del fondo, se reciben dividendos o cupones y bajan si estos precios caen."},
+            {"id": "Q3_APP_POS", "text": "¿Donde veo mi historico?", "answer": "En la seccion Historial"},
+            {"id": "Q4_APP_POS", "text": "¿Donde veo reportes?", "answer": "En la seccion Documentos > Reportes > Año > Trimestre"}
+        ]
+    },
+    "RIESGOS": {
+        "id": "RIESGOS",
+        "title": "Riesgos",
+        "questions": [
+            {"id": "Q1_RIE", "text": "¿Cuales son los riesgos al invertir?", "answer": "Todas las inversionbes estan sujetas a riesgos y la perdida de capital es posible. Agunos riesgos son: riesgo de mercado, riesgo pais, riesgo cambiario, riesgo sector, entre otros."}
+        ]
+    },
+    "SOPORTE": {
+        "id": "SOPORTE",
+        "title": "Soporte",
+        "questions": [
+            {"id": "Q1_SOP", "text": "Estoy en revision, que hago?", "answer": "Asegurate de haber completado 100% datos y recaudos y espera tu aprobacion. Si tarda mas de lo habitual contactanos en SOPORTE"},
+            {"id": "Q2_SOP", "text": "No me llega el SMS", "answer": "Asegurate de tener buena senal y de que hayas colocado correctamente un numero telefonico venezolano"},
+            {"id": "Q3_SOP", "text": "No me llega el Correo", "answer": "Asegurate de no dejar espacios al final cuando escribiste tu correo electronico"},
+            {"id": "Q4_SOP", "text": "No logro descargar el App", "answer": "Asegurate de que tu app store este configurada en la region de Venezuela"},
+            {"id": "Q5_SOP", "text": "No me abre el App", "answer": "Asegurate de tener la version actualizada y que tu tienda de apps este configurada en la region de Venezuela"},
+            {"id": "Q6_SOP", "text": "Como recupero mi clave", "answer": "Seleccione Recuperar, te legara una clave temporal para ingresar y luego actualiza tu nueva clave"}
+        ]
     }
 }
 
-# Variable global para almacenar el estado de la conversación (categoría actual)
-# En producción, considera usar Redis o una base de datos para persistencia
-conversation_state: Dict[str, str] = {}
+# ==================== MESSAGE BUILDERS ====================
 
-# ==================== Funciones de la lógica del menú ====================
-
-def get_menu_by_category_index(index: int) -> Optional[Dict[str, str]]:
-    """
-    Obtiene un submenú de preguntas por el índice de la categoría.
-    
-    Args:
-        index: Número de categoría (1-4)
-    
-    Returns:
-        Dict con título y preguntas de la categoría, o None si el índice es inválido
-    """
-    categories = list(QA_CATEGORIZED.keys())
-    if 1 <= index <= len(categories):
-        category_name = categories[index - 1]
-        return {
-            "title": category_name,
-            "questions": QA_CATEGORIZED[category_name]
-        }
-    return None
-
-
-def get_answer_by_full_index(category_index: int, question_index: int) -> str:
-    """
-    Obtiene la respuesta de la base de conocimiento usando el índice de la categoría y la pregunta.
-    
-    Args:
-        category_index: Número de categoría (1-4)
-        question_index: Número de pregunta dentro de la categoría
-    
-    Returns:
-        Respuesta correspondiente o mensaje de error
-    """
-    category_menu = get_menu_by_category_index(category_index)
-    if not category_menu:
-        return "Lo siento, la categoría seleccionada no es válida. Por favor, elige una categoría del menú principal."
-    
-    questions = list(category_menu["questions"].keys())
-    if 1 <= question_index <= len(questions):
-        question = questions[question_index - 1]
-        return category_menu["questions"][question]
-    
-    return "Lo siento, el número de pregunta no es válido. Por favor, elige un número del submenú."
-
-
-def is_back_command(text: str) -> bool:
-    """
-    Verifica si el mensaje es un comando para volver al menú principal.
-    
-    Args:
-        text: Texto del mensaje del usuario
-    
-    Returns:
-        True si es un comando de retorno, False de lo contrario
-    """
-    back_keywords = ["volver", "menu", "menú", "principal", "inicio", "back", "0"]
-    return text.strip().lower() in back_keywords
-
-
-# ==================== Funciones para enviar mensajes ====================
-
-async def send_initial_menu_with_buttons(to_msisdn: str) -> Dict[str, Any]:
-    """
-    Envía un menú interactivo con dos botones para la selección inicial.
-    Esta función se llama siempre que el usuario envía un mensaje que no es una respuesta a botón.
-    
-    Args:
-        to_msisdn: Número de teléfono del destinatario
-    
-    Returns:
-        Respuesta de la API de WhatsApp
-    """
-    payload = {
+def build_text_message(to: str, text: str) -> Dict:
+    """Build a text message payload"""
+    return {
         "messaging_product": "whatsapp",
-        "to": to_msisdn,
-        "type": "interactive",
-        "interactive": {
-            "type": "button",
-            "header": {
-                "type": "text",
-                "text": "🏦 Bienvenido a Per Capital"
-            },
-            "body": {
-                "text": "¡Hola! Gracias por contactarnos. ¿Cómo te gustaría continuar?\n\n• Puedes hablar con nuestro asistente virtual para respuestas inmediatas\n• O contactar directamente con un agente de soporte humano"
-            },
-            "footer": {
-                "text": "Selecciona una opción"
-            },
-            "action": {
-                "buttons": [
-                    {
-                        "type": "reply",
-                        "reply": {
-                            "id": "bot_qa",
-                            "title": "🤖 Asistente Virtual"
-                        }
-                    },
-                    {
-                        "type": "reply",
-                        "reply": {
-                            "id": "human_support",
-                            "title": "👨‍💼 Soporte Humano"
-                        }
-                    }
-                ]
-            }
-        }
+        "to": to,
+        "type": "text",
+        "text": {"body": text}
     }
-    return await _post_messages(payload)
 
-
-async def send_main_menu(to_msisdn: str) -> Dict[str, Any]:
-    """
-    Envía el menú principal de categorías.
-    
-    Args:
-        to_msisdn: Número de teléfono del destinatario
-    
-    Returns:
-        Respuesta de la API de WhatsApp
-    """
-    menu_text = "📋 *Menú Principal - Per Capital*\n\n"
-    menu_text += "Por favor, elige una categoría enviando el número correspondiente:\n\n"
-    
-    for i, category in enumerate(QA_CATEGORIZED.keys(), 1):
-        menu_text += f"*{i}.* {category.split('. ', 1)[1]}\n"
-    
-    menu_text += "\n💡 *Instrucciones:*\n"
-    menu_text += "• Envía solo el número de la categoría (ej. '1')\n"
-    menu_text += "• Escribe 'volver' en cualquier momento para regresar aquí"
-    
-    # Limpiar el estado de la conversación cuando se envía el menú principal
-    if to_msisdn in conversation_state:
-        del conversation_state[to_msisdn]
-        logging.info(f"Estado de conversación limpiado para {to_msisdn}")
-    
-    return await send_text(to_msisdn, menu_text)
-
-
-
-async def send_subcategory_menu(to_msisdn: str, category_index: int) -> Dict[str, Any]:
-    category_menu = get_menu_by_category_index(category_index)
-    if not category_menu:
-        await send_text(to_msisdn, "❌ Categoría no válida. Por favor, envía un número de categoría válido.")
-        await send_main_menu(to_msisdn)
-        return {}
-
-    sections = [
-        {
-            "title": category_menu["title"],
-            "rows": [
-                {
-                    "id": f"q_{category_index}_{i+1}",
-                    "title": re.sub(r'^\d+\.\s*', '', question),
-                    "description": "Haz clic para ver la respuesta"
-                }
-                for i, question in enumerate(category_menu["questions"].keys())
-            ]
-        }
-    ]
-
-    payload = {
+def build_interactive_list_message(to: str, header: str, body: str, sections: List[Dict]) -> Dict:
+    """Build an interactive list message payload"""
+    return {
         "messaging_product": "whatsapp",
-        "to": to_msisdn,
+        "to": to,
         "type": "interactive",
         "interactive": {
             "type": "list",
-            "header": {
-                "type": "text",
-                "text": f"f4da {category_menu['title']}"
-            },
-            "body": {
-                "text": "Selecciona una pregunta para ver la respuesta."
-            },
-            "footer": {
-                "text": "Puedes escribir 'volver' para regresar al menú principal."
-            },
+            "header": {"type": "text", "text": header},
+            "body": {"text": body},
+            "footer": {"text": "Per Capital - Tu asistente virtual"},
             "action": {
-                "button": "Ver preguntas",
+                "button": "Ver opciones",
                 "sections": sections
             }
         }
     }
 
-    conversation_state[to_msisdn] = str(category_index)
-    return await _post_messages(payload)
-async def send_subcategory_menu(to_msisdn: str, category_index: int) -> Dict[str, Any]:
-    """
-    Envía el submenú de preguntas para una categoría específica.
-    
-    Args:
-        to_msisdn: Número de teléfono del destinatario
-        category_index: Índice de la categoría (1-4)
-    
-    Returns:
-        Respuesta de la API de WhatsApp
-    """
-    category_menu = get_menu_by_category_index(category_index)
-    if not category_menu:
-        await send_text(to_msisdn, "❌ Categoría no válida. Por favor, envía un número de categoría válido (1-4).")
-        await send_main_menu(to_msisdn)
-        return {}
-
-    menu_text = f"📂 *{category_menu['title']}*\n\n"
-    menu_text += "Selecciona una pregunta enviando el número correspondiente:\n\n"
-    
-    for i, question in enumerate(category_menu["questions"].keys(), 1):
-        # Limpiar el número del principio de la pregunta si existe
-        clean_question = re.sub(r'^\d+\.\s*', '', question)
-        menu_text += f"*{i}.* {clean_question}\n"
-    
-    menu_text += f"\n💡 *Opciones:*\n"
-    menu_text += "• Envía el número de la pregunta (ej. '1')\n"
-    menu_text += "• Escribe 'volver' para regresar al menú principal"
-    
-    # Guardar el estado de la categoría actual para el usuario
-    conversation_state[to_msisdn] = str(category_index)
-    logging.info(f"Estado guardado para {to_msisdn}: categoría {category_index}")
-    
-    return await send_text(to_msisdn, menu_text)
-
-
-# ==================== Utilidades WhatsApp ====================
-
-def verify_signature(signature: Optional[str], body: bytes) -> bool:
-    """
-    Verifica la firma HMAC-SHA256 de la solicitud de WhatsApp.
-    
-    Args:
-        signature: Firma en el header X-Hub-Signature-256
-        body: Cuerpo de la solicitud en bytes
-    
-    Returns:
-        True si la firma es válida, False de lo contrario
-    """
-    if not APP_SECRET:
-        logging.warning("APP_SECRET no está configurada. La verificación de firma está deshabilitada.")
-        return True
-    
-    if not signature or not signature.startswith("sha256="):
-        logging.error("Firma de la solicitud no válida o ausente.")
-        return False
-    
-    their_signature = signature.split("sha256=")[-1].strip()
-    mac = hmac.new(APP_SECRET, msg=body, digestmod=hashlib.sha256)
-    our_signature = mac.hexdigest()
-    
-    is_valid = hmac.compare_digest(our_signature, their_signature)
-    if not is_valid:
-        logging.error("La firma de la solicitud no coincide. Verifica tu APP_SECRET.")
-    return is_valid
-
-
-async def _post_messages(payload: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Función auxiliar para enviar mensajes a través de la API de WhatsApp.
-    
-    Args:
-        payload: Datos del mensaje a enviar
-    
-    Returns:
-        Respuesta de la API de WhatsApp
-    
-    Raises:
-        HTTPException: Si hay un error en la solicitud HTTP
-    """
-    url = f"{GRAPH_BASE}/{PHONE_NUMBER_ID}/messages"
-    headers = {
-        "Authorization": f"Bearer {WHATSAPP_TOKEN}",
-        "Content-Type": "application/json"
-    }
-    
-    try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            response = await client.post(url, headers=headers, json=payload)
-            response.raise_for_status()
-            logging.info(f"✅ Mensaje enviado con éxito a {payload.get('to')}")
-            return response.json()
-    except httpx.HTTPStatusError as e:
-        logging.error(f"❌ Error HTTP al enviar mensaje. Status: {e.response.status_code}")
-        logging.error(f"Respuesta: {e.response.text}")
-        raise HTTPException(status_code=500, detail=f"Error sending message: {e.response.status_code}")
-    except Exception as e:
-        logging.error(f"❌ Error inesperado al enviar mensaje: {e}")
-        raise HTTPException(status_code=500, detail="Unexpected error sending message")
-
-
-async def send_text(to_msisdn: str, text: str) -> Dict[str, Any]:
-    """
-    Envía un mensaje de texto simple.
-    
-    Args:
-        to_msisdn: Número de teléfono del destinatario
-        text: Contenido del mensaje
-    
-    Returns:
-        Respuesta de la API de WhatsApp
-    """
-    payload = {
+def build_reply_button_message(to: str, body: str, buttons: List[Dict]) -> Dict:
+    """Build a reply button message payload"""
+    return {
         "messaging_product": "whatsapp",
-        "to": to_msisdn,
-        "type": "text",
-        "text": {"body": text}
+        "to": to,
+        "type": "interactive",
+        "interactive": {
+            "type": "button",
+            "body": {"text": body},
+            "footer": {"text": "Per Capital - Tu asistente virtual"},
+            "action": {"buttons": buttons}
+        }
     }
-    return await _post_messages(payload)
 
+def build_read_receipt(message_id: str) -> Dict:
+    """Build a read receipt payload"""
+    return {
+        "messaging_product": "whatsapp",
+        "status": "read",
+        "message_id": message_id
+    }
 
-# ==================== Procesamiento de mensajes ====================
+def build_typing_indicator(to: str) -> Dict:
+    """Build typing indicator payload"""
+    return {
+        "messaging_product": "whatsapp",
+        "to": to,
+        "type": "text",
+        "text": {"body": "typing..."}
+    }
 
-async def process_text_message(from_msisdn: str, message_text: str) -> None:
-    """
-    Procesa los mensajes de texto del usuario según el flujo de conversación.
+# ==================== WHATSAPP API FUNCTIONS ====================
+
+async def send_message(payload: Dict) -> bool:
+    """Send message to WhatsApp API"""
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.post(GRAPH_API_URL, headers=HEADERS, json=payload, timeout=30.0)
+            response.raise_for_status()
+            logger.info(f"Message sent successfully to {payload.get('to')}")
+            return True
+    except httpx.RequestError as e:
+        logger.error(f"Request error sending message: {e}")
+        return False
+    except httpx.HTTPStatusError as e:
+        logger.error(f"HTTP error sending message: {e.response.status_code} - {e.response.text}")
+        return False
+    except Exception as e:
+        logger.error(f"Unexpected error sending message: {e}")
+        return False
+
+async def send_typing_indicator_and_wait(to: str, seconds: float = 2.0):
+    """Send typing indicator and wait"""
+    try:
+        # Mark as read first (simulate natural behavior)
+        await asyncio.sleep(0.5)
+        
+        # Wait for the specified time (simulating typing)
+        await asyncio.sleep(seconds)
+        
+    except Exception as e:
+        logger.error(f"Error in typing indicator: {e}")
+
+async def send_welcome_sequence(to: str):
+    """Send welcome message sequence with typing indicators"""
+    # Welcome message
+    welcome_text = (
+        "¡Hola! 👋 Bienvenido a Per Capital\n\n"
+        "Soy tu asistente virtual y estoy aquí para ayudarte con todas tus consultas "
+        "sobre inversiones, nuestra app y servicios financieros.\n\n"
+        "¿Cómo puedo ayudarte hoy?"
+    )
     
-    Args:
-        from_msisdn: Número de teléfono del remitente
-        message_text: Contenido del mensaje de texto
-    """
-    text_clean = message_text.strip()
-    text_lower = text_clean.lower()
+    # Send typing indicator and wait
+    await send_typing_indicator_and_wait(to, 1.5)
     
-    logging.info(f"📝 Procesando mensaje de texto de {from_msisdn}: '{text_clean}'")
+    # Send welcome message
+    await send_message(build_text_message(to, welcome_text))
     
-    # Verificar si es un comando para volver al menú principal
-    if is_back_command(text_clean):
-        logging.info(f"🔄 Usuario {from_msisdn} solicitó volver al menú principal")
-        await send_main_menu(from_msisdn)
+    # Wait a bit more before sending options
+    await asyncio.sleep(1.0)
+    
+    # Send main menu
+    await send_main_menu(to)
+
+async def send_main_menu(to: str):
+    """Send main interactive menu"""
+    sections = [{
+        "title": "Categorías disponibles",
+        "rows": [
+            {"id": "PER_CAPITAL", "title": "Per Capital", "description": "Información general de la empresa"},
+            {"id": "FONDO_MUTUAL", "title": "Fondo Mutual Abierto", "description": "Todo sobre nuestro fondo de inversión"},
+            {"id": "APP_MAIN", "title": "App Per Capital", "description": "Registro, suscripción, rescate y más"},
+            {"id": "RIESGOS", "title": "Riesgos de Inversión", "description": "Información sobre riesgos al invertir"},
+            {"id": "SOPORTE", "title": "Soporte Técnico", "description": "Ayuda con problemas técnicos"},
+        ]
+    }]
+    
+    payload = build_interactive_list_message(
+        to=to,
+        header="Menú Principal",
+        body="Selecciona la categoría sobre la que necesitas información:",
+        sections=sections
+    )
+    
+    await send_message(payload)
+    
+    # Update user session
+    user_sessions[to] = {
+        "state": "main_menu",
+        "last_interaction": datetime.now().isoformat()
+    }
+
+async def send_app_submenu(to: str):
+    """Send App submenu"""
+    sections = [{
+        "title": "Opciones de la App",
+        "rows": [
+            {"id": "APP_GENERAL", "title": "Información General", "description": "Funciones generales de la app"},
+            {"id": "APP_REGISTRO", "title": "Registro", "description": "Cómo registrarse y aprobación"},
+            {"id": "APP_SUSCRIPCION", "title": "Suscripción", "description": "Cómo invertir y procesos de pago"},
+            {"id": "APP_RESCATE", "title": "Rescate", "description": "Cómo retirar inversiones"},
+            {"id": "APP_POSICION", "title": "Posición y Saldo", "description": "Consultar saldos y reportes"},
+        ]
+    }]
+    
+    payload = build_interactive_list_message(
+        to=to,
+        header="App Per Capital",
+        body="¿Sobre qué aspecto de la app necesitas información?",
+        sections=sections
+    )
+    
+    await send_message(payload)
+    
+    # Update user session
+    user_sessions[to] = {
+        "state": "app_submenu",
+        "last_interaction": datetime.now().isoformat()
+    }
+
+async def send_category_questions(to: str, category_id: str):
+    """Send questions for a specific category"""
+    category = KNOWLEDGE_BASE.get(category_id)
+    if not category:
+        await send_message(build_text_message(to, "Lo siento, no pude encontrar esa categoría."))
+        await send_main_menu(to)
         return
     
-    # Intentar interpretar el mensaje como un número
-    try:
-        choice = int(text_clean)
-        current_category = conversation_state.get(from_msisdn)
-        
-        if current_category is None:
-            # El usuario está en el menú principal - seleccionando categoría
-            logging.info(f"🗂️ Usuario {from_msisdn} seleccionó categoría {choice}")
-            if 1 <= choice <= len(QA_CATEGORIZED):
-                await send_subcategory_menu(from_msisdn, choice)
-            else:
-                await send_text(from_msisdn, f"❌ Opción no válida. Por favor, elige un número entre 1 y {len(QA_CATEGORIZED)}.")
-                await send_main_menu(from_msisdn)
-        else:
-            # El usuario está en un submenú - seleccionando pregunta
-            category_index = int(current_category)
-            logging.info(f"❓ Usuario {from_msisdn} seleccionó pregunta {choice} de categoría {category_index}")
-            
-            response_text = get_answer_by_full_index(category_index, choice)
-            
-            # Enviar la respuesta
-            await send_text(from_msisdn, f"✅ *Respuesta:*\n\n{response_text}")
-            
-            # Pequeña pausa antes de enviar el menú principal
-            import asyncio
-            await asyncio.sleep(1)
-            
-            # Volver al menú principal después de dar la respuesta
-            await send_text(from_msisdn, "📋 ¿Tienes alguna otra consulta?")
-            await send_main_menu(from_msisdn)
-            
-    except (ValueError, IndexError):
-        # El input no es un número válido
-        logging.info(f"⚠️ Entrada no numérica de {from_msisdn}: '{text_clean}'")
-        current_category = conversation_state.get(from_msisdn)
-        
-        if current_category is not None:
-            # Si está en un submenú, reenviar el submenú con instrucciones
-            await send_text(from_msisdn, "⚠️ Por favor, envía solo el número de la pregunta que te interesa.")
-            await send_subcategory_menu(from_msisdn, int(current_category))
-        else:
-            # Si está en el menú principal o no hay estado, enviar menú inicial con botones
-            logging.info(f"🔄 Enviando menú inicial con botones a {from_msisdn}")
-            await send_initial_menu_with_buttons(from_msisdn)
-
-
-async def process_interactive_message(from_msisdn: str, interactive_data: Dict[str, Any]) -> None:
-    """
-    Procesa los mensajes interactivos (respuestas de botones).
+    questions = category["questions"]
     
-    Args:
-        from_msisdn: Número de teléfono del remitente
-        interactive_data: Datos del mensaje interactivo
-    """
-    if interactive_data.get("type") == "button_reply":
+    if len(questions) <= 3:
+        # Use reply buttons for 3 or fewer questions
+        buttons = []
+        for i, q in enumerate(questions[:3]):
+            buttons.append({
+                "type": "reply",
+                "reply": {
+                    "id": q["id"],
+                    "title": f"{i+1}. {q['text'][:20]}..."  # Truncate title if too long
+                }
+            })
+        
+        payload = build_reply_button_message(
+            to=to,
+            body=f"*{category['title']}*\n\nSelecciona tu pregunta:",
+            buttons=buttons
+        )
+    else:
+        # Use interactive list for 4+ questions
+        rows = []
+        for i, q in enumerate(questions):
+            rows.append({
+                "id": q["id"],
+                "title": f"{i+1}. {q['text'][:24]}",  # Truncate title if too long
+                "description": q["text"][:72] + "..." if len(q["text"]) > 72 else q["text"]
+            })
+        
+        sections = [{"title": category["title"], "rows": rows}]
+        
+        payload = build_interactive_list_message(
+            to=to,
+            header=category["title"],
+            body="Selecciona tu pregunta:",
+            sections=sections
+        )
+    
+    await send_message(payload)
+    
+    # Update user session
+    user_sessions[to] = {
+        "state": "questions_menu",
+        "category": category_id,
+        "last_interaction": datetime.now().isoformat()
+    }
+
+async def send_answer(to: str, question_id: str):
+    """Send answer for a specific question"""
+    # Find the question in the knowledge base
+    answer = None
+    for category in KNOWLEDGE_BASE.values():
+        for question in category["questions"]:
+            if question["id"] == question_id:
+                answer = question["answer"]
+                break
+        if answer:
+            break
+    
+    if not answer:
+        await send_message(build_text_message(to, "Lo siento, no pude encontrar la respuesta a esa pregunta."))
+        await send_main_menu(to)
+        return
+    
+    # Send typing indicator
+    await send_typing_indicator_and_wait(to, 1.0)
+    
+    # Send the answer
+    answer_text = f"📝 *Respuesta:*\n\n{answer}"
+    await send_message(build_text_message(to, answer_text))
+    
+    # Wait a moment before asking for more help
+    await asyncio.sleep(1.5)
+    
+    # Ask if they need more help
+    await send_more_help_options(to)
+
+async def send_more_help_options(to: str):
+    """Send options to continue or finish conversation"""
+    buttons = [
+        {
+            "type": "reply",
+            "reply": {"id": "YES", "title": "Sí, por favor"}
+        },
+        {
+            "type": "reply",
+            "reply": {"id": "NO", "title": "No, gracias"}
+        }
+    ]
+    
+    payload = build_reply_button_message(
+        to=to,
+        body="¿Necesitas ayuda con alguna otra cosa?",
+        buttons=buttons
+    )
+    
+    await send_message(payload)
+    
+    # Update user session
+    user_sessions[to] = {
+        "state": "more_help",
+        "last_interaction": datetime.now().isoformat()
+    }
+
+async def send_rating_request(to: str):
+    """Send rating options"""
+    buttons = [
+        {
+            "type": "reply",
+            "reply": {"id": "RATE_EXCELLENT", "title": "Excelente"}
+        },
+        {
+            "type": "reply",
+            "reply": {"id": "RATE_GOOD", "title": "Bien"}
+        },
+        {
+            "type": "reply",
+            "reply": {"id": "RATE_NEEDS_IMPROVEMENT", "title": "Necesita mejorar"}
+        }
+    ]
+    
+    payload = build_reply_button_message(
+        to=to,
+        body="¡Gracias por usar nuestro asistente virtual! 😊\n\n¿Cómo calificarías la ayuda recibida?",
+        buttons=buttons
+    )
+    
+    await send_message(payload)
+    
+    # Update user session
+    user_sessions[to] = {
+        "state": "rating",
+        "last_interaction": datetime.now().isoformat()
+    }
+
+async def handle_rating(to: str, rating_id: str):
+    """Handle user rating"""
+    rating_map = {
+        "RATE_EXCELLENT": "Excelente",
+        "RATE_GOOD": "Bien", 
+        "RATE_NEEDS_IMPROVEMENT": "Necesita mejorar"
+    }
+    
+    rating = rating_map.get(rating_id, "Desconocida")
+    
+    # Store rating
+    user_ratings.append({
+        "user": to,
+        "rating": rating,
+        "timestamp": datetime.now().isoformat()
+    })
+    
+    thank_you_text = (
+        f"¡Gracias por tu calificación: *{rating}*! 🙏\n\n"
+        "Tu opinión es muy importante para nosotros y nos ayuda a mejorar nuestro servicio.\n\n"
+        "Si necesitas más ayuda en el futuro, no dudes en escribirnos. "
+        "¡Que tengas un excelente día! 😊"
+    )
+    
+    await send_message(build_text_message(to, thank_you_text))
+    
+    # Clean up user session
+    if to in user_sessions:
+        del user_sessions[to]
+    
+    logger.info(f"User {to} rated the service as: {rating}")
+
+# ==================== MESSAGE PROCESSING ====================
+
+def is_greeting(text: str) -> bool:
+    """Check if message is a greeting"""
+    greetings = [
+        "hola", "hello", "hi", "buenas", "buenos dias", "buenas tardes", 
+        "buenas noches", "saludos", "que tal", "hey", "inicio"
+    ]
+    return text.lower().strip() in greetings
+
+async def process_text_message(from_number: str, text: str, message_id: str):
+    """Process incoming text message"""
+    logger.info(f"Processing text message from {from_number}: {text}")
+    
+    # Check if it's a greeting
+    if is_greeting(text):
+        await send_welcome_sequence(from_number)
+        return
+    
+    # Check current user state
+    user_state = user_sessions.get(from_number, {}).get("state", "new")
+    
+    if user_state == "new":
+        # New user, send welcome
+        await send_welcome_sequence(from_number)
+    else:
+        # User sent text while in middle of flow, redirect to main menu
+        redirect_text = (
+            "Para brindarte la mejor ayuda, por favor utiliza los botones y opciones del menú. "
+            "Te muestro nuevamente las opciones disponibles:"
+        )
+        await send_message(build_text_message(from_number, redirect_text))
+        await asyncio.sleep(1.0)
+        await send_main_menu(from_number)
+
+async def process_interactive_message(from_number: str, interactive_data: Dict):
+    """Process interactive message (button/list replies)"""
+    message_type = interactive_data.get("type")
+    
+    if message_type == "list_reply":
+        list_reply = interactive_data.get("list_reply", {})
+        selection_id = list_reply.get("id")
+        
+        logger.info(f"List reply from {from_number}: {selection_id}")
+        
+        if selection_id == "APP_MAIN":
+            await send_app_submenu(from_number)
+        elif selection_id in KNOWLEDGE_BASE:
+            await send_category_questions(from_number, selection_id)
+        else:
+            # It might be a question ID
+            await send_answer(from_number, selection_id)
+    
+    elif message_type == "button_reply":
         button_reply = interactive_data.get("button_reply", {})
         button_id = button_reply.get("id")
-        button_title = button_reply.get("title")
         
-        logging.info(f"🔘 Usuario {from_msisdn} presionó botón: {button_id} ({button_title})")
+        logger.info(f"Button reply from {from_number}: {button_id}")
         
-        if button_id == "bot_qa":
-            # Iniciar flujo de Q&A
-            await send_text(from_msisdn, "🤖 *Perfecto!* Has seleccionado el asistente virtual.\n\nAhora te mostraré las categorías disponibles:")
-            await send_main_menu(from_msisdn)
-        elif button_id == "human_support":
-            # Contactar soporte humano
-            await send_text(from_msisdn, 
-                "👨‍💼 *Soporte Humano Activado*\n\n"
-                "Gracias por contactarnos. Un miembro especializado de nuestro equipo de Per Capital "
-                "se pondrá en contacto contigo a la brevedad posible.\n\n"
-                "📞 También puedes llamarnos directamente si tu consulta es urgente.\n\n"
-                "Esta conversación automática ha finalizado. ¡Que tengas un excelente día! 🙋‍♀️")
-            # Limpiar estado de conversación
-            if from_msisdn in conversation_state:
-                del conversation_state[from_msisdn]
-
-    elif interactive_data.get("type") == "list_reply":
-        list_reply = interactive_data.get("list_reply", {})
-        row_id = list_reply.get("id", "")
-        match = re.match(r"q_(\d+)_(\d+)", row_id)
-        if match:
-            category_index = int(match.group(1))
-            question_index = int(match.group(2))
-            response_text = get_answer_by_full_index(category_index, question_index)
-            await send_text(from_msisdn, f"✅ *Respuesta:*{response_text}")
-            import asyncio
-            await asyncio.sleep(1)
-            await send_text(from_msisdn, "f4cb ¿Tienes alguna otra consulta?")
-            await send_main_menu(from_msisdn)
+        if button_id == "YES":
+            await send_main_menu(from_number)
+        elif button_id == "NO":
+            await send_rating_request(from_number)
+        elif button_id.startswith("RATE_"):
+            await handle_rating(from_number, button_id)
         else:
-            await send_text(from_msisdn, "❌ No se pudo interpretar tu selección. Intenta nuevamente.")
-            await send_main_menu(from_msisdn)
-    else:
-        logging.warning(f"⚠️ ID de botón desconocido: {button_id}")
-        await send_initial_menu_with_buttons(from_msisdn)
+            # It might be a question ID
+            await send_answer(from_number, button_id)
 
+# ==================== WEBHOOK VERIFICATION ====================
 
-# ==================== Endpoints de FastAPI ====================
+def verify_webhook_signature(payload: bytes, signature: str) -> bool:
+    """Verify webhook signature"""
+    if not APP_SECRET:
+        logger.warning("APP_SECRET not set, skipping signature verification")
+        return True
+    
+    expected_signature = hmac.new(
+        APP_SECRET.encode('utf-8'),
+        payload,
+        hashlib.sha256
+    ).hexdigest()
+    
+    return hmac.compare_digest(f"sha256={expected_signature}", signature)
+
+# ==================== FASTAPI ENDPOINTS ====================
 
 @app.get("/webhook")
-async def verify_webhook(
-    hub_mode: str | None = Query(None, alias="hub.mode"),
-    hub_challenge: str | None = Query(None, alias="hub.challenge"),
-    hub_verify_token: str | None = Query(None, alias="hub.verify_token"),
-):
-    """
-    Endpoint para la verificación del webhook de WhatsApp.
-    Facebook/Meta llama a este endpoint para verificar la autenticidad del webhook.
-    """
-    logging.info(f"🔍 Verificando webhook - Mode: {hub_mode}, Token: {hub_verify_token}")
+async def verify_webhook(request: Request):
+    """Verify webhook for WhatsApp"""
+    hub_mode = request.query_params.get("hub.mode")
+    hub_verify_token = request.query_params.get("hub.verify_token") 
+    hub_challenge = request.query_params.get("hub.challenge")
     
     if hub_mode == "subscribe" and hub_verify_token == VERIFY_TOKEN:
-        logging.info("✅ Verificación de webhook exitosa")
-        return PlainTextResponse(content=hub_challenge or "", status_code=200)
+        logger.info("Webhook verified successfully")
+        return JSONResponse(content=int(hub_challenge))
     
-    logging.error("❌ Fallo en la verificación del webhook - Token o modo incorrectos")
-    raise HTTPException(status_code=403, detail="Verification token mismatch")
-
+    logger.error("Webhook verification failed")
+    raise HTTPException(status_code=403, detail="Forbidden")
 
 @app.post("/webhook")
-async def receive_webhook(request: Request):
-    """
-    Endpoint principal para recibir mensajes de WhatsApp.
-    Procesa todos los mensajes entrantes y maneja la lógica del chatbot.
-    """
+async def handle_webhook(request: Request, background_tasks: BackgroundTasks):
+    """Handle incoming WhatsApp messages"""
     try:
-        # Leer el cuerpo de la solicitud
-        body_bytes = await request.body()
-        signature = request.headers.get("X-Hub-Signature-256")
+        # Get request body and signature
+        body = await request.body()
+        signature = request.headers.get("X-Hub-Signature-256", "")
         
-        # Verificar la firma de seguridad
-        if not verify_signature(signature, body_bytes):
-            logging.error("❌ Firma de solicitud inválida")
+        # Verify signature
+        if not verify_webhook_signature(body, signature):
+            logger.error("Invalid webhook signature")
             raise HTTPException(status_code=403, detail="Invalid signature")
         
-        # Parsear los datos JSON
-        data = await request.json()
-        logging.info(f"📨 Webhook recibido: {json.dumps(data, indent=2)}")
+        # Parse webhook data
+        data = json.loads(body.decode())
         
-        # Verificar que sea una notificación de WhatsApp Business
-        if data.get("object") != "whatsapp_business_account":
-            logging.info("ℹ️ Notificación ignorada - No es de WhatsApp Business")
-            return Response(status_code=200)
-        
-        # Procesar cada entrada en la notificación
-        for entry in data.get("entry", []):
-            for change in entry.get("changes", []):
-                value = change.get("value", {})
-                
-                # Verificar si hay mensajes
-                messages = value.get("messages")
-                if not messages:
-                    logging.info("ℹ️ No hay mensajes en esta notificación")
-                    continue
-                
-                # Procesar cada mensaje
-                for message in messages:
-                    from_msisdn = message.get("from")
-                    message_type = message.get("type")
-                    message_id = message.get("id")
+        # Process webhook entry
+        if data.get("object") == "whatsapp_business_account":
+            for entry in data.get("entry", []):
+                for change in entry.get("changes", []):
+                    value = change.get("value", {})
                     
-                    logging.info(f"📬 Procesando mensaje {message_id} de {from_msisdn} (tipo: {message_type})")
+                    # Process messages
+                    if "messages" in value:
+                        for message in value["messages"]:
+                            # Process in background to avoid blocking
+                            background_tasks.add_task(process_message, message)
                     
-                    if message_type == "interactive":
-                        # Procesar mensajes interactivos (botones)
-                        interactive_data = message.get("interactive", {})
-                        await process_interactive_message(from_msisdn, interactive_data)
-                        
-                    elif message_type == "text":
-                        # Procesar mensajes de texto
-                        text_data = message.get("text", {})
-                        message_text = text_data.get("body", "")
-                        await process_text_message(from_msisdn, message_text)
-                        
-                    else:
-                        # Para cualquier otro tipo de mensaje (audio, imagen, documento, etc.)
-                        logging.info(f"📎 Mensaje de tipo '{message_type}' recibido - Enviando menú inicial")
-                        await send_initial_menu_with_buttons(from_msisdn)
+                    # Process message status updates
+                    if "statuses" in value:
+                        for status in value["statuses"]:
+                            logger.info(f"Message status update: {status}")
         
-        return Response(status_code=200)
-        
+        return JSONResponse(content={"status": "success"})
+    
     except json.JSONDecodeError:
-        logging.error("❌ Error al decodificar JSON en la solicitud")
+        logger.error("Invalid JSON in webhook")
         raise HTTPException(status_code=400, detail="Invalid JSON")
     except Exception as e:
-        logging.error(f"❌ Error inesperado procesando webhook: {e}", exc_info=True)
-        return Response(status_code=500, content="Internal Server Error")
+        logger.error(f"Error processing webhook: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
+async def process_message(message: Dict):
+    """Process individual message"""
+    try:
+        from_number = message.get("from")
+        message_id = message.get("id")
+        message_type = message.get("type")
+        
+        logger.info(f"Processing message {message_id} from {from_number}, type: {message_type}")
+        
+        if message_type == "text":
+            text_data = message.get("text", {})
+            text_body = text_data.get("body", "")
+            await process_text_message(from_number, text_body, message_id)
+            
+        elif message_type == "interactive":
+            interactive_data = message.get("interactive", {})
+            await process_interactive_message(from_number, interactive_data)
+            
+        elif message_type in ["image", "document", "audio", "video", "sticker"]:
+            # Handle media messages by redirecting to main menu
+            media_response = (
+                "He recibido tu archivo multimedia. "
+                "Para brindarte la mejor ayuda, por favor utiliza el menú de opciones:"
+            )
+            await send_message(build_text_message(from_number, media_response))
+            await asyncio.sleep(1.0)
+            await send_main_menu(from_number)
+            
+        else:
+            # Handle other message types
+            logger.info(f"Unsupported message type: {message_type}")
+            await send_main_menu(from_number)
+            
+    except Exception as e:
+        logger.error(f"Error processing message: {e}")
 
 @app.get("/")
 async def health_check():
-    """
-    Endpoint de salud para verificar que el servicio está funcionando.
-    """
+    """Health check endpoint"""
     return {
-        "status": "ok",
-        "service": "WhatsApp Bot Per Capital",
-        "version": "2.0",
-        "categories": len(QA_CATEGORIZED),
-        "active_conversations": len(conversation_state)
+        "status": "healthy",
+        "service": "Per Capital WhatsApp Chatbot",
+        "version": "1.0.0",
+        "active_sessions": len(user_sessions),
+        "total_ratings": len(user_ratings)
     }
 
-
-@app.get("/status")
-async def status_endpoint():
-    """
-    Endpoint de estado detallado para monitoreo.
-    """
+@app.get("/stats")
+async def get_stats():
+    """Get chatbot statistics"""
+    rating_counts = {}
+    for rating_data in user_ratings:
+        rating = rating_data["rating"]
+        rating_counts[rating] = rating_counts.get(rating, 0) + 1
+    
     return {
-        "service_status": "running",
-        "environment_variables": {
-            "VERIFY_TOKEN": "✅" if VERIFY_TOKEN else "❌",
-            "WHATSAPP_TOKEN": "✅" if WHATSAPP_TOKEN else "❌",
-            "PHONE_NUMBER_ID": "✅" if PHONE_NUMBER_ID else "❌",
-            "APP_SECRET": "✅" if APP_SECRET else "❌"
-        },
-        "qa_categories": list(QA_CATEGORIZED.keys()),
-        "active_conversations": len(conversation_state),
-        "graph_api_version": GRAPH_API_VERSION
+        "active_sessions": len(user_sessions),
+        "total_ratings": len(user_ratings),
+        "rating_breakdown": rating_counts,
+        "knowledge_base_categories": len(KNOWLEDGE_BASE),
+        "total_questions": sum(len(cat["questions"]) for cat in KNOWLEDGE_BASE.values())
     }
 
+@app.post("/send-message")
+async def send_manual_message(request: Request):
+    """Manual message sending endpoint for testing"""
+    try:
+        data = await request.json()
+        to = data.get("to")
+        message = data.get("message")
+        message_type = data.get("type", "text")
+        
+        if not to or not message:
+            raise HTTPException(status_code=400, detail="Missing 'to' or 'message' fields")
+        
+        if message_type == "text":
+            payload = build_text_message(to, message)
+        else:
+            raise HTTPException(status_code=400, detail="Only text messages supported in manual send")
+        
+        success = await send_message(payload)
+        
+        if success:
+            return {"status": "success", "message": "Message sent"}
+        else:
+            raise HTTPException(status_code=500, detail="Failed to send message")
+            
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=400, detail="Invalid JSON")
 
-@app.get("/clear-conversations")
-async def clear_conversations():
-    """
-    Endpoint para limpiar todas las conversaciones activas (útil para testing).
-    """
-    global conversation_state
-    count = len(conversation_state)
-    conversation_state.clear()
-    logging.info(f"🧹 Conversaciones limpiadas: {count}")
-    return {
-        "status": "success",
-        "cleared_conversations": count,
-        "message": f"Se limpiaron {count} conversaciones activas"
+@app.delete("/sessions/{phone_number}")
+async def clear_user_session(phone_number: str):
+    """Clear a specific user's session"""
+    if phone_number in user_sessions:
+        del user_sessions[phone_number]
+        return {"status": "success", "message": f"Session cleared for {phone_number}"}
+    else:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+@app.delete("/sessions")
+async def clear_all_sessions():
+    """Clear all user sessions"""
+    count = len(user_sessions)
+    user_sessions.clear()
+    return {"status": "success", "message": f"Cleared {count} sessions"}
+
+# ==================== STARTUP VALIDATION ====================
+
+@app.on_event("startup")
+async def startup_event():
+    """Validate environment variables on startup"""
+    required_vars = {
+        "WHATSAPP_TOKEN": WHATSAPP_TOKEN,
+        "PHONE_NUMBER_ID": PHONE_NUMBER_ID,
+        "VERIFY_TOKEN": VERIFY_TOKEN
     }
+    
+    missing_vars = []
+    placeholder_vars = []
+    
+    for var_name, var_value in required_vars.items():
+        if not var_value:
+            missing_vars.append(var_name)
+        elif "your_" in var_value.lower() and "_here" in var_value.lower():
+            placeholder_vars.append(var_name)
+    
+    if missing_vars:
+        logger.error(f"Missing required environment variables: {', '.join(missing_vars)}")
+    
+    if placeholder_vars:
+        logger.warning(f"Please update placeholder values for: {', '.join(placeholder_vars)}")
+    
+    logger.info("Per Capital WhatsApp Chatbot started successfully!")
+    logger.info(f"Knowledge base loaded with {len(KNOWLEDGE_BASE)} categories")
+    total_questions = sum(len(cat["questions"]) for cat in KNOWLEDGE_BASE.values())
+    logger.info(f"Total questions available: {total_questions}")
 
+# ==================== ERROR HANDLERS ====================
 
-# ==================== Manejo de errores globales ====================
-
-@app.exception_handler(Exception)
-async def global_exception_handler(request: Request, exc: Exception):
-    """
-    Maneja todas las excepciones no capturadas para evitar que el servicio se caiga.
-    """
-    logging.error(f"❌ Excepción global no manejada: {exc}", exc_info=True)
-    return Response(
-        status_code=500,
-        content=json.dumps({
-            "error": "Internal server error",
-            "message": "Se produjo un error inesperado en el servidor"
-        }),
-        media_type="application/json"
+@app.exception_handler(404)
+async def not_found_handler(request: Request, exc: HTTPException):
+    return JSONResponse(
+        status_code=404,
+        content={"error": "Endpoint not found", "detail": "The requested endpoint does not exist"}
     )
 
+@app.exception_handler(500)
+async def internal_error_handler(request: Request, exc: Exception):
+    logger.error(f"Internal server error: {exc}")
+    return JSONResponse(
+        status_code=500,
+        content={"error": "Internal server error", "detail": "An unexpected error occurred"}
+    )
 
-# ==================== Mensaje de inicio del servidor ====================
+# ==================== UTILITY FUNCTIONS ====================
+
+def get_question_by_id(question_id: str) -> Optional[Dict]:
+    """Get question data by ID"""
+    for category in KNOWLEDGE_BASE.values():
+        for question in category["questions"]:
+            if question["id"] == question_id:
+                return question
+    return None
+
+def get_user_session_info(phone_number: str) -> Dict:
+    """Get user session information"""
+    session = user_sessions.get(phone_number, {})
+    return {
+        "exists": phone_number in user_sessions,
+        "state": session.get("state", "new"),
+        "last_interaction": session.get("last_interaction", "never"),
+        "category": session.get("category", None)
+    }
+
+# ==================== MAIN EXECUTION ====================
 
 if __name__ == "__main__":
-    print("🚀 Iniciando WhatsApp Bot Per Capital...")
-    print(f"📊 Categorías de Q&A cargadas: {len(QA_CATEGORIZED)}")
-    for category in QA_CATEGORIZED.keys():
-        questions_count = len(QA_CATEGORIZED[category])
-        print(f"   • {category}: {questions_count} preguntas")
-    print("✅ Bot listo para recibir mensajes!")
+    import uvicorn
+    
+    print("Starting Per Capital WhatsApp Chatbot...")
+    print(f"Environment check:")
+    print(f"  WHATSAPP_TOKEN: {'✓' if WHATSAPP_TOKEN and 'your_' not in WHATSAPP_TOKEN.lower() else '✗'}")
+    print(f"  PHONE_NUMBER_ID: {'✓' if PHONE_NUMBER_ID and 'your_' not in PHONE_NUMBER_ID.lower() else '✗'}")
+    print(f"  VERIFY_TOKEN: {'✓' if VERIFY_TOKEN and 'your_' not in VERIFY_TOKEN.lower() else '✗'}")
+    print(f"  APP_SECRET: {'✓' if APP_SECRET and 'your_' not in APP_SECRET.lower() else '✗ (optional)'}")
+    
+    uvicorn.run(
+        "main:app",  # Assuming this file is named main.py
+        host="0.0.0.0",
+        port=8000,
+        reload=True,
+        log_level="info"
+    )
