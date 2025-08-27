@@ -1,6 +1,5 @@
 import os
 import json
-import time
 import re
 import asyncio
 import logging
@@ -581,80 +580,140 @@ async def process_text_message(from_number: str, text: str, message_id: str):
         await send_main_menu(from_number)
 
 async def process_interactive_message(from_number: str, interactive_data: Dict):
-    """Process interactive message (button/list replies) with robust extraction"""
-    message_type = interactive_data.get("type")
-    logger.info(f"Processing interactive from {from_number}: type={message_type}, data={interactive_data}")
+    """Robust handler for interactive messages (list_reply and button_reply)."""
+    # Defensive: interactive_data sometimes lacks "type", so derive it.
+    logger.info(f"[interactive] Raw interactive_data from {from_number}: {interactive_data}")
 
-    def _extract_candidate(d: Dict) -> Optional[str]:
-        return (
-            d.get("id")
-            or d.get("title")
-            or d.get("payload")
-            or d.get("name")
+    # Rozar keys to infer type:
+    msg_type = interactive_data.get("type")
+    if not msg_type:
+        if "list_reply" in interactive_data:
+            msg_type = "list_reply"
+        elif "button_reply" in interactive_data:
+            msg_type = "button_reply"
+        else:
+            # Sometimes the structure is nested: interactive: {"type":"...","list_reply":{...}}
+            # fall back to keys present:
+            keys = set(interactive_data.keys())
+            if "list_reply" in keys or "sections" in keys:
+                msg_type = "list_reply"
+            elif "button_reply" in keys or "buttons" in keys:
+                msg_type = "button_reply"
+
+    # Helper extractor: try id, title, payload, name. Clean known suffixes and JSON-strings.
+    def _extract_candidate(obj: Dict) -> Optional[str]:
+        raw = (
+            (obj.get("id") if isinstance(obj.get("id"), str) else None)
+            or (obj.get("title") if isinstance(obj.get("title"), str) else None)
+            or (obj.get("payload") if isinstance(obj.get("payload"), str) else None)
+            or (obj.get("name") if isinstance(obj.get("name"), str) else None)
+            or ""
         )
+        raw = raw.strip()
 
-    # Helper: strip numeric prefixes like "1. " or "2) "
-    def _strip_list_number_prefix(s: str) -> str:
-        if not s:
-            return s
-        return re.sub(r"^\s*\d+\s*[\.\-\)\:]?\s*", "", s)
+        # If looks like JSON string, try parse and extract common fields
+        if raw.startswith("{") and raw.endswith("}"):
+            try:
+                parsed = json.loads(raw)
+                if isinstance(parsed, dict):
+                    for k in ("id", "title", "payload", "name", "value"):
+                        if parsed.get(k):
+                            raw = str(parsed.get(k)).strip()
+                            break
+            except Exception:
+                # ignore parse errors, keep raw
+                pass
 
-    # For debug: show current session and question map sizes
-    logger.debug(f"user_sessions.get({from_number}) = {user_sessions.get(from_number)}")
-    logger.debug(f"QUESTION_ID_MAP keys sample (first 10): {list(QUESTION_ID_MAP.keys())[:10]}")
+        # Remove common UI suffixes that WhatsApp client shows in previews
+        for sep in ["Información sobre", "Information about", "\n", " - ", " | "]:
+            if sep in raw:
+                raw = raw.split(sep)[0].strip()
 
-    # LIST REPLY
-    if message_type == "list_reply":
+        # If there is a colon-encoded separator or URL-encoded parts, decode naive
+        raw = raw.replace("%3A%3A", "::")
+
+        # Truncate and return
+        return raw or None
+
+    # small helper: remove "1. " prefix
+    def _strip_index_prefix(s: str) -> str:
+        return re.sub(r'^\s*\d+\s*[\.\-\)\:]?\s*', '', s or '')
+
+    # show useful debug state
+    logger.debug(f"user_sessions[{from_number}] = {user_sessions.get(from_number)}")
+    logger.debug(f"QUESTION_ID_MAP keys (sample) = {list(QUESTION_ID_MAP.keys())[:20]}")
+
+    # Process list_reply
+    if msg_type == "list_reply":
         list_reply = interactive_data.get("list_reply", {}) or {}
-        selection_id = _extract_candidate(list_reply)
-        logger.info(f"List reply from {from_number}: raw list_reply={list_reply}, extracted selection_id={selection_id}")
+        selection_raw = _extract_candidate(list_reply)
+        logger.info(f"[list_reply] extracted selection_raw='{selection_raw}'")
 
-        sel = (selection_id or "").strip()
-        # 1) Si viene un question-id explícito -> responder
+        if not selection_raw:
+            await send_message(build_text_message(from_number, "No pude leer tu selección. Intentemos de nuevo."))
+            await send_main_menu(from_number)
+            return
+
+        # 1) If it's explicitly a generated question id or contains ::Q -> answer directly
+        sel = selection_raw
         if sel in QUESTION_ID_MAP or "::Q" in sel:
             await send_answer(from_number, sel)
             return
 
-        # 2) Caso APP_MAIN
+        # 2) Special app main
         if sel == "APP_MAIN":
             await send_app_submenu(from_number)
             return
 
-        # 3) Intentar mapear a categoría (estricto)
-        mapped_key = find_category_key(sel, allow_fuzzy=False) if sel else None
-        if mapped_key:
-            await send_category_questions(from_number, mapped_key)
+        # 3) Try strict category mapping
+        mapped = find_category_key(sel, allow_fuzzy=False)
+        if mapped:
+            await send_category_questions(from_number, mapped)
             return
 
-        # 4) Si viene un "title" con numero, intentar normalizar y buscar por índice en la sesión
-        stripped = _strip_list_number_prefix(sel)
+        # 4) If the selection looks like "1. ..." attempt index resolution from session category
+        stripped = _strip_index_prefix(selection_raw)
         session_cat = user_sessions.get(from_number, {}).get("category")
-        if stripped and session_cat and session_cat in KNOWLEDGE_BASE:
-            # buscar por índice si title era "n. ..."
-            m = re.match(r"^\s*(\d+)", sel or "")
+        if session_cat and session_cat in KNOWLEDGE_BASE:
+            m = re.match(r"^\s*(\d+)", selection_raw or "")
             if m:
                 idx = int(m.group(1)) - 1
                 qlist = list(KNOWLEDGE_BASE[session_cat].items())
                 if 0 <= idx < len(qlist):
                     q_text, q_answer = qlist[idx]
-                    # crear y guardar en QUESTION_ID_MAP para robustez
                     gen_id = _make_question_id(session_cat, idx)
                     QUESTION_ID_MAP.setdefault(gen_id, {"category": session_cat, "text": q_text, "answer": q_answer})
                     await send_answer(from_number, gen_id)
                     return
 
-        # 5) último recurso: intenta buscar por texto completa (puede fallar si el title está truncado)
+            # fallback: try to match by (normalized) prefix inside that category
+            norm_sel = _normalize_key(stripped)
+            for q_text, q_answer in KNOWLEDGE_BASE[session_cat].items():
+                if _normalize_key(q_text).startswith(norm_sel) or norm_sel.startswith(_normalize_key(q_text)[:max(5, len(_normalize_key(q_text))//2)]):
+                    # found candidate
+                    gen_id = _make_question_id(session_cat, list(KNOWLEDGE_BASE[session_cat].keys()).index(q_text))
+                    QUESTION_ID_MAP.setdefault(gen_id, {"category": session_cat, "text": q_text, "answer": q_answer})
+                    await send_answer(from_number, gen_id)
+                    return
+
+        # 5) Last-resort: try to find exact question by normalized text across all KB
         await send_answer(from_number, sel)
         return
 
-    # BUTTON REPLY
-    elif message_type == "button_reply":
+    # Process button_reply
+    elif msg_type == "button_reply":
         button_reply = interactive_data.get("button_reply", {}) or {}
-        button_id = _extract_candidate(button_reply)
-        logger.info(f"Button reply from {from_number}: raw button_reply={button_reply}, extracted button_id={button_id}")
+        button_raw = _extract_candidate(button_reply)
+        logger.info(f"[button_reply] extracted button_raw='{button_raw}'")
 
-        bid = (button_id or "").strip()
-        # 1) botones de confirmación / rating
+        if not button_raw:
+            await send_message(build_text_message(from_number, "No pude leer tu selección. Intentemos de nuevo."))
+            await send_main_menu(from_number)
+            return
+
+        bid = button_raw
+
+        # quick button flows
         if bid == "YES":
             await send_main_menu(from_number)
             return
@@ -665,16 +724,15 @@ async def process_interactive_message(from_number: str, interactive_data: Dict):
             await handle_rating(from_number, bid)
             return
 
-        # 2) Si es un question id o contiene pattern -> responder
+        # If looks like question id
         if bid in QUESTION_ID_MAP or "::Q" in bid:
             await send_answer(from_number, bid)
             return
 
-        # 3) Si por alguna razón el 'title' fue enviado en id (ej: "1. ¿Qué es...?"), intentar remover prefijo numérico
-        stripped_bid = _strip_list_number_prefix(bid)
+        # Try index resolution if it's "1. Title"
+        stripped = _strip_index_prefix(bid)
         session_cat = user_sessions.get(from_number, {}).get("category")
-        if stripped_bid and session_cat and session_cat in KNOWLEDGE_BASE:
-            # intentar resolver por prefijo/indice similar al caso list_reply
+        if session_cat and session_cat in KNOWLEDGE_BASE:
             m = re.match(r"^\s*(\d+)", bid or "")
             if m:
                 idx = int(m.group(1)) - 1
@@ -686,21 +744,31 @@ async def process_interactive_message(from_number: str, interactive_data: Dict):
                     await send_answer(from_number, gen_id)
                     return
 
-        # 4) Intentar mapear a categoría (por si usaste botones con ids de categoría)
-        mapped_key = find_category_key(bid, allow_fuzzy=False) if bid else None
-        if mapped_key:
-            await send_category_questions(from_number, mapped_key)
+            # fallback: prefix match in session category
+            norm_bid = _normalize_key(stripped)
+            for q_text, q_answer in KNOWLEDGE_BASE[session_cat].items():
+                if _normalize_key(q_text).startswith(norm_bid) or norm_bid.startswith(_normalize_key(q_text)[:max(5, len(_normalize_key(q_text))//2)]):
+                    gen_id = _make_question_id(session_cat, list(KNOWLEDGE_BASE[session_cat].keys()).index(q_text))
+                    QUESTION_ID_MAP.setdefault(gen_id, {"category": session_cat, "text": q_text, "answer": q_answer})
+                    await send_answer(from_number, gen_id)
+                    return
+
+        # Try strict category mapping (in case buttons were categories)
+        mapped = find_category_key(bid, allow_fuzzy=False)
+        if mapped:
+            await send_category_questions(from_number, mapped)
             return
 
-        # 5) fallback: intentar responder por texto (title)
+        # fallback
         await send_answer(from_number, bid)
         return
 
+    # Unknown interactive shape
     else:
-        logger.warning(f"Unknown interactive message type from {from_number}: {message_type}")
+        logger.warning(f"[interactive] Unknown interactive shape for {from_number}. interactive_data keys: {list(interactive_data.keys())}")
+        # As recovery, resend main menu
         await send_main_menu(from_number)
-
-
+        return
 
 # ==================== WEBHOOK VERIFICATION ====================
 
