@@ -1,6 +1,7 @@
 import os
 import json
 import time
+import re
 import asyncio
 import logging
 import hmac
@@ -582,38 +583,123 @@ async def process_text_message(from_number: str, text: str, message_id: str):
 async def process_interactive_message(from_number: str, interactive_data: Dict):
     """Process interactive message (button/list replies) with robust extraction"""
     message_type = interactive_data.get("type")
-    if message_type == "list_reply":
-        list_reply = interactive_data.get("list_reply", {}) or {}
-        selection_id = (
-            list_reply.get("id")
-            or list_reply.get("title")
-            or list_reply.get("payload")
-            or list_reply.get("name")
-        )
-        logger.info(
-            f"List reply from {from_number}: raw list_reply={list_reply}, extracted selection_id={selection_id}"
+    logger.info(f"Processing interactive from {from_number}: type={message_type}, data={interactive_data}")
+
+    def _extract_candidate(d: Dict) -> Optional[str]:
+        return (
+            d.get("id")
+            or d.get("title")
+            or d.get("payload")
+            or d.get("name")
         )
 
-        # 1) ¿Es claramente una pregunta?
-        sel = (selection_id or "")
+    # Helper: strip numeric prefixes like "1. " or "2) "
+    def _strip_list_number_prefix(s: str) -> str:
+        if not s:
+            return s
+        return re.sub(r"^\s*\d+\s*[\.\-\)\:]?\s*", "", s)
+
+    # For debug: show current session and question map sizes
+    logger.debug(f"user_sessions.get({from_number}) = {user_sessions.get(from_number)}")
+    logger.debug(f"QUESTION_ID_MAP keys sample (first 10): {list(QUESTION_ID_MAP.keys())[:10]}")
+
+    # LIST REPLY
+    if message_type == "list_reply":
+        list_reply = interactive_data.get("list_reply", {}) or {}
+        selection_id = _extract_candidate(list_reply)
+        logger.info(f"List reply from {from_number}: raw list_reply={list_reply}, extracted selection_id={selection_id}")
+
+        sel = (selection_id or "").strip()
+        # 1) Si viene un question-id explícito -> responder
         if sel in QUESTION_ID_MAP or "::Q" in sel:
             await send_answer(from_number, sel)
             return
 
-        # 2) Caso especial App
-        if selection_id == "APP_MAIN":
+        # 2) Caso APP_MAIN
+        if sel == "APP_MAIN":
             await send_app_submenu(from_number)
             return
 
-        # 3) Intentar mapear a categoría (modo estricto, sin heurística)
-        mapped_key = find_category_key(selection_id, allow_fuzzy=False) if selection_id else None
+        # 3) Intentar mapear a categoría (estricto)
+        mapped_key = find_category_key(sel, allow_fuzzy=False) if sel else None
         if mapped_key:
             await send_category_questions(from_number, mapped_key)
             return
 
-        # 4) Último recurso: intenta responder por texto (title)
-        await send_answer(from_number, selection_id)
+        # 4) Si viene un "title" con numero, intentar normalizar y buscar por índice en la sesión
+        stripped = _strip_list_number_prefix(sel)
+        session_cat = user_sessions.get(from_number, {}).get("category")
+        if stripped and session_cat and session_cat in KNOWLEDGE_BASE:
+            # buscar por índice si title era "n. ..."
+            m = re.match(r"^\s*(\d+)", sel or "")
+            if m:
+                idx = int(m.group(1)) - 1
+                qlist = list(KNOWLEDGE_BASE[session_cat].items())
+                if 0 <= idx < len(qlist):
+                    q_text, q_answer = qlist[idx]
+                    # crear y guardar en QUESTION_ID_MAP para robustez
+                    gen_id = _make_question_id(session_cat, idx)
+                    QUESTION_ID_MAP.setdefault(gen_id, {"category": session_cat, "text": q_text, "answer": q_answer})
+                    await send_answer(from_number, gen_id)
+                    return
+
+        # 5) último recurso: intenta buscar por texto completa (puede fallar si el title está truncado)
+        await send_answer(from_number, sel)
         return
+
+    # BUTTON REPLY
+    elif message_type == "button_reply":
+        button_reply = interactive_data.get("button_reply", {}) or {}
+        button_id = _extract_candidate(button_reply)
+        logger.info(f"Button reply from {from_number}: raw button_reply={button_reply}, extracted button_id={button_id}")
+
+        bid = (button_id or "").strip()
+        # 1) botones de confirmación / rating
+        if bid == "YES":
+            await send_main_menu(from_number)
+            return
+        if bid == "NO":
+            await send_rating_request(from_number)
+            return
+        if bid and bid.startswith("RATE_"):
+            await handle_rating(from_number, bid)
+            return
+
+        # 2) Si es un question id o contiene pattern -> responder
+        if bid in QUESTION_ID_MAP or "::Q" in bid:
+            await send_answer(from_number, bid)
+            return
+
+        # 3) Si por alguna razón el 'title' fue enviado en id (ej: "1. ¿Qué es...?"), intentar remover prefijo numérico
+        stripped_bid = _strip_list_number_prefix(bid)
+        session_cat = user_sessions.get(from_number, {}).get("category")
+        if stripped_bid and session_cat and session_cat in KNOWLEDGE_BASE:
+            # intentar resolver por prefijo/indice similar al caso list_reply
+            m = re.match(r"^\s*(\d+)", bid or "")
+            if m:
+                idx = int(m.group(1)) - 1
+                qlist = list(KNOWLEDGE_BASE[session_cat].items())
+                if 0 <= idx < len(qlist):
+                    q_text, q_answer = qlist[idx]
+                    gen_id = _make_question_id(session_cat, idx)
+                    QUESTION_ID_MAP.setdefault(gen_id, {"category": session_cat, "text": q_text, "answer": q_answer})
+                    await send_answer(from_number, gen_id)
+                    return
+
+        # 4) Intentar mapear a categoría (por si usaste botones con ids de categoría)
+        mapped_key = find_category_key(bid, allow_fuzzy=False) if bid else None
+        if mapped_key:
+            await send_category_questions(from_number, mapped_key)
+            return
+
+        # 5) fallback: intentar responder por texto (title)
+        await send_answer(from_number, bid)
+        return
+
+    else:
+        logger.warning(f"Unknown interactive message type from {from_number}: {message_type}")
+        await send_main_menu(from_number)
+
 
 
 # ==================== WEBHOOK VERIFICATION ====================
