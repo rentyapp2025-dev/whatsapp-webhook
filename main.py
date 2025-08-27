@@ -15,7 +15,7 @@ import httpx
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s - %(filename)s:%(lineno)d'
 )
 logger = logging.getLogger(__name__)
 
@@ -38,6 +38,41 @@ app = FastAPI(title="Per Capital WhatsApp Chatbot")
 # Global state management (in production, use Redis or database)
 user_sessions: Dict[str, Dict] = {}
 user_ratings: List[Dict] = []
+
+# ==================== CIRCUIT BREAKER ====================
+
+class CircuitBreaker:
+    def __init__(self, max_failures=5, reset_timeout=60):
+        self.failures = 0
+        self.max_failures = max_failures
+        self.reset_timeout = reset_timeout
+        self.last_failure_time = None
+        self.is_open = False
+    
+    async def execute(self, coro):
+        if self.is_open:
+            if time.time() - self.last_failure_time > self.reset_timeout:
+                self.is_open = False
+                self.failures = 0
+                logger.info("Circuit breaker reset")
+            else:
+                logger.warning("Circuit breaker is open, blocking execution")
+                raise Exception("Circuit breaker is open")
+        
+        try:
+            result = await coro
+            self.failures = 0
+            return result
+        except Exception as e:
+            self.failures += 1
+            self.last_failure_time = time.time()
+            if self.failures >= self.max_failures:
+                self.is_open = True
+                logger.error(f"Circuit breaker opened after {self.failures} failures")
+            raise e
+
+# Instancia global del circuit breaker
+message_circuit_breaker = CircuitBreaker()
 
 # ==================== DATA STRUCTURE ====================
 
@@ -209,11 +244,19 @@ def build_typing_indicator(to: str) -> Dict:
 async def send_message(payload: Dict) -> bool:
     """Send message to WhatsApp API"""
     try:
-        async with httpx.AsyncClient() as client:
-            response = await client.post(GRAPH_API_URL, headers=HEADERS, json=payload, timeout=30.0)
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(
+                GRAPH_API_URL, 
+                headers=HEADERS, 
+                json=payload, 
+                timeout=30.0
+            )
             response.raise_for_status()
             logger.info(f"Message sent successfully to {payload.get('to')}")
             return True
+    except httpx.TimeoutException:
+        logger.error(f"Timeout sending message to {payload.get('to')}")
+        return False
     except httpx.RequestError as e:
         logger.error(f"Request error sending message: {e}")
         return False
@@ -224,17 +267,75 @@ async def send_message(payload: Dict) -> bool:
         logger.error(f"Unexpected error sending message: {e}")
         return False
 
+async def send_message_with_retry(payload: Dict, max_retries: int = 3) -> bool:
+    """Send message with retry mechanism"""
+    for attempt in range(max_retries):
+        try:
+            success = await send_message(payload)
+            if success:
+                return True
+            else:
+                logger.warning(f"Attempt {attempt + 1} failed for {payload.get('to')}")
+                await asyncio.sleep(2 ** attempt)  # Exponential backoff
+        except Exception as e:
+            logger.error(f"Error in attempt {attempt + 1}: {e}")
+            await asyncio.sleep(2 ** attempt)
+    
+    logger.error(f"All {max_retries} attempts failed for {payload.get('to')}")
+    return False
+
 async def send_typing_indicator_and_wait(to: str, seconds: float = 2.0):
-    """Send typing indicator and wait"""
+    """Send typing indicator and wait with better implementation"""
     try:
-        # Mark as read first (simulate natural behavior)
-        await asyncio.sleep(0.5)
+        # WhatsApp tiene endpoints específicos para typing indicators
+        typing_payload = {
+            "messaging_product": "whatsapp",
+            "recipient_type": "individual",
+            "to": to,
+            "type": "typing",
+            "typing": True
+        }
         
-        # Wait for the specified time (simulating typing)
+        # Enviar typing indicator real (si la API lo soporta)
+        async with httpx.AsyncClient() as client:
+            await client.post(
+                f"https://graph.facebook.com/v18.0/{PHONE_NUMBER_ID}/messages",
+                headers=HEADERS,
+                json=typing_payload,
+                timeout=10.0
+            )
+        
+        # Esperar el tiempo especificado
         await asyncio.sleep(seconds)
         
+        # Detener typing indicator
+        typing_payload["typing"] = False
+        async with httpx.AsyncClient() as client:
+            await client.post(
+                f"https://graph.facebook.com/v18.0/{PHONE_NUMBER_ID}/messages",
+                headers=HEADERS,
+                json=typing_payload,
+                timeout=10.0
+            )
+            
     except Exception as e:
         logger.error(f"Error in typing indicator: {e}")
+        # Fallback: simplemente esperar
+        await asyncio.sleep(seconds)
+
+async def cleanup_old_sessions():
+    """Clean up sessions older than 1 hour"""
+    current_time = datetime.now()
+    expired_sessions = []
+    
+    for phone_number, session in user_sessions.items():
+        last_interaction = datetime.fromisoformat(session["last_interaction"])
+        if (current_time - last_interaction).total_seconds() > 3600:  # 1 hour
+            expired_sessions.append(phone_number)
+    
+    for phone_number in expired_sessions:
+        del user_sessions[phone_number]
+        logger.info(f"Cleaned up expired session for {phone_number}")
 
 async def send_welcome_sequence(to: str):
     """Send welcome message sequence with typing indicators"""
@@ -243,14 +344,14 @@ async def send_welcome_sequence(to: str):
         "¡Hola! 👋 Bienvenido a Per Capital\n\n"
         "Soy tu asistente virtual y estoy aquí para ayudarte con todas tus consultas "
         "sobre inversiones, nuestra app y servicios financieros.\n\n"
-        "¿Cómo puedo ayudarte hoy?"
+        "¿Cómo puedu ayudarte hoy?"
     )
     
     # Send typing indicator and wait
     await send_typing_indicator_and_wait(to, 1.5)
     
     # Send welcome message
-    await send_message(build_text_message(to, welcome_text))
+    await send_message_with_retry(build_text_message(to, welcome_text))
     
     # Wait a bit more before sending options
     await asyncio.sleep(1.0)
@@ -278,7 +379,7 @@ async def send_main_menu(to: str):
         sections=sections
     )
     
-    await send_message(payload)
+    await send_message_with_retry(payload)
     
     # Update user session
     user_sessions[to] = {
@@ -306,7 +407,7 @@ async def send_app_submenu(to: str):
         sections=sections
     )
     
-    await send_message(payload)
+    await send_message_with_retry(payload)
     
     # Update user session
     user_sessions[to] = {
@@ -318,7 +419,7 @@ async def send_category_questions(to: str, category_id: str):
     """Send questions for a specific category"""
     category = KNOWLEDGE_BASE.get(category_id)
     if not category:
-        await send_message(build_text_message(to, "Lo siento, no pude encontrar esa categoría."))
+        await send_message_with_retry(build_text_message(to, "Lo siento, no pude encontrar esa categoría."))
         await send_main_menu(to)
         return
     
@@ -360,7 +461,7 @@ async def send_category_questions(to: str, category_id: str):
             sections=sections
         )
     
-    await send_message(payload)
+    await send_message_with_retry(payload)
     
     # Update user session
     user_sessions[to] = {
@@ -382,7 +483,7 @@ async def send_answer(to: str, question_id: str):
             break
     
     if not answer:
-        await send_message(build_text_message(to, "Lo siento, no pude encontrar la respuesta a esa pregunta."))
+        await send_message_with_retry(build_text_message(to, "Lo siento, no pude encontrar la respuesta a esa pregunta."))
         await send_main_menu(to)
         return
     
@@ -391,7 +492,7 @@ async def send_answer(to: str, question_id: str):
     
     # Send the answer
     answer_text = f"📝 *Respuesta:*\n\n{answer}"
-    await send_message(build_text_message(to, answer_text))
+    await send_message_with_retry(build_text_message(to, answer_text))
     
     # Wait a moment before asking for more help
     await asyncio.sleep(1.5)
@@ -418,7 +519,7 @@ async def send_more_help_options(to: str):
         buttons=buttons
     )
     
-    await send_message(payload)
+    await send_message_with_retry(payload)
     
     # Update user session
     user_sessions[to] = {
@@ -449,7 +550,7 @@ async def send_rating_request(to: str):
         buttons=buttons
     )
     
-    await send_message(payload)
+    await send_message_with_retry(payload)
     
     # Update user session
     user_sessions[to] = {
@@ -481,7 +582,7 @@ async def handle_rating(to: str, rating_id: str):
         "¡Que tengas un excelente día! 😊"
     )
     
-    await send_message(build_text_message(to, thank_you_text))
+    await send_message_with_retry(build_text_message(to, thank_you_text))
     
     # Clean up user session
     if to in user_sessions:
@@ -520,7 +621,7 @@ async def process_text_message(from_number: str, text: str, message_id: str):
             "Para brindarte la mejor ayuda, por favor utiliza los botones y opciones del menú. "
             "Te muestro nuevamente las opciones disponibles:"
         )
-        await send_message(build_text_message(from_number, redirect_text))
+        await send_message_with_retry(build_text_message(from_number, redirect_text))
         await asyncio.sleep(1.0)
         await send_main_menu(from_number)
 
@@ -574,6 +675,54 @@ def verify_webhook_signature(payload: bytes, signature: str) -> bool:
     
     return hmac.compare_digest(f"sha256={expected_signature}", signature)
 
+# ==================== MESSAGE PROCESSING ====================
+
+async def process_message(message: Dict):
+    """Process individual message with better error handling"""
+    try:
+        from_number = message.get("from")
+        message_id = message.get("id")
+        message_type = message.get("type")
+        
+        if not from_number:
+            logger.error("No from number in message")
+            return
+        
+        logger.info(f"Processing message {message_id} from {from_number}, type: {message_type}")
+        
+        # Limpiar sesiones antiguas antes de procesar
+        await cleanup_old_sessions()
+        
+        if message_type == "text":
+            text_data = message.get("text", {})
+            text_body = text_data.get("body", "")
+            await process_text_message(from_number, text_body, message_id)
+            
+        elif message_type == "interactive":
+            interactive_data = message.get("interactive", {})
+            await process_interactive_message(from_number, interactive_data)
+            
+        elif message_type in ["image", "document", "audio", "video", "sticker"]:
+            media_response = (
+                "He recibido tu archivo multimedia. "
+                "Para brindarte la mejor ayuda, por favor utiliza el menú de opciones:"
+            )
+            await send_message_with_retry(build_text_message(from_number, media_response))
+            await asyncio.sleep(1.0)
+            await send_main_menu(from_number)
+            
+        else:
+            logger.info(f"Unsupported message type: {message_type}")
+            await send_main_menu(from_number)
+            
+    except asyncio.TimeoutError:
+        logger.error(f"Timeout processing message from {from_number}")
+    except Exception as e:
+        logger.error(f"Error processing message from {from_number}: {e}")
+        # Enviar mensaje de error al usuario
+        error_msg = "Lo siento, ha ocurrido un error procesando tu mensaje. Por favor, intenta nuevamente."
+        await send_message_with_retry(build_text_message(from_number, error_msg))
+
 # ==================== FASTAPI ENDPOINTS ====================
 
 @app.get("/webhook")
@@ -592,7 +741,7 @@ async def verify_webhook(request: Request):
 
 @app.post("/webhook")
 async def handle_webhook(request: Request, background_tasks: BackgroundTasks):
-    """Handle incoming WhatsApp messages"""
+    """Handle incoming WhatsApp messages with better error handling"""
     try:
         # Get request body and signature
         body = await request.body()
@@ -606,6 +755,9 @@ async def handle_webhook(request: Request, background_tasks: BackgroundTasks):
         # Parse webhook data
         data = json.loads(body.decode())
         
+        # Log the incoming webhook for debugging
+        logger.debug(f"Incoming webhook: {json.dumps(data, indent=2)}")
+        
         # Process webhook entry
         if data.get("object") == "whatsapp_business_account":
             for entry in data.get("entry", []):
@@ -615,8 +767,13 @@ async def handle_webhook(request: Request, background_tasks: BackgroundTasks):
                     # Process messages
                     if "messages" in value:
                         for message in value["messages"]:
-                            # Process in background to avoid blocking
-                            background_tasks.add_task(process_message, message)
+                            # Usar el circuit breaker para procesar mensajes
+                            try:
+                                await message_circuit_breaker.execute(
+                                    process_message(message)
+                                )
+                            except Exception as e:
+                                logger.error(f"Circuit breaker blocked message processing: {e}")
                     
                     # Process message status updates
                     if "statuses" in value:
@@ -632,42 +789,6 @@ async def handle_webhook(request: Request, background_tasks: BackgroundTasks):
         logger.error(f"Error processing webhook: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
-async def process_message(message: Dict):
-    """Process individual message"""
-    try:
-        from_number = message.get("from")
-        message_id = message.get("id")
-        message_type = message.get("type")
-        
-        logger.info(f"Processing message {message_id} from {from_number}, type: {message_type}")
-        
-        if message_type == "text":
-            text_data = message.get("text", {})
-            text_body = text_data.get("body", "")
-            await process_text_message(from_number, text_body, message_id)
-            
-        elif message_type == "interactive":
-            interactive_data = message.get("interactive", {})
-            await process_interactive_message(from_number, interactive_data)
-            
-        elif message_type in ["image", "document", "audio", "video", "sticker"]:
-            # Handle media messages by redirecting to main menu
-            media_response = (
-                "He recibido tu archivo multimedia. "
-                "Para brindarte la mejor ayuda, por favor utiliza el menú de opciones:"
-            )
-            await send_message(build_text_message(from_number, media_response))
-            await asyncio.sleep(1.0)
-            await send_main_menu(from_number)
-            
-        else:
-            # Handle other message types
-            logger.info(f"Unsupported message type: {message_type}")
-            await send_main_menu(from_number)
-            
-    except Exception as e:
-        logger.error(f"Error processing message: {e}")
-
 @app.get("/")
 async def health_check():
     """Health check endpoint"""
@@ -676,7 +797,11 @@ async def health_check():
         "service": "Per Capital WhatsApp Chatbot",
         "version": "1.0.0",
         "active_sessions": len(user_sessions),
-        "total_ratings": len(user_ratings)
+        "total_ratings": len(user_ratings),
+        "circuit_breaker": {
+            "is_open": message_circuit_breaker.is_open,
+            "failures": message_circuit_breaker.failures
+        }
     }
 
 @app.get("/stats")
@@ -692,7 +817,12 @@ async def get_stats():
         "total_ratings": len(user_ratings),
         "rating_breakdown": rating_counts,
         "knowledge_base_categories": len(KNOWLEDGE_BASE),
-        "total_questions": sum(len(cat["questions"]) for cat in KNOWLEDGE_BASE.values())
+        "total_questions": sum(len(cat["questions"]) for cat in KNOWLEDGE_BASE.values()),
+        "circuit_breaker": {
+            "is_open": message_circuit_breaker.is_open,
+            "failures": message_circuit_breaker.failures,
+            "last_failure_time": message_circuit_breaker.last_failure_time
+        }
     }
 
 @app.post("/send-message")
@@ -712,7 +842,7 @@ async def send_manual_message(request: Request):
         else:
             raise HTTPException(status_code=400, detail="Only text messages supported in manual send")
         
-        success = await send_message(payload)
+        success = await send_message_with_retry(payload)
         
         if success:
             return {"status": "success", "message": "Message sent"}
