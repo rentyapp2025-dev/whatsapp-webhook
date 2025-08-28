@@ -561,7 +561,7 @@ async def process_interactive_message(from_number: str, interactive_data: Dict):
         rid = reply_id.strip()
         rid_upper = rid.upper()
 
-        # Feedback / ratings
+        # 0) Feedback / ratings
         if rid_upper in ("YES", "NO", "SÍ", "SI"):
             await handle_feedback(from_number, rid)
             return
@@ -569,24 +569,26 @@ async def process_interactive_message(from_number: str, interactive_data: Dict):
             await handle_rating_buttons(from_number, rid)
             return
 
-        # Rutas de categorías
+        # 1) PRIORIDAD: subcategorías de APP (evita que el fuzzy las convierta en 'APP')
+        if rid_upper.startswith("APP::"):
+            await send_category_questions(from_number, rid_upper)
+            return
+
+        # 2) Categorías normales (incluye 'APP' que abre el submenú)
         mapped_cat = _is_category_id(rid)
         if mapped_cat:
-            if mapped_cat in ("APP_MAIN", "APP_GENERAL"):
-                await send_app_submenu(from_number)
-            elif mapped_cat == "APP":
+            if mapped_cat in ("APP_MAIN", "APP_GENERAL", "APP"):
                 await send_app_submenu(from_number)
             else:
                 await send_category_questions(from_number, mapped_cat)
             return
 
-        # Subcategorías APP::<SUB>
-        if rid_upper.startswith("APP::"):
-            await send_category_questions(from_number, rid_upper)
-            return
-
-        # Posible click con title en vez de id
+        # 3) Si el cliente mandó el 'title' en vez del 'id'
         if reply_title:
+            title_up = reply_title.upper().strip()
+            if title_up.startswith("APP::"):
+                await send_category_questions(from_number, title_up)
+                return
             mapped_cat = _is_category_id(reply_title)
             if mapped_cat:
                 if mapped_cat in ("APP_MAIN", "APP_GENERAL", "APP"):
@@ -594,11 +596,8 @@ async def process_interactive_message(from_number: str, interactive_data: Dict):
                 else:
                     await send_category_questions(from_number, mapped_cat)
                 return
-            if reply_title.upper().startswith("APP::"):
-                await send_category_questions(from_number, reply_title.upper())
-                return
 
-        # ¿Seleccionó una pregunta directamente?
+        # 4) ¿Seleccionó una pregunta directamente?
         if _is_question_id(rid):
             await send_answer(from_number, rid)
             return
