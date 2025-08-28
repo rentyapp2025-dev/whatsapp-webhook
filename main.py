@@ -41,68 +41,75 @@ user_sessions: Dict[str, Dict[str, Any]] = {}
 user_ratings: List[Dict[str, Any]] = []
 QUESTION_ID_MAP: Dict[str, Dict[str, Any]] = {}
 
-# -------------------- Knowledge base (kept as original content) --------------------
-KNOWLEDGE_BASE = {
+# -------------------- Knowledge base (desde el PDF, APP sin Riesgos/Soporte) --------------------
+KNOWLEDGE_BASE: Dict[str, Any] = {
     "PER CAPITAL": {
-        "¿Qué es Per Capital?": "Es un grupo de empresas del Mercado de Valores Venezolano reguladas por la SUNAVAL, compuesta por Casa de Bolsa, Sociedad Administradora de EIC, Asesores de Inversión y Titularizadora.",
-        "¿Qué es la SUNAVAL?": "Es el ente que regula el Mercado de Valores en Venezuela y protege a los inversionistas. www.sunaval.gob.ve",
+        "¿Qué es Per Capital?": "Es un grupo de empresas del Mercado de Valores Venezolano reguladas por la SUNAVAL.",
+        "¿Quién regula a PER CAPITAL?": "La SUNAVAL (Superintendencia Nacional de Valores).",
+        "¿Qué es la SUNAVAL?": "Es quien protege a los inversionistas y regula a intermediarios y emisores del Mercado de Valores venezolano.",
         "¿Qué es la Bolsa de Valores de Caracas?": "Es el lugar donde se compran y venden bonos, acciones y otros instrumentos de manera ordenada a través de las Casas de Bolsa y está regulada por la SUNAVAL.",
-        "¿Cómo invierto?": "Para invertir en el Fondo Mutual Abierto de PER CAPITAL debes descargar el app y registrarte. Para invertir directamente en acciones o bonos debes acudir a una Casa de Bolsa autorizada."
+        "¿Cómo invierto?": "Para invertir en el Fondo Mutual Abierto de PER CAPITAL debes descargar la app, registrarte, subir recaudos y colocar tus órdenes de compra."
     },
+
+    # APP con subcategorías (GENERAL, REGISTRO, SUSCRIPCIÓN, RESCATE, POSICIÓN)
+    "APP": {
+        "GENERAL": {
+            "¿Puedo comprar acciones y bonos?": "No, la app actual es únicamente para invertir en el Fondo Mutual Abierto. Próximamente saldrá una nueva versión para negociar."
+        },
+        "REGISTRO": {
+            "¿Cómo me registro?": "Descarga la app, completa 100% de los datos, acepta los contratos, sube tus recaudos (Cédula de Identidad y Selfie) y espera tu aprobación.",
+            "¿Cuánto tarda mi aprobación?": "De 2 a 5 días hábiles siempre que hayas completado 100% de registro y recaudos.",
+            "¿Qué hago si no me aprueban?": "Revisa que hayas completado 100% del registro y recaudos; si persiste, contáctanos en SOPORTE.",
+            "¿Puedo invertir si soy menor de edad?": "Debes dirigirte a nuestras oficinas y registrarte con tu representante legal.",
+            "¿Puedo modificar alguno de mis datos?": "Sí, pero por exigencia de la ley entras nuevamente en revisión.",
+            "¿Debo tener cuenta en la Caja Venezolana?": "No, para invertir en nuestro Fondo Mutual Abierto no es necesaria la cuenta en la CVV."
+        },
+        "SUSCRIPCIÓN": {
+            "¿Cómo suscribo (compro)?": "Haz click en Negociación > Suscripción > Monto a invertir > Suscribir > Método de Pago. Recuerda pagar desde TU cuenta bancaria y subir el comprobante.",
+            "¿Cómo pago mi suscripción?": "Debes pagar desde TU cuenta bancaria vía Pago Móvil y subir el comprobante. IMPORTANTE: no se aceptan pagos de terceros.",
+            "¿Puede pagar alguien por mí?": "No, la ley prohíbe los pagos de terceros. Siempre debes pagar desde tu cuenta bancaria.",
+            "¿Cómo veo mi inversión?": "En el Home en la sección Mi Cuenta.",
+            "¿Cuándo veo mi inversión?": "Al cierre del sistema en días hábiles bancarios después del cierre de mercado y la publicación de tasas del Banco Central de Venezuela.",
+            "¿Cuáles son las comisiones?": "3% flat Suscripción, 3% flat Rescate y 5% anual Administración.",
+            "¿Qué hago después de suscribir?": "Monitorea tu inversión desde la app.",
+            "¿Debo invertir siempre el mismo monto?": "No, puedes invertir el monto que desees.",
+            "¿Puedo invertir cuando quiera?": "Sí, puedes invertir cuando quieras, las veces que quieras."
+        },
+        "RESCATE": {
+            "¿Cómo rescato (vendo)?": "Haz click en Negociación > Rescate > Unidades a Rescatar > Rescatar. Los fondos se enviarán a TU cuenta bancaria.",
+            "¿Cuándo me pagan mis rescates (ventas)?": "Al próximo día hábil bancario en horario de mercado."
+        },
+        "POSICIÓN": {
+            "¿Cómo veo el saldo de mi inversión?": "En el Home en la sección Mi Cuenta.",
+            "¿Cuándo se actualiza/ve mi posición (saldo)?": "Al cierre del sistema en días hábiles bancarios después del cierre de mercado y la publicación de tasas del Banco Central de Venezuela.",
+            "¿Dónde veo mi histórico?": "En la sección Historial.",
+            "¿Dónde veo reportes?": "En la sección Documentos > Reportes > Año > Trimestre."
+        }
+    },
+
     "FONDO MUTUAL ABIERTO": {
-        "¿Qué es un Fondo Mutual?": "Es un instrumento de inversión en grupo donde varias personas ponen dinero en un fondo gestionado por expertos, diseñado para ser de bajo riesgo, dirigido a pequeños inversionistas con poca experiencia.",
+        "¿Qué es un Fondo Mutual?": "Es un instrumento de inversión en grupo donde varias personas ponen dinero en un fondo gestionado por expertos; está diseñado para ser diversificado, de bajo riesgo y dirigido a pequeños inversionistas con poca experiencia.",
         "¿Qué es una Unidad de Inversión?": "Es una porción del fondo. Cuando inviertes adquieres unidades que representan tu parte del fondo.",
-        "¿Qué es el VUI?": "El Valor de la Unidad de Inversión (VUI) es el precio de una Unidad de Inversión. Se calcula diariamente y depende del comportamiento de las inversiones del fondo.",
-        "¿Cómo invierto?": "Descarga el app para Android y iOS, regístrate al 100%, espera tu aprobación y suscribe Unidades de Inversión cuando quieras y cuantas veces desees.",
+        "¿Qué es el VUI?": "El Valor de la Unidad de Inversión (VUI) es el precio de una Unidad de Inversión. Si el VUI sube, tu inversión gana valor. Se calcula diariamente al cierre del día y depende del comportamiento de las inversiones del fondo.",
+        "¿Cómo invierto?": "Descarga la app para Android y iOS, regístrate, sube recaudos, acepta los contratos, espera tu aprobación y suscribe Unidades de Inversión cuando quieras y cuantas veces desees.",
         "¿Cuál es el monto mínimo de inversión?": "1 Unidad de Inversión.",
-        "¿Cómo gano?": "Por apreciación (subida del VUI) o por dividendo (si es decretado).",
-        "¿En cuánto tiempo gano?": "Es recomendable medir resultados de forma trimestral.",
+        "¿Cómo gano?": "Ganas por apreciación (subida del VUI) o por dividendo (si es decretado).",
+        "¿En cuánto tiempo gano?": "Ganas a largo plazo; se recomienda medir resultados trimestralmente.",
         "¿Dónde consigo más información?": "En los prospectos y hojas de términos en www.per-capital.com."
     },
-    "REGISTRO": {
-        "¿Cómo me registro?": "Descarga el app, completa 100% de los datos, acepta los contratos, sube tus recaudos y espera tu aprobación.",
-        "¿Cuánto tarda mi aprobación?": "De 2 a 5 días hábiles siempre que hayas completado 100% del registro y recaudos.",
-        "¿Qué hago si no me aprueban?": "Revisa que hayas completado 100% del registro o contáctanos.",
-        "¿Puedo invertir si soy menor de edad?": "Debes dirigirte a nuestras oficinas y registrarte con tu representante legal.",
-        "¿Puedo modificar alguno de mis datos?": "Sí, pero por exigencia de la ley entras nuevamente en revisión.",
-        "¿Debo tener cuenta en la Caja Venezolana?": "No, no es necesaria para invertir en nuestro Fondo Mutual Abierto."
-    },
-    "SUSCRIPCIÓN": {
-        "¿Cómo suscribo (compro)?": "Haz click en Negociación > Suscripción > Monto a invertir > Suscribir > Método de Pago. Paga desde TU cuenta bancaria y sube comprobante.",
-        "¿Cómo pago mi suscripción?": "Debes pagar desde tu cuenta bancaria vía Pago Móvil. No se aceptan pagos de terceros.",
-        "¿Puede pagar alguien por mí?": "No, la ley prohíbe los pagos de terceros.",
-        "¿Cómo veo mi inversión?": "En el Home en la sección Mi Cuenta.",
-        "¿Cuándo veo mi inversión?": "Al cierre del sistema entre 5 pm y 7 pm en días hábiles de mercado.",
-        "¿Cuáles son las comisiones?": "3% flat Suscripción, 3% flat Rescate y 5% anual Administración.",
-        "¿Qué hago después de suscribir?": "Monitorea tu inversión desde el app.",
-        "¿Puedo invertir el monto que quiera?": "Sí, puedes invertir el monto que desees.",
-        "¿Puedo invertir cuando quiera?": "Sí, puedes invertir cuando quieras, las veces que quieras."
-    },
-    "RESCATE": {
-        "¿Cómo rescato (vendo)?": "Haz click en Negociación > Rescate > Unidades a Rescatar > Rescatar. Fondos se enviarán a TU cuenta bancaria.",
-        "¿Cuándo me pagan mis rescates?": "Al próximo día hábil bancario en horario de mercado.",
-        "¿Cómo veo el saldo de mi inversión?": "En el Home en la sección Mi Cuenta.",
-        "¿Cuándo veo el saldo de mi inversión?": "Al cierre del sistema entre 5 pm y 7 pm en días hábiles de mercado.",
-        "¿Cuándo puedo rescatar?": "Cuando quieras, puedes rescatar y retirarte del fondo.",
-        "¿Cuáles son las comisiones?": "3% flat Suscripción, 3% flat Rescate y 5% anual Administración."
-    },
-    "POSICIÓN": {
-        "¿Cuándo se actualiza mi posición (saldo)?": "Al cierre del sistema entre 5 pm y 7 pm en días hábiles de mercado.",
-        "¿Por qué varía mi posición (saldo)?": "Sube si suben los precios de las inversiones o se reciben dividendos/cupones, baja si los precios caen.",
-        "¿Dónde veo mi histórico?": "En la sección Historial.",
-        "¿Dónde veo reportes?": "En la sección Documentos > Reportes > Año > Trimestre."
-    },
+
+    # Top-level fuera de APP
     "RIESGOS": {
-        "¿Cuáles son los riesgos al invertir?": "Todas las inversiones están sujetas a riesgos y la pérdida de capital es posible. Algunos riesgos son: mercado, país, cambiario, sector, entre otros."
+        "¿Cuáles son los riesgos al invertir?": "Todas las inversiones están sujetas a riesgos y la pérdida de capital es posible. Algunos riesgos son: riesgo de mercado, país, cambiario y sector."
     },
     "SOPORTE": {
-        "Estoy en revisión, ¿qué hago?": "Asegúrate de haber completado 100% datos y recaudos y espera tu aprobación. Si tarda más, contáctanos.",
-        "No me llega el SMS": "Verifica señal y que tu número telefónico venezolano esté correcto.",
-        "No me llega el correo": "Asegúrate de no dejar espacios al final al escribir tu correo.",
+        "Estoy en revisión, ¿qué hago?": "Asegúrate de haber completado 100% datos y recaudos y espera tu aprobación. Si tarda más de lo habitual, contáctanos en SOPORTE.",
+        "No me llega el SMS": "Asegúrate de tener buena señal y de haber colocado correctamente un número telefónico venezolano.",
+        "No me llega el correo": "Asegúrate de no dejar espacios al final cuando escribiste tu correo electrónico.",
         "No logro descargar el App": "Asegúrate de que tu App Store esté configurada en la región de Venezuela.",
-        "No me abre el App": "Verifica tener la versión actualizada y que tu tienda de apps esté configurada en Venezuela.",
-        "¿Cómo recupero mi clave?": "Selecciona Recuperar, recibirás una clave temporal y luego actualiza tu nueva clave."
-    }
+        "No me abre el App": "Asegúrate de tener la versión actualizada y que tu tienda de apps esté configurada en la región de Venezuela.",
+        "¿Cómo recupero mi clave?": "Selecciona Recuperar; te llegará una clave temporal para ingresar y luego actualiza tu nueva clave."
+    },
 }
 
 # -------------------- Helpers: normalization & ids --------------------
@@ -110,7 +117,6 @@ def _normalize_key(s: str) -> str:
     if not s:
         return ""
     s = s.strip()
-    # TRUCO: tratar '_' como espacio para que PER_CAPITAL ≈ "PER CAPITAL"
     s = s.replace("_", " ")
     s_norm = unicodedata.normalize("NFKD", s)
     s_no_accents = "".join(ch for ch in s_norm if not unicodedata.combining(ch))
@@ -163,10 +169,19 @@ def _is_question_id(candidate: str) -> bool:
     for data in QUESTION_ID_MAP.values():
         if _normalize_key(data.get("text", "")) == norm_in:
             return True
-    for qa_map in KNOWLEDGE_BASE.values():
-        for q_text in qa_map.keys():
-            if _normalize_key(q_text) == norm_in:
-                return True
+    # Buscar en top-level y APP anidado
+    for cat_key, qa_map in KNOWLEDGE_BASE.items():
+        if isinstance(qa_map, dict):
+            if cat_key == "APP":
+                for sub, sub_map in qa_map.items():
+                    if isinstance(sub_map, dict):
+                        for q_text in sub_map.keys():
+                            if _normalize_key(q_text) == norm_in:
+                                return True
+            else:
+                for q_text in qa_map.keys():
+                    if _normalize_key(q_text) == norm_in:
+                        return True
     return False
 
 # -------------------- Builders --------------------
@@ -236,8 +251,12 @@ async def send_welcome_sequence(to: str):
 
 async def send_main_menu(to: str):
     rows = []
-    rows.append({"id": "APP_MAIN", "title": "App Per Capital", "description": "Registro, suscripción, rescate y más"})
+    # Ítem APP (abre submenú)
+    rows.append({"id": "APP", "title": "App Per Capital", "description": "Registro, suscripción, rescate y posición"})
+    # Demás categorías (top-level)
     for k in KNOWLEDGE_BASE.keys():
+        if k == "APP":
+            continue
         title_short = k if len(k) <= 24 else k[:21] + "..."
         rows.append({"id": _category_to_id(k), "title": title_short, "description": f"Información sobre {k}"})
     sections = [{"title": "Categorías disponibles", "rows": rows}]
@@ -251,35 +270,61 @@ async def send_main_menu(to: str):
     user_sessions[to] = {"state": "main_menu", "last_interaction": datetime.now().isoformat()}
 
 async def send_app_submenu(to: str):
-    app_keys = []
-    for k in KNOWLEDGE_BASE.keys():
-        kn = _normalize_key(k)
-        if any(tok in kn for tok in ("REGISTRO", "SUSCRIP", "RESCAT", "POSICION")):
-            app_keys.append(k)
-    if not app_keys:
-        app_keys = ["REGISTRO", "SUSCRIPCIÓN", "RESCATE", "POSICIÓN"]
-    rows = [{"id": _category_to_id(k), "title": (k if len(k) <= 24 else k[:21] + "..."), "description": f"Consultas sobre {k}"} for k in app_keys if k in KNOWLEDGE_BASE]
-    sections = [{"title": "Opciones de la App", "rows": rows}]
+    """Submenú de APP basado en KNOWLEDGE_BASE['APP'] (sin Riesgos/Soporte)"""
+    app_node = KNOWLEDGE_BASE.get("APP", {})
+    subcats = [k for k, v in app_node.items() if isinstance(v, dict)]
+    # Orden deseado
+    order = ["GENERAL", "REGISTRO", "SUSCRIPCIÓN", "RESCATE", "POSICIÓN"]
+    subcats = [c for c in order if c in app_node] + [c for c in subcats if c not in order]
+
+    rows = []
+    for sub in subcats:
+        title = sub if len(sub) <= 24 else sub[:21] + "..."
+        rows.append({
+            "id": f"APP::{_category_to_id(sub)}",
+            "title": title,
+            "description": f"Preguntas sobre {sub}"
+        })
+    sections = [{"title": "App Per Capital", "rows": rows}]
     payload = build_interactive_list_message(
         to=to,
         header="App Per Capital",
-        body="¿Sobre qué aspecto de la app necesitas información?",
+        body="Elige una sección de la App:",
         sections=sections
     )
     await send_message(payload)
     user_sessions[to] = {"state": "app_submenu", "last_interaction": datetime.now().isoformat()}
 
+def _resolve_app_subcategory(app_sub_id: str) -> Optional[str]:
+    """Convierte 'APP::REGISTRO' (normalizado) en el nombre real de la subcategoría."""
+    if not app_sub_id or not app_sub_id.startswith("APP::"):
+        return None
+    subnorm = _normalize_key(app_sub_id.split("APP::", 1)[1])
+    app_node = KNOWLEDGE_BASE.get("APP", {})
+    for sub in app_node.keys():
+        if _normalize_key(sub) == subnorm:
+            return sub
+    return None
+
 async def send_category_questions(to: str, category_id: str):
-    if category_id == "APP_MAIN" or category_id == "APP_GENERAL":
-        combined = {}
-        for k in KNOWLEDGE_BASE.keys():
-            kn = _normalize_key(k)
-            if any(tok in kn for tok in ("REGISTRO", "SUSCRIP", "RESCAT", "POSICION")):
-                combined.update(KNOWLEDGE_BASE[k])
-        category_map = combined
-        category_title = "App Per Capital (Resumen)"
-        session_key = "APP_GENERAL"
+    # 1) APP::<SUBCAT>
+    if category_id and category_id.startswith("APP::"):
+        sub = _resolve_app_subcategory(category_id)
+        if not sub:
+            await send_message(build_text_message(to, "No encontré esa sección de la App."))
+            await send_app_submenu(to)
+            return
+        category_map = KNOWLEDGE_BASE.get("APP", {}).get(sub, {})
+        category_title = f"App • {sub}"
+        session_key = f"APP::{sub}"
+
+    # 2) APP_MAIN / APP_GENERAL / APP → abrir submenú
+    elif category_id in ("APP_MAIN", "APP_GENERAL", "APP"):
+        await send_app_submenu(to)
+        return
+
     else:
+        # Categoría normal top-level
         mapped = find_category_key(category_id, allow_fuzzy=True)
         if not mapped:
             mapped = find_category_key(category_id.replace("_", " "), allow_fuzzy=True)
@@ -291,6 +336,7 @@ async def send_category_questions(to: str, category_id: str):
         category_title = mapped
         session_key = mapped
 
+    # Construir preguntas
     questions_local = []
     for i, (q_text, q_answer) in enumerate(category_map.items()):
         qid = _make_question_id(category_title, i)
@@ -304,21 +350,23 @@ async def send_category_questions(to: str, category_id: str):
 
     if not questions_local:
         await send_message(build_text_message(to, "No hay preguntas disponibles en esta categoría."))
-        await send_main_menu(to)
+        if category_title.startswith("App •"):
+            await send_app_submenu(to)
+        else:
+            await send_main_menu(to)
         return
 
     if len(questions_local) <= 3:
         buttons = []
-        for i, q in enumerate(questions_local[:3]):
+        for q in questions_local[:3]:
             title = q["text"]
-            # WhatsApp Reply Button title: máx 20 chars
             if len(title) > 20:
                 title = title[:17] + "..."
             buttons.append({"type": "reply", "reply": {"id": q["id"], "title": title}})
         payload = build_reply_button_message(to=to, body=f"*{category_title}*\n\nSelecciona tu pregunta:", buttons=buttons)
     else:
         rows = []
-        for i, q in enumerate(questions_local):
+        for q in questions_local:
             title_short = q["text"] if len(q["text"]) <= 24 else q["text"][:21] + "..."
             # Importante: NO enviar description para evitar duplicado visual
             rows.append({"id": q["id"], "title": title_short})
@@ -332,31 +380,50 @@ async def send_answer(to: str, question_id: str):
     qdata = QUESTION_ID_MAP.get(question_id)
     if not qdata:
         norm_in = _normalize_key(question_id or "")
-        for qid, data in QUESTION_ID_MAP.items():
+        for _, data in QUESTION_ID_MAP.items():
             if _normalize_key(data.get("text", "")) == norm_in:
                 qdata = data
                 break
+
+    # Buscar también dentro de APP anidado
     if not qdata:
         for cat_key, qa_map in KNOWLEDGE_BASE.items():
-            for q_text, q_answer in qa_map.items():
-                if _normalize_key(q_text) == _normalize_key(question_id or ""):
-                    qdata = {"category": cat_key, "text": q_text, "answer": q_answer}
-                    break
+            if isinstance(qa_map, dict):
+                if cat_key == "APP":
+                    for sub, sub_map in qa_map.items():
+                        if isinstance(sub_map, dict):
+                            for q_text, q_answer in sub_map.items():
+                                if _normalize_key(q_text) == _normalize_key(question_id or ""):
+                                    qdata = {"category": f"App • {sub}", "text": q_text, "answer": q_answer}
+                                    break
+                        if qdata:
+                            break
+                else:
+                    for q_text, q_answer in qa_map.items():
+                        if _normalize_key(q_text) == _normalize_key(question_id or ""):
+                            qdata = {"category": cat_key, "text": q_text, "answer": q_answer}
+                            break
             if qdata:
                 break
 
+    # fallback CAT::Qn
     if not qdata and "::Q" in (question_id or ""):
         try:
             cat_part = question_id.split("::Q")[0]
             cat_guess = cat_part.replace("_", " ").strip()
-            mapped = find_category_key(cat_guess, allow_fuzzy=True)
-            if mapped and mapped in KNOWLEDGE_BASE:
-                qlist = list(KNOWLEDGE_BASE[mapped].items())
-                idx = int(question_id.split("::Q")[1].split("_")[0]) - 1
-                if 0 <= idx < len(qlist):
-                    q_text, q_answer = qlist[idx]
-                    qdata = {"category": mapped, "text": q_text, "answer": q_answer}
-                    QUESTION_ID_MAP[question_id] = qdata
+            # intentar resolver App • SUB
+            if cat_guess.upper().startswith("APP •"):
+                sub = cat_guess.split("•", 1)[1].strip()
+                app_map = KNOWLEDGE_BASE.get("APP", {}).get(sub, {})
+                qlist = list(app_map.items())
+            else:
+                mapped = find_category_key(cat_guess, allow_fuzzy=True)
+                qlist = list(KNOWLEDGE_BASE.get(mapped, {}).items()) if mapped else []
+            idx = int(question_id.split("::Q")[1].split("_")[0]) - 1
+            if 0 <= idx < len(qlist):
+                q_text, q_answer = qlist[idx]
+                qdata = {"category": cat_guess, "text": q_text, "answer": q_answer}
+                QUESTION_ID_MAP[question_id] = qdata
         except Exception:
             qdata = None
 
@@ -410,7 +477,6 @@ async def process_text_message(from_number: str, text: str, message_id: Optional
         await asyncio.sleep(0.6)
         await send_main_menu(from_number)
 
-# robust interactive parsing
 def _extract_interactive_candidate(obj: Dict) -> Optional[str]:
     if not obj:
         return None
@@ -495,37 +561,47 @@ async def process_interactive_message(from_number: str, interactive_data: Dict):
         rid = reply_id.strip()
         rid_upper = rid.upper()
 
+        # Feedback / ratings
         if rid_upper in ("YES", "NO", "SÍ", "SI"):
             await handle_feedback(from_number, rid)
             return
-
         if rid_upper.startswith("RATE_") or rid.lower().startswith("rating_"):
             await handle_rating_buttons(from_number, rid)
             return
 
+        # Rutas de categorías
         mapped_cat = _is_category_id(rid)
         if mapped_cat:
             if mapped_cat in ("APP_MAIN", "APP_GENERAL"):
-                await send_category_questions(from_number, "APP_GENERAL")
+                await send_app_submenu(from_number)
+            elif mapped_cat == "APP":
+                await send_app_submenu(from_number)
             else:
                 await send_category_questions(from_number, mapped_cat)
             return
 
-        if _is_question_id(rid):
-            await send_answer(from_number, rid)
+        # Subcategorías APP::<SUB>
+        if rid_upper.startswith("APP::"):
+            await send_category_questions(from_number, rid_upper)
             return
 
+        # Posible click con title en vez de id
         if reply_title:
             mapped_cat = _is_category_id(reply_title)
             if mapped_cat:
-                if mapped_cat in ("APP_MAIN", "APP_GENERAL"):
-                    await send_category_questions(from_number, "APP_GENERAL")
+                if mapped_cat in ("APP_MAIN", "APP_GENERAL", "APP"):
+                    await send_app_submenu(from_number)
                 else:
                     await send_category_questions(from_number, mapped_cat)
                 return
-            if _is_question_id(reply_title):
-                await send_answer(from_number, reply_title)
+            if reply_title.upper().startswith("APP::"):
+                await send_category_questions(from_number, reply_title.upper())
                 return
+
+        # ¿Seleccionó una pregunta directamente?
+        if _is_question_id(rid):
+            await send_answer(from_number, rid)
+            return
 
         logger.info(f"Unknown interactive reply id: {rid}")
         await send_main_menu(from_number)
@@ -649,11 +725,21 @@ async def send_manual_message(request: Request):
 
 @app.get("/")
 async def health_check():
-    total_questions = sum(len(cat) for cat in KNOWLEDGE_BASE.values())
+    def count_questions(node: Any) -> int:
+        if isinstance(node, dict):
+            total = 0
+            for v in node.values():
+                if isinstance(v, dict):
+                    total += count_questions(v)
+                else:
+                    total += 1
+            return total
+        return 0
+    total_questions = count_questions(KNOWLEDGE_BASE)
     return {
         "status": "healthy",
         "service": "Per Capital WhatsApp Chatbot",
-        "version": "1.0.1",
+        "version": "1.1.1",
         "active_sessions": len(user_sessions),
         "total_ratings": len(user_ratings),
         "total_questions": total_questions
@@ -664,12 +750,24 @@ async def get_stats():
     rating_counts = {}
     for r in user_ratings:
         rating_counts[r["rating"]] = rating_counts.get(r["rating"], 0) + 1
+
+    def count_questions(node: Any) -> int:
+        if isinstance(node, dict):
+            total = 0
+            for v in node.values():
+                if isinstance(v, dict):
+                    total += count_questions(v)
+                else:
+                    total += 1
+            return total
+        return 0
+
     return {
         "active_sessions": len(user_sessions),
         "total_ratings": len(user_ratings),
         "rating_breakdown": rating_counts,
         "knowledge_base_categories": len(KNOWLEDGE_BASE),
-        "total_questions": sum(len(c) for c in KNOWLEDGE_BASE.values())
+        "total_questions": count_questions(KNOWLEDGE_BASE)
     }
 
 @app.delete("/sessions/{phone_number}")
@@ -703,7 +801,7 @@ async def startup_event():
         logger.error("Missing required env vars: %s", ", ".join(missing))
     if placeholders:
         logger.warning("Placeholder env vars detected: %s", ", ".join(placeholders))
-    logger.info("Bot startup complete. KB categories=%d total_questions=%d", len(KNOWLEDGE_BASE), sum(len(c) for c in KNOWLEDGE_BASE.values()))
+    logger.info("Bot startup complete. KB categories=%d", len(KNOWLEDGE_BASE))
 
 # -------------------- Run --------------------
 if __name__ == "__main__":
