@@ -206,7 +206,7 @@ def build_interactive_list_message(to: str, header: str, body: str, sections: Li
             "type": "list",
             "header": {"type": "text", "text": header},
             "body": {"text": body},
-            "footer": {"text": "Per Capital - Tu asistente virtual"},
+            "footer": {"text": "Per Capital - Tu asesor de confianza"},
             "action": {
                 "button": "Ver opciones",
                 "sections": sections
@@ -223,7 +223,7 @@ def build_reply_button_message(to: str, body: str, buttons: List[Dict]) -> Dict:
         "interactive": {
             "type": "button",
             "body": {"text": body},
-            "footer": {"text": "Per Capital - Tu asistente virtual"},
+            "footer": {"text": "Per Capital - Tu asesor de confianza"},
             "action": {"buttons": buttons}
         }
     }
@@ -265,36 +265,38 @@ async def send_typing_indicator_and_wait(to: str, seconds: float = 2.0):
         logger.error(f"Error in typing indicator: {e}")
 
 async def send_welcome_sequence(to: str):
-    """Send welcome message sequence with typing indicators"""
+    """Send welcome message sequence with professional warmth"""
     welcome_text = (
-        "¡Hola! 👋 Bienvenido a Per Capital\n\n"
-        "Soy tu asistente virtual y estoy aquí para ayudarte con todas tus consultas "
-        "sobre inversiones, nuestra app y servicios financieros.\n\n"
-        "¿Cómo puedo ayudarte hoy?"
+        "¡Hola! Es un placer saludarte. Soy tu asesor virtual de Per Capital.\n\n"
+        "Como especialista en inversiones, estoy aquí para acompañarte en cada paso "
+        "de tu experiencia financiera. Puedo orientarte sobre nuestros servicios, "
+        "nuestro Fondo Mutual Abierto, y resolver cualquier consulta sobre nuestra plataforma.\n\n"
+        "Mi compromiso es brindarte información de calidad con la confianza y profesionalismo "
+        "que mereces. ¿En qué puedo asistirte hoy?"
     )
     
-    await send_typing_indicator_and_wait(to, 1.5)
+    await send_typing_indicator_and_wait(to, 2.0)
     await send_message(build_text_message(to, welcome_text))
-    await asyncio.sleep(1.0)
+    await asyncio.sleep(1.5)
     await send_main_menu(to)
 
 async def send_main_menu(to: str):
-    """Send main interactive menu"""
+    """Send main interactive menu with enhanced professional presentation"""
     sections = [{
-        "title": "Categorías disponibles",
+        "title": "Áreas de consulta disponibles",
         "rows": [
-            {"id": "PER_CAPITAL", "title": "Per Capital", "description": "Información general de la empresa"},
-            {"id": "FONDO_MUTUAL", "title": "Fondo Mutual Abierto", "description": "Todo sobre nuestro fondo de inversión"},
-            {"id": "APP_MAIN", "title": "App Per Capital", "description": "Registro, suscripción, rescate y más"},
-            {"id": "RIESGOS", "title": "Riesgos de Inversión", "description": "Información sobre riesgos al invertir"},
-            {"id": "SOPORTE", "title": "Soporte Técnico", "description": "Ayuda con problemas técnicos"},
+            {"id": "PER_CAPITAL", "title": "Per Capital", "description": "Nuestra empresa y regulación financiera"},
+            {"id": "FONDO_MUTUAL", "title": "Fondo Mutual Abierto", "description": "Estrategia de inversión y rendimientos"},
+            {"id": "APP_MAIN", "title": "Plataforma Digital", "description": "Registro, operaciones y gestión de cuenta"},
+            {"id": "RIESGOS", "title": "Gestión de Riesgos", "description": "Información sobre riesgos de inversión"},
+            {"id": "SOPORTE", "title": "Atención Especializada", "description": "Soporte técnico y resolución de consultas"},
         ]
     }]
     
     payload = build_interactive_list_message(
         to=to,
-        header="Menú Principal",
-        body="Selecciona la categoría sobre la que necesitas información:",
+        header="Centro de Atención Per Capital",
+        body="Selecciona el área sobre la cual necesitas asesoría profesional. Mi objetivo es brindarte la información más precisa y actualizada:",
         sections=sections
     )
     
@@ -306,22 +308,22 @@ async def send_main_menu(to: str):
     }
 
 async def send_app_submenu(to: str):
-    """Send App submenu"""
+    """Send App submenu with enhanced professional tone"""
     sections = [{
-        "title": "Opciones de la App",
+        "title": "Servicios de la Plataforma Digital",
         "rows": [
-            {"id": "APP_GENERAL", "title": "Info General", "description": "Funciones generales de la app"},
-            {"id": "APP_REGISTRO", "title": "Registro", "description": "Cómo registrarse y aprobación"},
-            {"id": "APP_SUSCRIPCION", "title": "Suscripción", "description": "Cómo invertir y procesos de pago"},
-            {"id": "APP_RESCATE", "title": "Rescate", "description": "Cómo retirar inversiones"},
-            {"id": "APP_POSICION", "title": "Posición y Saldo", "description": "Consultar saldos y reportes"},
+            {"id": "APP_GENERAL", "title": "Funcionalidades", "description": "Características generales de la plataforma"},
+            {"id": "APP_REGISTRO", "title": "Onboarding Digital", "description": "Proceso de registro y verificación"},
+            {"id": "APP_SUSCRIPCION", "title": "Inversiones", "description": "Proceso de suscripción y métodos de pago"},
+            {"id": "APP_RESCATE", "title": "Liquidaciones", "description": "Proceso de rescate y transferencias"},
+            {"id": "APP_POSICION", "title": "Portfolio", "description": "Consulta de posiciones y reportes"},
         ]
     }]
     
     payload = build_interactive_list_message(
         to=to,
-        header="App Per Capital",
-        body="¿Sobre qué aspecto de la app necesitas información?",
+        header="Plataforma Digital Per Capital",
+        body="Como tu asesor especializado, te invito a seleccionar el servicio sobre el cual necesitas orientación:",
         sections=sections
     )
     
@@ -333,10 +335,10 @@ async def send_app_submenu(to: str):
     }
 
 async def send_category_questions(to: str, category_id: str):
-    """Send questions for a specific category with improved formatting"""
+    """Send questions for a specific category with professional approach"""
     category = KNOWLEDGE_BASE.get(category_id)
     if not category:
-        await send_message(build_text_message(to, "Lo siento, no pude encontrar esa categoría."))
+        await send_message(build_text_message(to, "Disculpa, no pude localizar esa sección. Permíteme ofrecerte nuestras opciones principales."))
         await send_main_menu(to)
         return
     
@@ -357,7 +359,7 @@ async def send_category_questions(to: str, category_id: str):
         
         payload = build_reply_button_message(
             to=to,
-            body=f"*{category['title']}*\n\nSelecciona tu pregunta:",
+            body=f"*{category['title']}*\n\nComo tu asesor especializado, he preparado las siguientes consultas frecuentes. Selecciona la que mejor responda a tu necesidad:",
             buttons=buttons
         )
     else:
@@ -371,12 +373,12 @@ async def send_category_questions(to: str, category_id: str):
                 "description": formatted_q["description"]
             })
         
-        sections = [{"title": category["title"], "rows": rows}]
+        sections = [{"title": f"Consultas sobre {category['title']}", "rows": rows}]
         
         payload = build_interactive_list_message(
             to=to,
-            header=category["title"],
-            body="Selecciona tu pregunta:",
+            header=f"Asesoría Especializada - {category['title']}",
+            body="He recopilado las consultas más relevantes para tu orientación. Selecciona la que corresponda a tu necesidad:",
             sections=sections
         )
     
@@ -389,7 +391,7 @@ async def send_category_questions(to: str, category_id: str):
     }
 
 async def send_answer(to: str, question_id: str):
-    """Send answer for a specific question"""
+    """Send answer for a specific question with enhanced professional presentation"""
     # Find the question in the knowledge base
     answer = None
     question_text = None
@@ -403,39 +405,43 @@ async def send_answer(to: str, question_id: str):
             break
     
     if not answer:
-        await send_message(build_text_message(to, "Lo siento, no pude encontrar la respuesta a esa pregunta."))
+        await send_message(build_text_message(to, "Disculpa, no pude localizar la información solicitada. Permíteme conectarte con nuestras opciones principales."))
         await send_main_menu(to)
         return
     
     # Send typing indicator
-    await send_typing_indicator_and_wait(to, 1.5)
+    await send_typing_indicator_and_wait(to, 2.0)
     
-    # Send the answer with question context
-    answer_text = f"📋 *Pregunta:*\n{question_text}\n\n💡 *Respuesta:*\n{answer}"
+    # Send the answer with professional presentation
+    answer_text = (
+        f"*Tu consulta:*\n{question_text}\n\n"
+        f"*Mi respuesta profesional:*\n{answer}\n\n"
+        f"Como tu asesor de confianza, espero que esta información sea de gran valor para tus decisiones de inversión."
+    )
     await send_message(build_text_message(to, answer_text))
     
     # Wait a moment before asking for more help
-    await asyncio.sleep(1.5)
+    await asyncio.sleep(2.0)
     
-    # Ask if they need more help
+    # Automatically ask if they need more help with enhanced approach
     await send_more_help_options(to)
 
 async def send_more_help_options(to: str):
-    """Send options to continue or finish conversation"""
+    """Send options to continue or finish conversation with more concise messaging"""
     buttons = [
         {
             "type": "reply",
-            "reply": {"id": "HELP_YES", "title": "Sí, necesito más ayuda"}
+            "reply": {"id": "HELP_YES", "title": "Sí, por favor"}
         },
         {
             "type": "reply",
-            "reply": {"id": "HELP_NO", "title": "No, estoy satisfecho"}
+            "reply": {"id": "HELP_NO", "title": "No, gracias"}
         }
     ]
     
     payload = build_reply_button_message(
         to=to,
-        body="¿Necesitas ayuda con algún otro tema?",
+        body="¿Algo más?",
         buttons=buttons
     )
     
@@ -447,7 +453,7 @@ async def send_more_help_options(to: str):
     }
 
 async def send_rating_request(to: str):
-    """Send rating options"""
+    """Send rating options with professional gratitude"""
     buttons = [
         {
             "type": "reply",
@@ -455,17 +461,17 @@ async def send_rating_request(to: str):
         },
         {
             "type": "reply", 
-            "reply": {"id": "RATE_GOOD", "title": "⭐⭐ Bueno"}
+            "reply": {"id": "RATE_GOOD", "title": "⭐⭐ Muy bueno"}
         },
         {
             "type": "reply",
-            "reply": {"id": "RATE_POOR", "title": "⭐ Necesita mejorar"}
+            "reply": {"id": "RATE_POOR", "title": "⭐ Puede mejorar"}
         }
     ]
     
     payload = build_reply_button_message(
         to=to,
-        body="¡Gracias por usar nuestro asistente virtual! 😊\n\nPor favor, califica la atención recibida para ayudarnos a mejorar:",
+        body="Ha sido un verdadero placer asistirte hoy.\n\nComo profesionales comprometidos con la excelencia, tu opinión es invaluable para nosotros. ¿Podrías calificar el servicio que recibiste?",
         buttons=buttons
     )
     
@@ -477,11 +483,11 @@ async def send_rating_request(to: str):
     }
 
 async def handle_rating(to: str, rating_id: str):
-    """Handle user rating and end conversation"""
+    """Handle user rating and end conversation with professional appreciation"""
     rating_map = {
         "RATE_EXCELLENT": "Excelente ⭐⭐⭐",
-        "RATE_GOOD": "Bueno ⭐⭐", 
-        "RATE_POOR": "Necesita mejorar ⭐"
+        "RATE_GOOD": "Muy bueno ⭐⭐", 
+        "RATE_POOR": "Puede mejorar ⭐"
     }
     
     rating = rating_map.get(rating_id, "Desconocida")
@@ -495,8 +501,8 @@ async def handle_rating(to: str, rating_id: str):
     
     # Send thank you message
     thank_you_text = (
-        f"¡Muchas gracias por tu calificación: *{rating}*! 🙏\n\n"
-        "Tu opinión es muy valiosa para nosotros y nos ayuda a mejorar continuamente nuestro servicio."
+        f"¡Muchas gracias por tu calificación: *{rating}*!\n\n"
+        "Tu opinión es muy valiosa para nosotros y nos ayuda a mejorar continuamente nuestro servicio de asesoría financiera."
     )
     
     await send_message(build_text_message(to, thank_you_text))
@@ -508,18 +514,18 @@ async def handle_rating(to: str, rating_id: str):
     await send_conversation_end(to)
 
 async def send_conversation_end(to: str):
-    """Send conversation end message and mark as finished"""
+    """Send professional conversation end message"""
     end_message = (
-        "🔚 *Esta conversación ha terminado*\n\n"
-        "Si necesitas más ayuda en el futuro, no dudes en escribirnos nuevamente. "
-        "Estaremos aquí para asistirte.\n\n"
-        "¡Que tengas un excelente día! 😊\n\n"
+        "*Esta conversación ha terminado*\n\n"
+        "Si necesitas más asesoría financiera en el futuro, no dudes en contactarnos nuevamente. "
+        "Estaremos aquí para acompañarte en tus decisiones de inversión.\n\n"
+        "¡Que tengas un excelente día!\n\n"
         "_Per Capital - Invirtiendo en tu futuro_"
     )
     
     await send_message(build_text_message(to, end_message))
     
-    # Mark session as finished instead of deleting immediately
+    # Mark session as finished
     user_sessions[to] = {
         "state": "finished",
         "last_interaction": datetime.now().isoformat()
@@ -569,10 +575,10 @@ async def process_text_message(from_number: str, text: str, message_id: str):
         await send_rating_request(from_number)
         return
     
-    # For any other text during active flow, redirect to main menu with helpful message
+    # For any other text during active flow, redirect to main menu
     redirect_text = (
-        "Para brindarte la mejor ayuda, por favor utiliza los botones y opciones del menú. "
-        "Te muestro nuevamente las opciones disponibles:"
+        "Para brindarte la mejor asesoría, por favor utiliza los botones y opciones del menú. "
+        "Te muestro nuevamente nuestras opciones disponibles:"
     )
     await send_message(build_text_message(from_number, redirect_text))
     await asyncio.sleep(1.0)
@@ -700,7 +706,7 @@ async def process_message(message: Dict):
         elif message_type in ["image", "document", "audio", "video", "sticker"]:
             media_response = (
                 "He recibido tu archivo multimedia. "
-                "Para brindarte la mejor ayuda, por favor utiliza el menú de opciones:"
+                "Para brindarte la mejor asesoría, por favor utiliza el menú de opciones:"
             )
             await send_message(build_text_message(from_number, media_response))
             await asyncio.sleep(1.0)
@@ -719,7 +725,7 @@ async def health_check():
     return {
         "status": "healthy",
         "service": "Per Capital WhatsApp Chatbot",
-        "version": "2.0.0",
+        "version": "3.0.0",
         "active_sessions": len(user_sessions),
         "total_ratings": len(user_ratings)
     }
