@@ -46,100 +46,100 @@ KNOWLEDGE_BASE = {
         "id": "PER_CAPITAL",
         "title": "Per Capital",
         "questions": [
-            {"id": "Q1_PC", "text": "¿Que es Per Capital?", "answer": "Es un grupo de empresas del Mercado de Valores Venezolano reguladas por la SUNAVAL."},
-            {"id": "Q2_PC", "text": "¿Quien regula a PER CAPITAL?", "answer": "La SUNAVAL (Superintendencia Nacional de Valores)"},
-            {"id": "Q3_PC", "text": "¿Que es la SUNAVAL?", "answer": "Es quien protege a inversionistas y regula a intermediarios y emisores del Mercado de Valores venezolano"},
-            {"id": "Q4_PC", "text": "¿Que es la Bolsa de Valores de Caracas?", "answer": "Es el lugar donde se compran y venden bonos, acciones y otros instrumentos de manera ordenada a traves de las Casas de Bolsa y esta regulada por la SUNAVAL"},
-            {"id": "Q5_PC", "text": "¿Como invierto?", "answer": "Para invertir en el Fondo Mutual Abierto de PER CAPITAL debes descargar el app, registrate, subir recaudos y colocar tus ordenes de compra."}
+            {"id": "Q1_PC", "text": "¿Que es Per Capital?", "answer": "Es un grupo de empresas del Mercado de Valores Venezolano reguladas por la SUNAVAL.", "short_title": "¿Qué es?"},
+            {"id": "Q2_PC", "text": "¿Quien regula a PER CAPITAL?", "answer": "La SUNAVAL (Superintendencia Nacional de Valores)", "short_title": "Regulación"},
+            {"id": "Q3_PC", "text": "¿Que es la SUNAVAL?", "answer": "Es quien protege a inversionistas y regula a intermediarios y emisores del Mercado de Valores venezolano", "short_title": "SUNAVAL"},
+            {"id": "Q4_PC", "text": "¿Que es la Bolsa de Valores de Caracas?", "answer": "Es el lugar donde se compran y venden bonos, acciones y otros instrumentos de manera ordenada a traves de las Casas de Bolsa y esta regulada por la SUNAVAL", "short_title": "BVC"},
+            {"id": "Q5_PC", "text": "¿Como invierto?", "answer": "Para invertir en el Fondo Mutual Abierto de PER CAPITAL debes descargar el app, registrate, subir recaudos y colocar tus ordenes de compra.", "short_title": "Cómo invertir"}
         ]
     },
     "FONDO_MUTUAL": {
         "id": "FONDO_MUTUAL",
         "title": "Fondo Mutual Abierto",
         "questions": [
-            {"id": "Q1_FMA", "text": "¿Que es un Fondo Mutual?", "answer": "Es un instrumento de inversion en grupo donde varias personas ponen dinero en un fondo que es gestionado por expertos y esta disenado para ser diversificado, de bajo riesgo y dirigido a pequenos inversionistas con poca experiencia"},
-            {"id": "Q2_FMA", "text": "¿Que es una Unidad de Inversion?", "answer": "Es una 'porcion' del fondo. Cuando inviertes adquieres unidades que representan tu parte del fondo."},
-            {"id": "Q3_FMA", "text": "¿Que es el VUI?", "answer": "El Valor de la Unidad de Inversion (VUI) es el precio de una Unidad de Inversion. Si el VUI sube tu inversion gana valor. Se calcula diariamente al cierre del dia y depende del comportamiento de las inversiones del fondo."},
-            {"id": "Q4_FMA", "text": "¿Como invierto?", "answer": "Descarga el app para Android y IOS, registrate, sube recaudos, acepta los contratos, espera tu aprobacion y suscribe Unidades de Inversion cuando quieras y cuantas veces desees"},
-            {"id": "Q5_FMA", "text": "¿Cual es el monto minimo de inversion?", "answer": "1 Unidad de Inversion"},
-            {"id": "Q6_FMA", "text": "¿Como gano?", "answer": "Ganas por apreciacion (subida del VUI) o por dividendo (en caso de que sea decretado)"},
-            {"id": "Q7_FMA", "text": "¿En cuanto tiempo gano?", "answer": "Ganas a largo plazo, se recomienda medir resultados trimestralmente"},
-            {"id": "Q8_FMA", "text": "¿Donde consigo mas informacion?", "answer": "En los prospectos y hojas de terminos en www.per-capital.com"}
+            {"id": "Q1_FMA", "text": "¿Que es un Fondo Mutual?", "answer": "Es un instrumento de inversion en grupo donde varias personas ponen dinero en un fondo que es gestionado por expertos y esta disenado para ser diversificado, de bajo riesgo y dirigido a pequenos inversionistas con poca experiencia", "short_title": "Fondo Mutual"},
+            {"id": "Q2_FMA", "text": "¿Que es una Unidad de Inversion?", "answer": "Es una 'porcion' del fondo. Cuando inviertes adquieres unidades que representan tu parte del fondo.", "short_title": "Unidad de Inversión"},
+            {"id": "Q3_FMA", "text": "¿Que es el VUI?", "answer": "El Valor de la Unidad de Inversion (VUI) es el precio de una Unidad de Inversion. Si el VUI sube tu inversion gana valor. Se calcula diariamente al cierre del dia y depende del comportamiento de las inversiones del fondo.", "short_title": "Valor VUI"},
+            {"id": "Q4_FMA", "text": "¿Como invierto?", "answer": "Descarga el app para Android y IOS, registrate, sube recaudos, acepta los contratos, espera tu aprobacion y suscribe Unidades de Inversion cuando quieras y cuantas veces desees", "short_title": "Cómo invertir"},
+            {"id": "Q5_FMA", "text": "¿Cual es el monto minimo de inversion?", "answer": "1 Unidad de Inversion", "short_title": "Monto Mínimo"},
+            {"id": "Q6_FMA", "text": "¿Como gano?", "answer": "Ganas por apreciacion (subida del VUI) o por dividendo (en caso de que sea decretado)", "short_title": "Cómo gano"},
+            {"id": "Q7_FMA", "text": "¿En cuanto tiempo gano?", "answer": "Ganas a largo plazo, se recomienda medir resultados trimestralmente", "short_title": "Plazo"},
+            {"id": "Q8_FMA", "text": "¿Donde consigo mas informacion?", "answer": "En los prospectos y hojas de terminos en www.per-capital.com", "short_title": "Más información"}
         ]
     },
     "APP_GENERAL": {
         "id": "APP_GENERAL",
         "title": "Información General App",
         "questions": [
-            {"id": "Q1_APP_GEN", "text": "¿Puedo comprar acciones y bonos?", "answer": "No, nuestra app es únicamente para invertir en nuestro Fondo Mutual Abierto. Pronto saldrá la nueva versión de nuestra app para negociar"}
+            {"id": "Q1_APP_GEN", "text": "¿Puedo comprar acciones y bonos?", "answer": "No, nuestra app es únicamente para invertir en nuestro Fondo Mutual Abierto. Pronto saldrá la nueva versión de nuestra app para negociar", "short_title": "Acciones y bonos"}
         ]
     },
     "APP_REGISTRO": {
-        "id": "APP_REGISTRO", 
+        "id": "APP_REGISTRO",
         "title": "Registro en la App",
         "questions": [
-            {"id": "Q1_APP_REG", "text": "¿Como me registro?", "answer": "Descarga el app, completa 100% de los datos, acepta los contratos, sube tus recaudos como Cedula de Identidad y Selfie y espera tu aprobacion."},
-            {"id": "Q2_APP_REG", "text": "¿Cuanto tarda mi aprobacion?", "answer": "De 2 a 5 dias habiles siempre que hayas completado 100% de registro y recaudos"},
-            {"id": "Q3_APP_REG", "text": "¿Que hago si no me aprueban?", "answer": "Revisa que hayas completado 100% del registro y recaudos, sino contactanos en SOPORTE"},
-            {"id": "Q4_APP_REG", "text": "¿Puedo invertir si soy menor de edad?", "answer": "Debes dirigirte a nuestras oficinas y registrarte con tu representante legal"},
-            {"id": "Q5_APP_REG", "text": "¿Puedo modificar alguno de mis datos?", "answer": "Si, pero por exigencia del ley entras nuevamente en revision"},
-            {"id": "Q6_APP_REG", "text": "¿Debo tener cuenta en la Caja Venezolana?", "answer": "No, para invertir en nuestro Fondo Mutual Abierto no es necesaria la cuenta en la CVV"}
+            {"id": "Q1_APP_REG", "text": "¿Como me registro?", "answer": "Descarga el app, completa 100% de los datos, acepta los contratos, sube tus recaudos como Cedula de Identidad y Selfie y espera tu aprobacion.", "short_title": "Cómo registrarme"},
+            {"id": "Q2_APP_REG", "text": "¿Cuanto tarda mi aprobacion?", "answer": "De 2 a 5 dias habiles siempre que hayas completado 100% de registro y recaudos", "short_title": "Tiempo de aprobación"},
+            {"id": "Q3_APP_REG", "text": "¿Que hago si no me aprueban?", "answer": "Revisa que hayas completado 100% del registro y recaudos, sino contactanos en SOPORTE", "short_title": "Si no me aprueban"},
+            {"id": "Q4_APP_REG", "text": "¿Puedo invertir si soy menor de edad?", "answer": "Debes dirigirte a nuestras oficinas y registrarte con tu representante legal", "short_title": "Inversión menor de edad"},
+            {"id": "Q5_APP_REG", "text": "¿Puedo modificar alguno de mis datos?", "answer": "Si, pero por exigencia del ley entras nuevamente en revision", "short_title": "Modificar datos"},
+            {"id": "Q6_APP_REG", "text": "¿Debo tener cuenta en la Caja Venezolana?", "answer": "No, para invertir en nuestro Fondo Mutual Abierto no es necesaria la cuenta en la CVV", "short_title": "Cuenta CVV"}
         ]
     },
     "APP_SUSCRIPCION": {
         "id": "APP_SUSCRIPCION",
         "title": "Suscripción",
         "questions": [
-            {"id": "Q1_APP_SUS", "text": "¿Como suscribo (compro)?", "answer": "Haz click en Negociacion > Suscripcion > Monto a invertir > Suscribir > Metodo de Pago. Recuerda pagar desde TU cuenta bancaria y subir comprobante de pago"},
-            {"id": "Q2_APP_SUS", "text": "¿Como pago mi suscripcion?", "answer": "Debes pagar desde TU cuenta bancaria via Pago Movil. Y recuerda subir comprobante. IMPORTANTE: no se aceptan pagos de terceros."},
-            {"id": "Q3_APP_SUS", "text": "¿Puede pagar alguien por mi?", "answer": "No, la ley prohibe los pagos de terceros. Siempre debes pagar desde tu cuenta bancaria."},
-            {"id": "Q4_APP_SUS", "text": "¿Como veo mi inversion?", "answer": "En el Home en la seccion Mi Cuenta"},
-            {"id": "Q5_APP_SUS", "text": "¿Cuando veo mi inversion?", "answer": "Al cierre del sistema en dias habiles bancarios despues del cierre de mercado y la publicacion de tasas del Banco Central de Venezuela."},
-            {"id": "Q6_APP_SUS", "text": "¿Cuales son las comisiones?", "answer": "3% flat Suscripcion, 3% flat Rescate y 5% anual Administracion"},
-            {"id": "Q7_APP_SUS", "text": "¿Que hago despues de suscribir?", "answer": "Monitorea tu inversion desde el app"},
-            {"id": "Q8_APP_SUS", "text": "¿Debo invertir siempre el mismo monto?", "answer": "No, puedes invertir el monto que desees"},
-            {"id": "Q9_APP_SUS", "text": "¿Puedo invertir cuando quiera?", "answer": "Si, puedes invertir cuando quieras, las veces que quieras"}
+            {"id": "Q1_APP_SUS", "text": "¿Como suscribo (compro)?", "answer": "Haz click en Negociacion > Suscripcion > Monto a invertir > Suscribir > Metodo de Pago. Recuerda pagar desde TU cuenta bancaria y subir comprobante de pago", "short_title": "Cómo suscribir"},
+            {"id": "Q2_APP_SUS", "text": "¿Como pago mi suscripcion?", "answer": "Debes pagar desde TU cuenta bancaria via Pago Movil. Y recuerda subir comprobante. IMPORTANTE: no se aceptan pagos de terceros.", "short_title": "Cómo pagar"},
+            {"id": "Q3_APP_SUS", "text": "¿Puede pagar alguien por mi?", "answer": "No, la ley prohibe los pagos de terceros. Siempre debes pagar desde tu cuenta bancaria.", "short_title": "Pago de terceros"},
+            {"id": "Q4_APP_SUS", "text": "¿Como veo mi inversion?", "answer": "En el Home en la seccion Mi Cuenta", "short_title": "Ver inversión"},
+            {"id": "Q5_APP_SUS", "text": "¿Cuando veo mi inversion?", "answer": "Al cierre del sistema en dias habiles bancarios despues del cierre de mercado y la publicacion de tasas del Banco Central de Venezuela.", "short_title": "Cuándo la veo"},
+            {"id": "Q6_APP_SUS", "text": "¿Cuales son las comisiones?", "answer": "3% flat Suscripcion, 3% flat Rescate y 5% anual Administracion", "short_title": "Comisiones"},
+            {"id": "Q7_APP_SUS", "text": "¿Que hago despues de suscribir?", "answer": "Monitorea tu inversion desde el app", "short_title": "Después de suscribir"},
+            {"id": "Q8_APP_SUS", "text": "¿Debo invertir siempre el mismo monto?", "answer": "No, puedes invertir el monto que desees", "short_title": "Monto de inversión"},
+            {"id": "Q9_APP_SUS", "text": "¿Puedo invertir cuando quiera?", "answer": "Si, puedes invertir cuando quieras, las veces que quieras", "short_title": "Invertir cuando quiera"}
         ]
     },
     "APP_RESCATE": {
         "id": "APP_RESCATE",
         "title": "Rescate",
         "questions": [
-            {"id": "Q1_APP_RES", "text": "¿Como rescato (vendo)?", "answer": "Haz click en Negociacion > Rescate > Unidades a Rescatar > Rescatar. Recuerda se enviaran fondos a TU cuenta bancaria"},
-            {"id": "Q2_APP_RES", "text": "¿Cuando me pagan mis rescates (ventas)?", "answer": "Al proximo dia habil bancario en horario de mercado"},
-            {"id": "Q3_APP_RES", "text": "¿Como veo el saldo de mi inversion?", "answer": "En el Home en la seccion Mi Cuenta"},
-            {"id": "Q4_APP_RES", "text": "¿Cuando veo el saldo de mi inversion?", "answer": "Al cierre del sistema en dias habiles bancarios despues del cierre de mercado y la publicacion de tasas del Banco Central de Venezuela."},
-            {"id": "Q5_APP_RES", "text": "¿Cuando puedo Rescatar?", "answer": "Cuando tu quieras, y se liquida en dias habiles bancarios."},
-            {"id": "Q6_APP_RES", "text": "¿Cuales son las comisiones?", "answer": "3% flat Suscripcion, 3% flat Rescate y 5% anual Administracion"}
+            {"id": "Q1_APP_RES", "text": "¿Como rescato (vendo)?", "answer": "Haz click en Negociacion > Rescate > Unidades a Rescatar > Rescatar. Recuerda se enviaran fondos a TU cuenta bancaria", "short_title": "Cómo rescatar"},
+            {"id": "Q2_APP_RES", "text": "¿Cuando me pagan mis rescates (ventas)?", "answer": "Al proximo dia habil bancario en horario de mercado", "short_title": "Pago de rescate"},
+            {"id": "Q3_APP_RES", "text": "¿Como veo el saldo de mi inversion?", "answer": "En el Home en la seccion Mi Cuenta", "short_title": "Ver saldo"},
+            {"id": "Q4_APP_RES", "text": "¿Cuando veo el saldo de mi inversion?", "answer": "Al cierre del sistema en dias habiles bancarios despues del cierre de mercado y la publicacion de tasas del Banco Central de Venezuela.", "short_title": "Actualización de saldo"},
+            {"id": "Q5_APP_RES", "text": "¿Cuando puedo Rescatar?", "answer": "Cuando tu quieras, y se liquida en dias habiles bancarios.", "short_title": "Cuándo rescatar"},
+            {"id": "Q6_APP_RES", "text": "¿Cuales son las comisiones?", "answer": "3% flat Suscripcion, 3% flat Rescate y 5% anual Administracion", "short_title": "Comisiones"}
         ]
     },
     "APP_POSICION": {
         "id": "APP_POSICION",
         "title": "Posición (Saldo)",
         "questions": [
-            {"id": "Q1_APP_POS", "text": "¿Cuando se actualiza mi posicion (saldo)?", "answer": "Al cierre del sistema en dias habiles bancarios despues del cierre de mercado y la publicacion de tasas del Banco Central de Venezuela."},
-            {"id": "Q2_APP_POS", "text": "¿Por que varia mi posicion (saldo)?", "answer": "Tu saldo y rendimiento sube si suben los precios de las inversiones del fondo, se reciben dividendos o cupones y bajan si estos precios caen."},
-            {"id": "Q3_APP_POS", "text": "¿Donde veo mi historico?", "answer": "En la seccion Historial"},
-            {"id": "Q4_APP_POS", "text": "¿Donde veo reportes?", "answer": "En la seccion Documentos > Reportes > Año > Trimestre"}
+            {"id": "Q1_APP_POS", "text": "¿Cuando se actualiza mi posicion (saldo)?", "answer": "Al cierre del sistema en dias habiles bancarios despues del cierre de mercado y la publicacion de tasas del Banco Central de Venezuela.", "short_title": "Actualización de saldo"},
+            {"id": "Q2_APP_POS", "text": "¿Por que varia mi posicion (saldo)?", "answer": "Tu saldo y rendimiento sube si suben los precios de las inversiones del fondo, se reciben dividendos o cupones y bajan si estos precios caen.", "short_title": "Variación de saldo"},
+            {"id": "Q3_APP_POS", "text": "¿Donde veo mi historico?", "answer": "En la seccion Historial", "short_title": "Ver historial"},
+            {"id": "Q4_APP_POS", "text": "¿Donde veo reportes?", "answer": "En la seccion Documentos > Reportes > Año > Trimestre", "short_title": "Ver reportes"}
         ]
     },
     "RIESGOS": {
         "id": "RIESGOS",
         "title": "Riesgos",
         "questions": [
-            {"id": "Q1_RIE", "text": "¿Cuales son los riesgos al invertir?", "answer": "Todas las inversionbes estan sujetas a riesgos y la perdida de capital es posible. Agunos riesgos son: riesgo de mercado, riesgo pais, riesgo cambiario, riesgo sector, entre otros."}
+            {"id": "Q1_RIE", "text": "¿Cuales son los riesgos al invertir?", "answer": "Todas las inversionbes estan sujetas a riesgos y la perdida de capital es posible. Agunos riesgos son: riesgo de mercado, riesgo pais, riesgo cambiario, riesgo sector, entre otros.", "short_title": "Riesgos de inversión"}
         ]
     },
     "SOPORTE": {
         "id": "SOPORTE",
         "title": "Soporte",
         "questions": [
-            {"id": "Q1_SOP", "text": "Estoy en revision, que hago?", "answer": "Asegurate de haber completado 100% datos y recaudos y espera tu aprobacion. Si tarda mas de lo habitual contactanos en SOPORTE"},
-            {"id": "Q2_SOP", "text": "No me llega el SMS", "answer": "Asegurate de tener buena senal y de que hayas colocado correctamente un numero telefonico venezolano"},
-            {"id": "Q3_SOP", "text": "No me llega el Correo", "answer": "Asegurate de no dejar espacios al final cuando escribiste tu correo electronico"},
-            {"id": "Q4_SOP", "text": "No logro descargar el App", "answer": "Asegurate de que tu app store este configurada en la region de Venezuela"},
-            {"id": "Q5_SOP", "text": "No me abre el App", "answer": "Asegurate de tener la version actualizada y que tu tienda de apps este configurada en la region de Venezuela"},
-            {"id": "Q6_SOP", "text": "Como recupero mi clave", "answer": "Seleccione Recuperar, te legara una clave temporal para ingresar y luego actualiza tu nueva clave"}
+            {"id": "Q1_SOP", "text": "Estoy en revision, que hago?", "answer": "Asegurate de haber completado 100% datos y recaudos y espera tu aprobacion. Si tarda mas de lo habitual contactanos en SOPORTE", "short_title": "En revisión"},
+            {"id": "Q2_SOP", "text": "No me llega el SMS", "answer": "Asegurate de tener buena senal y de que hayas colocado correctamente un numero telefonico venezolano", "short_title": "Problema con SMS"},
+            {"id": "Q3_SOP", "text": "No me llega el Correo", "answer": "Asegurate de no dejar espacios al final cuando escribiste tu correo electronico", "short_title": "Problema con correo"},
+            {"id": "Q4_SOP", "text": "No logro descargar el App", "answer": "Asegurate de que tu app store este configurada en la region de Venezuela", "short_title": "No puedo descargar app"},
+            {"id": "Q5_SOP", "text": "No me abre el App", "answer": "Asegurate de tener la version actualizada y que tu tienda de apps este configurada en la region de Venezuela", "short_title": "La app no abre"},
+            {"id": "Q6_SOP", "text": "Como recupero mi clave", "answer": "Seleccione Recuperar, te legara una clave temporal para ingresar y luego actualiza tu nueva clave", "short_title": "Recuperar clave"}
         ]
     }
 }
@@ -156,27 +156,34 @@ def truncate_text(text: str, max_length: int, add_ellipsis: bool = True) -> str:
     else:
         return text[:max_length]
 
-def format_question_for_list(question: str, index: int) -> Dict:
-    """Format question for list message with proper character limits"""
-    # Title: max 24 characters (including number)
-    title_prefix = f"{index}. "
-    available_title_chars = 24 - len(title_prefix)
-    title = title_prefix + truncate_text(question, available_title_chars)
+def format_question_for_list(question: Dict, index: int) -> Dict:
+    """Format question for list message using short_title"""
+    # Use short_title if available, otherwise truncate text
+    title = f"{index}. {question.get('short_title', truncate_text(question['text'], 20))}"
     
-    # Description: max 72 characters
-    description = truncate_text(question, 72)
+    # Ensure title doesn't exceed 24 characters
+    if len(title) > 24:
+        title = title[:24]
+    
+    # Description: max 72 characters - use full text truncated
+    description = truncate_text(question["text"], 72)
     
     return {
         "title": title,
         "description": description
     }
 
-def format_question_for_button(question: str, index: int) -> str:
-    """Format question for reply button with proper character limits"""
-    # Button title: max 20 characters (including number)
-    prefix = f"{index}. "
-    available_chars = 20 - len(prefix)
-    return prefix + truncate_text(question, available_chars)
+def format_question_for_button(question: Dict, index: int) -> str:
+    """Format question for reply button using short_title"""
+    # Use short_title if available, otherwise truncate text
+    short_title = question.get('short_title', truncate_text(question['text'], 15))
+    title = f"{index}. {short_title}"
+    
+    # Ensure button title doesn't exceed 20 characters
+    if len(title) > 20:
+        title = title[:20]
+        
+    return title
 
 # ==================== MESSAGE BUILDERS ====================
 
@@ -339,7 +346,7 @@ async def send_category_questions(to: str, category_id: str):
         # Use reply buttons for 3 or fewer questions
         buttons = []
         for i, q in enumerate(questions[:3]):
-            formatted_title = format_question_for_button(q["text"], i+1)
+            formatted_title = format_question_for_button(q, i+1)
             buttons.append({
                 "type": "reply",
                 "reply": {
@@ -357,7 +364,7 @@ async def send_category_questions(to: str, category_id: str):
         # Use interactive list for 4+ questions (max 10 per section)
         rows = []
         for i, q in enumerate(questions[:10]):  # Limit to 10 questions per section
-            formatted_q = format_question_for_list(q["text"], i+1)
+            formatted_q = format_question_for_list(q, i+1)
             rows.append({
                 "id": q["id"],
                 "title": formatted_q["title"],
@@ -501,7 +508,7 @@ async def handle_rating(to: str, rating_id: str):
     await send_conversation_end(to)
 
 async def send_conversation_end(to: str):
-    """Send conversation end message"""
+    """Send conversation end message and mark as finished"""
     end_message = (
         "🔚 *Esta conversación ha terminado*\n\n"
         "Si necesitas más ayuda en el futuro, no dudes en escribirnos nuevamente. "
@@ -512,9 +519,11 @@ async def send_conversation_end(to: str):
     
     await send_message(build_text_message(to, end_message))
     
-    # Clean up user session
-    if to in user_sessions:
-        del user_sessions[to]
+    # Mark session as finished instead of deleting immediately
+    user_sessions[to] = {
+        "state": "finished",
+        "last_interaction": datetime.now().isoformat()
+    }
     
     logger.info(f"Conversation ended for user {to}")
 
@@ -547,25 +556,27 @@ async def process_text_message(from_number: str, text: str, message_id: str):
         await send_welcome_sequence(from_number)
         return
     
-    # Check if it's a negative response while in more_help state
+    # Get current user state
     user_state = user_sessions.get(from_number, {}).get("state", "new")
     
+    # If user has no active session or finished conversation, restart with welcome
+    if user_state in ["new", "finished"] or from_number not in user_sessions:
+        await send_welcome_sequence(from_number)
+        return
+    
+    # Check if it's a negative response while in more_help state
     if user_state == "more_help" and is_negative_response(text):
         await send_rating_request(from_number)
         return
     
-    if user_state == "new":
-        # New user, send welcome
-        await send_welcome_sequence(from_number)
-    else:
-        # User sent text while in middle of flow, redirect to main menu
-        redirect_text = (
-            "Para brindarte la mejor ayuda, por favor utiliza los botones y opciones del menú. "
-            "Te muestro nuevamente las opciones disponibles:"
-        )
-        await send_message(build_text_message(from_number, redirect_text))
-        await asyncio.sleep(1.0)
-        await send_main_menu(from_number)
+    # For any other text during active flow, redirect to main menu with helpful message
+    redirect_text = (
+        "Para brindarte la mejor ayuda, por favor utiliza los botones y opciones del menú. "
+        "Te muestro nuevamente las opciones disponibles:"
+    )
+    await send_message(build_text_message(from_number, redirect_text))
+    await asyncio.sleep(1.0)
+    await send_main_menu(from_number)
 
 async def process_interactive_message(from_number: str, interactive_data: Dict):
     """Process interactive message (button/list replies)"""
