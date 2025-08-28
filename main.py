@@ -240,9 +240,9 @@ async def send_typing_and_wait(to: str, seconds: float = 1.5):
 # -------------------- Conversation flows --------------------
 async def send_welcome_sequence(to: str):
     text = (
-        "¡Hola! 👋 Bienvenido a Per Capital\n\n"
-        "Soy tu asistente virtual y estoy aquí para ayudarte con tus consultas.\n\n"
-        "¿Cómo puedo ayudarte hoy?"
+        """👋 ¡Bienvenido, inversionista!
+Soy Benjamín, tu asistente virtual en Per Capital, y estoy aquí para ayudarte con cualquier consulta que tengas.
+¿En qué puedo ayudarte hoy?"""
     )
     await send_typing_and_wait(to, 1.0)
     await send_message(build_text_message(to, text))
@@ -502,14 +502,24 @@ def _extract_interactive_candidate(obj: Dict) -> Optional[str]:
 async def handle_feedback(from_number: str, reply_id: str):
     rid = (reply_id or "").strip().lower()
     if rid in ("yes", "sí", "si"):
-        response = "¡Gracias por tu confirmación! 😊"
+        # Quiere más ayuda → vuelve al menú
+        response = "¡Perfecto! Te llevo al menú principal para seguir ayudándote. 👇"
+        await send_message(build_text_message(from_number, response))
+        await asyncio.sleep(0.8)
+        await send_main_menu(from_number)
+
     elif rid == "no":
-        response = "Entiendo, gracias por tu respuesta. 👍"
+        # No necesita más ayuda → pedir calificación
+        response = "¡Entendido! Antes de cerrar, ¿podrías calificar la atención? 😊"
+        await send_message(build_text_message(from_number, response))
+        await asyncio.sleep(0.3)
+        await send_rating_request(from_number)  # ← muestra los botones de calificación
+
     else:
         response = "No entendí tu respuesta."
-    await send_message(build_text_message(from_number, response))
-    await asyncio.sleep(1.0)
-    await send_main_menu(from_number)
+        await send_message(build_text_message(from_number, response))
+        await asyncio.sleep(0.8)
+        await send_main_menu(from_number)
 
 async def handle_rating_buttons(from_number: str, reply_id: str):
     rid = (reply_id or "").strip()
