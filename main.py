@@ -33,6 +33,9 @@ GRAPH_API_URL = f"https://graph.facebook.com/v18.0/{PHONE_NUMBER_ID}/messages"
 MEDIA_UPLOAD_URL = f"https://graph.facebook.com/v18.0/{PHONE_NUMBER_ID}/media"
 HEADERS = {"Authorization": f"Bearer {WHATSAPP_TOKEN}", "Content-Type": "application/json"}
 
+# >>> REENVÍO: número de WhatsApp del encargado (E.164 sin '+')
+FORWARD_WHATSAPP_NUMBER = os.getenv("FORWARD_WHATSAPP_NUMBER", "584226103010")
+
 # -------------------- App & Estado --------------------
 app = FastAPI(title="Tony's Pizza WhatsApp Chatbot")
 
@@ -247,6 +250,15 @@ async def send_typing_indicator_and_wait(to: str, seconds: float = 1.2):
         await asyncio.sleep(seconds)
     except Exception as e:
         logger.error(f"Typing indicator error: {e}")
+
+# >>> REENVÍO: helper para mandar texto al encargado
+async def forward_to_ops(text: str):
+    if not FORWARD_WHATSAPP_NUMBER:
+        return
+    payload = build_text_message(FORWARD_WHATSAPP_NUMBER, text)
+    ok = await send_message(payload)
+    if not ok:
+        logger.error("No se pudo reenviar el mensaje al número del encargado.")
 
 # -------------------- Flujos conversacionales --------------------
 async def send_welcome_sequence(to: str):
@@ -480,6 +492,17 @@ async def save_and_finish_order(to: str):
         f"🎉 ¡Listo! Tu pedido *{order_no}* fue recibido.\n{_order_summary_text(to)}\n\n"
         "Te avisaremos cuando esté en camino o listo para retirar. ¡Gracias por elegir Tony's Pizza! 🍕"
     ))
+
+    # >>> REENVÍO: enviar resumen al número del encargado
+    ops_name = get_first_name(to) or to
+    ops_text = (
+        f"📦 *Nuevo pedido confirmado* #{order_no}\n"
+        f"{_order_summary_text(to)}\n"
+        f"📱 Cliente WA: {to}\n"
+        f"🕒 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+    )
+    await forward_to_ops(ops_text)
+
     # limpiar subestado de orden pero mantener la sesión general
     user_sessions.get(to, {}).pop("order", None)
     await asyncio.sleep(0.6)
