@@ -5,6 +5,7 @@ import asyncio
 import logging
 import hmac
 import hashlib
+import re
 from typing import Dict, List, Optional, Any
 from datetime import datetime
 
@@ -144,13 +145,62 @@ KNOWLEDGE_BASE = {
     }
 }
 
+# ==================== NAME HELPERS ====================
+
+def extract_first_name(full_name: str) -> str:
+    if not full_name:
+        return ""
+    # limpia espacios y signos comunes
+    name = re.sub(r'[^\wÁÉÍÓÚáéíóúÑñ\s\'.-]', '', full_name, flags=re.UNICODE).strip()
+    # primer token significativo
+    parts = [p for p in name.split() if p and p.lower() not in {"de", "del", "la", "el"}]
+    if not parts:
+        return name
+    # capitaliza primera letra de cada parte corta (solo para estética básica)
+    first = parts[0]
+    return first[:1].upper() + first[1:]
+
+def set_user_name(phone: str, full_name: str):
+    if not phone or not full_name:
+        return
+    session = user_sessions.setdefault(phone, {})
+    session["full_name"] = full_name.strip()
+    session["first_name"] = extract_first_name(full_name)
+    session["last_interaction"] = datetime.now().isoformat()
+    logger.info(f"Saved name for {phone}: {session['first_name']} ({session['full_name']})")
+
+def parse_and_set_name_from_text(phone: str, text: str) -> Optional[str]:
+    """
+    Detecta frases: 'me llamo X', 'mi nombre es X', 'soy X'
+    Retorna el primer nombre si encontró uno y lo guarda.
+    """
+    if not text:
+        return None
+    patterns = [
+        r"(?:^|\b)(?:me llamo|mi nombre es)\s+([A-Za-zÁÉÍÓÚáéíóúÑñ\'.\- ]{2,})",
+        r"(?:^|\b)soy\s+([A-Za-zÁÉÍÓÚáéíóúÑñ\'.\- ]{2,})"
+    ]
+    lowered = text.strip()
+    for pat in patterns:
+        m = re.search(pat, lowered, flags=re.IGNORECASE | re.UNICODE)
+        if m:
+            candidate = m.group(1).strip().rstrip(".!,;:)")
+            # evita capturar frases largas con más de 5 palabras (generalmente descripciones)
+            if len(candidate.split()) > 5:
+                continue
+            set_user_name(phone, candidate)
+            return user_sessions.get(phone, {}).get("first_name")
+    return None
+
+def get_first_name(phone: str) -> str:
+    return user_sessions.get(phone, {}).get("first_name", "")
+
 # ==================== UTILITY FUNCTIONS ====================
 
 def truncate_text(text: str, max_length: int, add_ellipsis: bool = True) -> str:
     """Truncate text to specified length"""
     if len(text) <= max_length:
         return text
-    
     if add_ellipsis and max_length > 3:
         return text[:max_length-3] + "..."
     else:
@@ -158,46 +208,26 @@ def truncate_text(text: str, max_length: int, add_ellipsis: bool = True) -> str:
 
 def format_question_for_list(question: Dict, index: int) -> Dict:
     """Format question for list message using short_title"""
-    # Use short_title if available, otherwise truncate text
     title = f"{index}. {question.get('short_title', truncate_text(question['text'], 20))}"
-    
-    # Ensure title doesn't exceed 24 characters
     if len(title) > 24:
         title = title[:24]
-    
-    # Description: max 72 characters - use full text truncated
     description = truncate_text(question["text"], 72)
-    
-    return {
-        "title": title,
-        "description": description
-    }
+    return {"title": title, "description": description}
 
 def format_question_for_button(question: Dict, index: int) -> str:
     """Format question for reply button using short_title"""
-    # Use short_title if available, otherwise truncate text
     short_title = question.get('short_title', truncate_text(question['text'], 15))
     title = f"{index}. {short_title}"
-    
-    # Ensure button title doesn't exceed 20 characters
     if len(title) > 20:
         title = title[:20]
-        
     return title
 
 # ==================== MESSAGE BUILDERS ====================
 
 def build_text_message(to: str, text: str) -> Dict:
-    """Build a text message payload"""
-    return {
-        "messaging_product": "whatsapp",
-        "to": to,
-        "type": "text",
-        "text": {"body": text}
-    }
+    return {"messaging_product": "whatsapp", "to": to, "type": "text", "text": {"body": text}}
 
 def build_interactive_list_message(to: str, header: str, body: str, sections: List[Dict]) -> Dict:
-    """Build an interactive list message payload"""
     return {
         "messaging_product": "whatsapp",
         "to": to,
@@ -207,15 +237,11 @@ def build_interactive_list_message(to: str, header: str, body: str, sections: Li
             "header": {"type": "text", "text": header},
             "body": {"text": body},
             "footer": {"text": "Per Capital - Tu asistente virtual"},
-            "action": {
-                "button": "Ver opciones",
-                "sections": sections
-            }
+            "action": {"button": "Ver opciones", "sections": sections}
         }
     }
 
 def build_reply_button_message(to: str, body: str, buttons: List[Dict]) -> Dict:
-    """Build a reply button message payload"""
     return {
         "messaging_product": "whatsapp",
         "to": to,
@@ -229,17 +255,11 @@ def build_reply_button_message(to: str, body: str, buttons: List[Dict]) -> Dict:
     }
 
 def build_read_receipt(message_id: str) -> Dict:
-    """Build a read receipt payload"""
-    return {
-        "messaging_product": "whatsapp",
-        "status": "read",
-        "message_id": message_id
-    }
+    return {"messaging_product": "whatsapp", "status": "read", "message_id": message_id}
 
 # ==================== WHATSAPP API FUNCTIONS ====================
 
 async def send_message(payload: Dict) -> bool:
-    """Send message to WhatsApp API"""
     try:
         async with httpx.AsyncClient() as client:
             response = await client.post(GRAPH_API_URL, headers=HEADERS, json=payload, timeout=30.0)
@@ -257,29 +277,30 @@ async def send_message(payload: Dict) -> bool:
         return False
 
 async def send_typing_indicator_and_wait(to: str, seconds: float = 2.0):
-    """Send typing indicator and wait"""
     try:
         await asyncio.sleep(0.5)
         await asyncio.sleep(seconds)
     except Exception as e:
         logger.error(f"Error in typing indicator: {e}")
 
+# ==================== CONVERSATION FLOWS ====================
+
 async def send_welcome_sequence(to: str):
-    """Send welcome message sequence with typing indicators"""
+    """Welcome message personalized with first name if available"""
+    name = get_first_name(to)
+    saludo = f"¡Hola, {name}! 👋" if name else "¡Hola! 👋"
     welcome_text = (
-        "¡Hola! 👋 Bienvenido a Per Capital\n\n"
+        f"{saludo} Bienvenido a Per Capital\n\n"
         "Soy tu asistente virtual y estoy aquí para ayudarte con todas tus consultas "
         "sobre inversiones, nuestra app y servicios financieros.\n\n"
         "¿Cómo puedo ayudarte hoy?"
     )
-    
     await send_typing_indicator_and_wait(to, 1.5)
     await send_message(build_text_message(to, welcome_text))
     await asyncio.sleep(1.0)
     await send_main_menu(to)
 
 async def send_main_menu(to: str):
-    """Send main interactive menu"""
     sections = [{
         "title": "Categorías disponibles",
         "rows": [
@@ -290,23 +311,20 @@ async def send_main_menu(to: str):
             {"id": "SOPORTE", "title": "Soporte Técnico", "description": "Ayuda con problemas técnicos"},
         ]
     }]
-    
     payload = build_interactive_list_message(
         to=to,
         header="Menú Principal",
         body="Selecciona la categoría sobre la que necesitas información:",
         sections=sections
     )
-    
     await send_message(payload)
-    
-    user_sessions[to] = {
+    user_sessions.setdefault(to, {})
+    user_sessions[to].update({
         "state": "main_menu",
         "last_interaction": datetime.now().isoformat()
-    }
+    })
 
 async def send_app_submenu(to: str):
-    """Send App submenu"""
     sections = [{
         "title": "Opciones de la App",
         "rows": [
@@ -317,80 +335,57 @@ async def send_app_submenu(to: str):
             {"id": "APP_POSICION", "title": "Posición y Saldo", "description": "Consultar saldos y reportes"},
         ]
     }]
-    
     payload = build_interactive_list_message(
         to=to,
         header="App Per Capital",
         body="¿Sobre qué aspecto de la app necesitas información?",
         sections=sections
     )
-    
     await send_message(payload)
-    
-    user_sessions[to] = {
+    user_sessions.setdefault(to, {})
+    user_sessions[to].update({
         "state": "app_submenu",
         "last_interaction": datetime.now().isoformat()
-    }
+    })
 
 async def send_category_questions(to: str, category_id: str):
-    """Send questions for a specific category with improved formatting"""
     category = KNOWLEDGE_BASE.get(category_id)
     if not category:
         await send_message(build_text_message(to, "Lo siento, no pude encontrar esa categoría."))
         await send_main_menu(to)
         return
-    
     questions = category["questions"]
-    
     if len(questions) <= 3:
-        # Use reply buttons for 3 or fewer questions
         buttons = []
         for i, q in enumerate(questions[:3]):
             formatted_title = format_question_for_button(q, i+1)
-            buttons.append({
-                "type": "reply",
-                "reply": {
-                    "id": q["id"],
-                    "title": formatted_title
-                }
-            })
-        
+            buttons.append({"type": "reply", "reply": {"id": q["id"], "title": formatted_title}})
         payload = build_reply_button_message(
             to=to,
             body=f"*{category['title']}*\n\nSelecciona tu pregunta:",
             buttons=buttons
         )
     else:
-        # Use interactive list for 4+ questions (max 10 per section)
         rows = []
-        for i, q in enumerate(questions[:10]):  # Limit to 10 questions per section
+        for i, q in enumerate(questions[:10]):
             formatted_q = format_question_for_list(q, i+1)
-            rows.append({
-                "id": q["id"],
-                "title": formatted_q["title"],
-                "description": formatted_q["description"]
-            })
-        
+            rows.append({"id": q["id"], "title": formatted_q["title"], "description": formatted_q["description"]})
         sections = [{"title": category["title"], "rows": rows}]
-        
         payload = build_interactive_list_message(
             to=to,
             header=category["title"],
             body="Selecciona tu pregunta:",
             sections=sections
         )
-    
     await send_message(payload)
-    
-    user_sessions[to] = {
+    user_sessions.setdefault(to, {})
+    user_sessions[to].update({
         "state": "questions_menu",
         "category": category_id,
         "last_interaction": datetime.now().isoformat()
-    }
+    })
 
 async def send_answer(to: str, question_id: str):
-    """Send answer for a specific question"""
-    # Find the question in the knowledge base
     answer = None
     question_text = None
     for category in KNOWLEDGE_BASE.values():
@@ -401,186 +396,135 @@ async def send_answer(to: str, question_id: str):
                 break
         if answer:
             break
-    
     if not answer:
         await send_message(build_text_message(to, "Lo siento, no pude encontrar la respuesta a esa pregunta."))
         await send_main_menu(to)
         return
-    
-    # Send typing indicator
     await send_typing_indicator_and_wait(to, 1.5)
-    
-    # Send the answer with question context
-    answer_text = f"📋 *Pregunta:*\n{question_text}\n\n💡 *Respuesta:*\n{answer}"
+    name = get_first_name(to)
+    header = f"📋 *Pregunta*{f' ({name})' if name else ''}:\n"
+    answer_text = f"{header}{question_text}\n\n💡 *Respuesta:*\n{answer}"
     await send_message(build_text_message(to, answer_text))
-    
-    # Wait a moment before asking for more help
     await asyncio.sleep(1.5)
-    
-    # Ask if they need more help
     await send_more_help_options(to)
 
 async def send_more_help_options(to: str):
-    """
-    Envía opciones para continuar o finalizar la conversación 
-    con un mensaje más conciso, amigable y profesional.
-    """
+    name = get_first_name(to)
+    body = f"¿Algo más{', ' + name if name else ''}? 👋"
     buttons = [
-        {
-            "type": "reply",
-            "reply": {
-                "id": "HELP_YES",
-                "title": "Sí, por favor"
-            }
-        },
-        {
-            "type": "reply",
-            "reply": {
-                "id": "HELP_NO",
-                "title": "No, gracias"
-            }
-        }
+        {"type": "reply", "reply": {"id": "HELP_YES", "title": "Sí, por favor"}},
+        {"type": "reply", "reply": {"id": "HELP_NO", "title": "No, gracias"}}
     ]
-    
-    # El cuerpo del mensaje ahora incluye el emoji para un tono más amigable.
-    payload = build_reply_button_message(
-        to=to,
-        body="¿Algo más? 👋",
-        buttons=buttons
-    )
-    
+    payload = build_reply_button_message(to=to, body=body, buttons=buttons)
     await send_message(payload)
-    
-    # Actualiza el estado de la sesión del usuario
-    user_sessions[to] = {
+    user_sessions.setdefault(to, {})
+    user_sessions[to].update({
         "state": "more_help",
         "last_interaction": datetime.now().isoformat()
-    }
+    })
 
 async def send_rating_request(to: str):
-    """Send rating options"""
-    buttons = [
-        {
-            "type": "reply",
-            "reply": {"id": "RATE_EXCELLENT", "title": "⭐⭐⭐ Excelente"}
-        },
-        {
-            "type": "reply", 
-            "reply": {"id": "RATE_GOOD", "title": "⭐⭐ Bueno"}
-        },
-        {
-            "type": "reply",
-            "reply": {"id": "RATE_POOR", "title": "⭐ Necesita mejorar"}
-        }
-    ]
-    
-    payload = build_reply_button_message(
-        to=to,
-        body="¡Gracias por usar nuestro asistente virtual! 😊\n\nPor favor, califica la atención recibida para ayudarnos a mejorar:",
-        buttons=buttons
+    name = get_first_name(to)
+    pref = f"¡Gracias{', ' + name if name else ''} por usar nuestro asistente virtual! 😊"
+    body = (
+        f"{pref}\n\n"
+        "Por favor, califica la atención recibida para ayudarnos a mejorar:"
     )
-    
+    buttons = [
+        {"type": "reply", "reply": {"id": "RATE_EXCELLENT", "title": "⭐⭐⭐ Excelente"}},
+        {"type": "reply", "reply": {"id": "RATE_GOOD", "title": "⭐⭐ Bueno"}},
+        {"type": "reply", "reply": {"id": "RATE_POOR", "title": "⭐ Necesita mejorar"}}
+    ]
+    payload = build_reply_button_message(to=to, body=body, buttons=buttons)
     await send_message(payload)
-    
-    user_sessions[to] = {
+    user_sessions.setdefault(to, {})
+    user_sessions[to].update({
         "state": "rating",
         "last_interaction": datetime.now().isoformat()
-    }
+    })
 
 async def handle_rating(to: str, rating_id: str):
-    """Handle user rating and end conversation"""
     rating_map = {
         "RATE_EXCELLENT": "Excelente ⭐⭐⭐",
-        "RATE_GOOD": "Bueno ⭐⭐", 
+        "RATE_GOOD": "Bueno ⭐⭐",
         "RATE_POOR": "Necesita mejorar ⭐"
     }
-    
     rating = rating_map.get(rating_id, "Desconocida")
-    
-    # Store rating
-    user_ratings.append({
-        "user": to,
-        "rating": rating,
-        "timestamp": datetime.now().isoformat()
-    })
-    
-    # Send thank you message
+    user_ratings.append({"user": to, "rating": rating, "timestamp": datetime.now().isoformat()})
+    name = get_first_name(to)
     thank_you_text = (
-        f"¡Muchas gracias por tu calificación: *{rating}*! 🙏\n\n"
+        f"¡Muchas gracias{', ' + name if name else ''} por tu calificación: *{rating}*! 🙏\n\n"
         "Tu opinión es muy valiosa para nosotros y nos ayuda a mejorar continuamente nuestro servicio."
     )
-    
     await send_message(build_text_message(to, thank_you_text))
-    
-    # Wait a moment before ending conversation
     await asyncio.sleep(2.0)
-    
-    # Send conversation end message
     await send_conversation_end(to)
 
 async def send_conversation_end(to: str):
-    """Send conversation end message and mark as finished"""
+    name = get_first_name(to)
     end_message = (
-        "🔚 *Esta conversación ha terminado*\n\n"
+        f"🔚 *Esta conversación ha terminado*{f', {name}' if name else ''}\n\n"
         "Si necesitas más ayuda en el futuro, no dudes en escribirnos nuevamente. "
         "Estaremos aquí para asistirte.\n\n"
         "¡Que tengas un excelente día! 😊\n\n"
         "_Per Capital - Invirtiendo en tu futuro_"
     )
-    
     await send_message(build_text_message(to, end_message))
-    
-    # Mark session as finished instead of deleting immediately
-    user_sessions[to] = {
+    user_sessions.setdefault(to, {})
+    user_sessions[to].update({
         "state": "finished",
         "last_interaction": datetime.now().isoformat()
-    }
-    
+    })
     logger.info(f"Conversation ended for user {to}")
 
 # ==================== MESSAGE PROCESSING ====================
 
 def is_greeting(text: str) -> bool:
-    """Check if message is a greeting"""
     greetings = [
-        "hola", "hello", "hi", "buenas", "buenos dias", "buenas tardes", 
+        "hola", "hello", "hi", "buenas", "buenos dias", "buenas tardes",
         "buenas noches", "saludos", "que tal", "hey", "inicio", "empezar",
         "comenzar", "start"
     ]
     return text.lower().strip() in greetings
 
 def is_negative_response(text: str) -> bool:
-    """Check if message is a negative response"""
     negative_responses = [
-        "no", "no gracias", "no, gracias", "nada más", "nada mas", 
+        "no", "no gracias", "no, gracias", "nada más", "nada mas",
         "ya no", "suficiente", "está bien", "esta bien", "listo",
         "perfecto", "ok", "vale"
     ]
     return text.lower().strip() in negative_responses
 
 async def process_text_message(from_number: str, text: str, message_id: str):
-    """Process incoming text message"""
     logger.info(f"Processing text message from {from_number}: {text}")
-    
-    # Check if it's a greeting
+
+    # intenta capturar y guardar nombre si el usuario lo declara
+    parsed_first = parse_and_set_name_from_text(from_number, text)
+
     if is_greeting(text):
         await send_welcome_sequence(from_number)
         return
-    
-    # Get current user state
+
     user_state = user_sessions.get(from_number, {}).get("state", "new")
-    
-    # If user has no active session or finished conversation, restart with welcome
+
     if user_state in ["new", "finished"] or from_number not in user_sessions:
         await send_welcome_sequence(from_number)
         return
-    
-    # Check if it's a negative response while in more_help state
+
     if user_state == "more_help" and is_negative_response(text):
         await send_rating_request(from_number)
         return
-    
-    # For any other text during active flow, redirect to main menu with helpful message
+
+    # Si el usuario nos dijo su nombre fuera de flujo, agradécele y muestra menú
+    if parsed_first and user_state not in ["main_menu", "app_submenu", "questions_menu"]:
+        await send_message(build_text_message(
+            from_number,
+            f"¡Encantado, {parsed_first}! He guardado tu nombre. Te muestro el menú principal:"
+        ))
+        await asyncio.sleep(0.8)
+        await send_main_menu(from_number)
+        return
+
     redirect_text = (
         "Para brindarte la mejor ayuda, por favor utiliza los botones y opciones del menú. "
         "Te muestro nuevamente las opciones disponibles:"
@@ -590,29 +534,25 @@ async def process_text_message(from_number: str, text: str, message_id: str):
     await send_main_menu(from_number)
 
 async def process_interactive_message(from_number: str, interactive_data: Dict):
-    """Process interactive message (button/list replies)"""
     message_type = interactive_data.get("type")
-    
+
     if message_type == "list_reply":
         list_reply = interactive_data.get("list_reply", {})
         selection_id = list_reply.get("id")
-        
         logger.info(f"List reply from {from_number}: {selection_id}")
-        
+
         if selection_id == "APP_MAIN":
             await send_app_submenu(from_number)
         elif selection_id in KNOWLEDGE_BASE:
             await send_category_questions(from_number, selection_id)
         else:
-            # It might be a question ID
             await send_answer(from_number, selection_id)
-    
+
     elif message_type == "button_reply":
         button_reply = interactive_data.get("button_reply", {})
         button_id = button_reply.get("id")
-        
         logger.info(f"Button reply from {from_number}: {button_id}")
-        
+
         if button_id == "HELP_YES":
             await send_main_menu(from_number)
         elif button_id == "HELP_NO":
@@ -620,69 +560,71 @@ async def process_interactive_message(from_number: str, interactive_data: Dict):
         elif button_id.startswith("RATE_"):
             await handle_rating(from_number, button_id)
         else:
-            # It might be a question ID
             await send_answer(from_number, button_id)
 
 # ==================== WEBHOOK VERIFICATION ====================
 
 def verify_webhook_signature(payload: bytes, signature: str) -> bool:
-    """Verify webhook signature"""
     if not APP_SECRET:
         logger.warning("APP_SECRET not set, skipping signature verification")
         return True
-    
-    expected_signature = hmac.new(
-        APP_SECRET.encode('utf-8'),
-        payload,
-        hashlib.sha256
-    ).hexdigest()
-    
+    expected_signature = hmac.new(APP_SECRET.encode('utf-8'), payload, hashlib.sha256).hexdigest()
     return hmac.compare_digest(f"sha256={expected_signature}", signature)
 
 # ==================== FASTAPI ENDPOINTS ====================
 
 @app.get("/webhook")
 async def verify_webhook(request: Request):
-    """Verify webhook for WhatsApp"""
     hub_mode = request.query_params.get("hub.mode")
-    hub_verify_token = request.query_params.get("hub.verify_token") 
+    hub_verify_token = request.query_params.get("hub.verify_token")
     hub_challenge = request.query_params.get("hub.challenge")
-    
+
     if hub_mode == "subscribe" and hub_verify_token == VERIFY_TOKEN:
         logger.info("Webhook verified successfully")
-        return JSONResponse(content=int(hub_challenge))
-    
+        # Devuelve el challenge como número o texto; aquí lo retornamos tal cual lo envía Meta
+        try:
+            return JSONResponse(content=int(hub_challenge))
+        except Exception:
+            return JSONResponse(content=hub_challenge)
+
     logger.error("Webhook verification failed")
     raise HTTPException(status_code=403, detail="Forbidden")
 
 @app.post("/webhook")
 async def handle_webhook(request: Request, background_tasks: BackgroundTasks):
-    """Handle incoming WhatsApp messages"""
     try:
         body = await request.body()
         signature = request.headers.get("X-Hub-Signature-256", "")
-        
+
         if not verify_webhook_signature(body, signature):
             logger.error("Invalid webhook signature")
             raise HTTPException(status_code=403, detail="Invalid signature")
-        
+
         data = json.loads(body.decode())
-        
+
         if data.get("object") == "whatsapp_business_account":
             for entry in data.get("entry", []):
                 for change in entry.get("changes", []):
                     value = change.get("value", {})
-                    
+
+                    # === NUEVO: capturar nombres desde contacts ===
+                    # Ejemplo: "contacts": [{"profile": {"name": "Juan Pérez"}, "wa_id": "58412..."}]
+                    for contact in value.get("contacts", []) or []:
+                        wa_id = contact.get("wa_id")
+                        profile_name = ((contact.get("profile") or {}).get("name") or "").strip()
+                        if wa_id and profile_name:
+                            set_user_name(wa_id, profile_name)
+
                     if "messages" in value:
                         for message in value["messages"]:
                             background_tasks.add_task(process_message, message)
-                    
+
                     if "statuses" in value:
                         for status in value["statuses"]:
                             logger.info(f"Message status update: {status}")
-        
+
         return JSONResponse(content={"status": "success"})
-    
+
     except json.JSONDecodeError:
         logger.error("Invalid JSON in webhook")
         raise HTTPException(status_code=400, detail="Invalid JSON")
@@ -691,23 +633,27 @@ async def handle_webhook(request: Request, background_tasks: BackgroundTasks):
         raise HTTPException(status_code=500, detail="Internal server error")
 
 async def process_message(message: Dict):
-    """Process individual message"""
     try:
         from_number = message.get("from")
         message_id = message.get("id")
         message_type = message.get("type")
-        
+
+        # Si el payload de este mensaje trae nombre (caso raro), también lo guardamos
+        maybe_name = ((message.get("profile") or {}).get("name") or "").strip()
+        if from_number and maybe_name:
+            set_user_name(from_number, maybe_name)
+
         logger.info(f"Processing message {message_id} from {from_number}, type: {message_type}")
-        
+
         if message_type == "text":
             text_data = message.get("text", {})
             text_body = text_data.get("body", "")
             await process_text_message(from_number, text_body, message_id)
-            
+
         elif message_type == "interactive":
             interactive_data = message.get("interactive", {})
             await process_interactive_message(from_number, interactive_data)
-            
+
         elif message_type in ["image", "document", "audio", "video", "sticker"]:
             media_response = (
                 "He recibido tu archivo multimedia. "
@@ -716,33 +662,31 @@ async def process_message(message: Dict):
             await send_message(build_text_message(from_number, media_response))
             await asyncio.sleep(1.0)
             await send_main_menu(from_number)
-            
+
         else:
             logger.info(f"Unsupported message type: {message_type}")
             await send_main_menu(from_number)
-            
+
     except Exception as e:
         logger.error(f"Error processing message: {e}")
 
 @app.get("/")
 async def health_check():
-    """Health check endpoint"""
     return {
         "status": "healthy",
         "service": "Per Capital WhatsApp Chatbot",
-        "version": "2.0.0",
+        "version": "2.1.0",
         "active_sessions": len(user_sessions),
         "total_ratings": len(user_ratings)
     }
 
 @app.get("/stats")
 async def get_stats():
-    """Get chatbot statistics"""
     rating_counts = {}
     for rating_data in user_ratings:
         rating = rating_data["rating"]
         rating_counts[rating] = rating_counts.get(rating, 0) + 1
-    
+
     return {
         "active_sessions": len(user_sessions),
         "total_ratings": len(user_ratings),
@@ -753,34 +697,32 @@ async def get_stats():
 
 @app.post("/send-message")
 async def send_manual_message(request: Request):
-    """Manual message sending endpoint for testing"""
     try:
         data = await request.json()
         to = data.get("to")
         message = data.get("message")
         message_type = data.get("type", "text")
-        
+
         if not to or not message:
             raise HTTPException(status_code=400, detail="Missing 'to' or 'message' fields")
-        
+
         if message_type == "text":
             payload = build_text_message(to, message)
         else:
             raise HTTPException(status_code=400, detail="Only text messages supported in manual send")
-        
+
         success = await send_message(payload)
-        
+
         if success:
             return {"status": "success", "message": "Message sent"}
         else:
             raise HTTPException(status_code=500, detail="Failed to send message")
-            
+
     except json.JSONDecodeError:
         raise HTTPException(status_code=400, detail="Invalid JSON")
 
 @app.delete("/sessions/{phone_number}")
 async def clear_user_session(phone_number: str):
-    """Clear a specific user's session"""
     if phone_number in user_sessions:
         del user_sessions[phone_number]
         return {"status": "success", "message": f"Session cleared for {phone_number}"}
@@ -789,7 +731,6 @@ async def clear_user_session(phone_number: str):
 
 @app.delete("/sessions")
 async def clear_all_sessions():
-    """Clear all user sessions"""
     count = len(user_sessions)
     user_sessions.clear()
     return {"status": "success", "message": f"Cleared {count} sessions"}
@@ -798,28 +739,22 @@ async def clear_all_sessions():
 
 @app.on_event("startup")
 async def startup_event():
-    """Validate environment variables on startup"""
     required_vars = {
         "WHATSAPP_TOKEN": WHATSAPP_TOKEN,
         "PHONE_NUMBER_ID": PHONE_NUMBER_ID,
         "VERIFY_TOKEN": VERIFY_TOKEN
     }
-    
     missing_vars = []
     placeholder_vars = []
-    
     for var_name, var_value in required_vars.items():
         if not var_value:
             missing_vars.append(var_name)
         elif "your_" in var_value.lower() and "_here" in var_value.lower():
             placeholder_vars.append(var_name)
-    
     if missing_vars:
         logger.error(f"Missing required environment variables: {', '.join(missing_vars)}")
-    
     if placeholder_vars:
         logger.warning(f"Please update placeholder values for: {', '.join(placeholder_vars)}")
-    
     logger.info("Per Capital WhatsApp Chatbot started successfully!")
     logger.info(f"Knowledge base loaded with {len(KNOWLEDGE_BASE)} categories")
     total_questions = sum(len(cat["questions"]) for cat in KNOWLEDGE_BASE.values())
@@ -846,18 +781,10 @@ async def internal_error_handler(request: Request, exc: Exception):
 
 if __name__ == "__main__":
     import uvicorn
-    
     print("Starting Per Capital WhatsApp Chatbot...")
     print(f"Environment check:")
     print(f"  WHATSAPP_TOKEN: {'✓' if WHATSAPP_TOKEN and 'your_' not in WHATSAPP_TOKEN.lower() else '✗'}")
     print(f"  PHONE_NUMBER_ID: {'✓' if PHONE_NUMBER_ID and 'your_' not in PHONE_NUMBER_ID.lower() else '✗'}")
     print(f"  VERIFY_TOKEN: {'✓' if VERIFY_TOKEN and 'your_' not in VERIFY_TOKEN.lower() else '✗'}")
     print(f"  APP_SECRET: {'✓' if APP_SECRET and 'your_' not in APP_SECRET.lower() else '✗ (optional)'}")
-    
-    uvicorn.run(
-        "main:app",
-        host="0.0.0.0",
-        port=8000,
-        reload=True,
-        log_level="info"
-    )
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True, log_level="info")
