@@ -209,13 +209,12 @@ async def upload_media_from_url(url: str) -> Optional[str]:
             resp = await client.get(url, timeout=30.0)
             resp.raise_for_status()
             mime = resp.headers.get("Content-Type", "").split(";")[0].strip() or "image/jpeg"
-            # si el servidor devuelve html/text, forzamos jpeg pero probablemente no sea una imagen válida
             filename = os.path.basename(url.split("?")[0]) or "image.jpg"
 
             files = {"file": (filename, resp.content, mime)}
             data = {
                 "messaging_product": "whatsapp",
-                "type": mime  # <-- corrección: incluir MIME
+                "type": mime
             }
             headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}"}
             up = await client.post(MEDIA_UPLOAD_URL, headers=headers, data=data, files=files, timeout=30.0)
@@ -256,8 +255,8 @@ async def send_welcome_sequence(to: str):
         "¿Qué te gustaría saber?"
     )
     await send_typing_indicator_and_wait(to, 1.0)
-    # Enviar imagen con fallback robusto (tu URL):
-    await send_image_with_fallback(to, "https://share.google/images/i8E9WC44PvClVr7jZ")
+    # --- ÚNICO CAMBIO: usar el nuevo link de la imagen ---
+    await send_image_with_fallback(to, "https://www.tonys.com/cdn/shop/files/703x703-tonys-pepp.jpg?v=1740758302")
     await asyncio.sleep(0.3)
     await send_message(build_text_message(to, txt))
     await asyncio.sleep(0.5)
@@ -422,7 +421,6 @@ async def process_text_message(from_number: str, text: str, message_id: str):
         return
 
     if parsed_first and user_state not in ["main_menu", "questions_menu"]:
-        # FIX del typo: quitamos la llave extra '}' en el f-string
         await send_message(build_text_message(from_number, f"¡Encantado, {parsed_first}! He guardado tu nombre. Te muestro el menú principal:"))
         await asyncio.sleep(0.5)
         await send_main_menu(from_number)
