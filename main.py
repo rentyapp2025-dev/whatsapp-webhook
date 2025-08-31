@@ -30,7 +30,6 @@ APP_SECRET = os.getenv("APP_SECRET", "your_app_secret_here")
 KNOWLEDGE_BASE_PATH = os.getenv("KNOWLEDGE_BASE_PATH", "pizzeria_kb.json")
 
 GRAPH_API_URL = f"https://graph.facebook.com/v18.0/{PHONE_NUMBER_ID}/messages"
-MEDIA_UPLOAD_URL = f"https://graph.facebook.com/v18.0/{PHONE_NUMBER_ID}/media"
 HEADERS = {"Authorization": f"Bearer {WHATSAPP_TOKEN}", "Content-Type": "application/json"}
 
 # -------------------- App & Estado --------------------
@@ -39,6 +38,9 @@ app = FastAPI(title="Tony's Pizza WhatsApp Chatbot")
 user_sessions: Dict[str, Dict] = {}
 user_ratings: List[Dict] = []
 KNOWLEDGE_BASE: Dict[str, Any] = {}  # se cargará desde JSON
+
+# NUEVO: almacenamiento simple de pedidos (en memoria)
+ORDERS: List[Dict[str, Any]] = []
 
 # ==================== Helpers de NOMBRE ====================
 def extract_first_name(full_name: str) -> str:
@@ -165,28 +167,6 @@ def build_reply_button_message(to: str, body: str, buttons: List[Dict]) -> Dict:
 def build_read_receipt(message_id: str) -> Dict:
     return {"messaging_product": "whatsapp", "status": "read", "message_id": message_id}
 
-def build_image_message(to: str, link: str, caption: Optional[str] = None) -> Dict:
-    payload = {
-        "messaging_product": "whatsapp",
-        "to": to,
-        "type": "image",
-        "image": {"link": link}
-    }
-    if caption:
-        payload["image"]["caption"] = caption
-    return payload
-
-def build_image_id_message(to: str, media_id: str, caption: Optional[str] = None) -> Dict:
-    payload = {
-        "messaging_product": "whatsapp",
-        "to": to,
-        "type": "image",
-        "image": {"id": media_id}
-    }
-    if caption:
-        payload["image"]["caption"] = caption
-    return payload
-
 # -------------------- WhatsApp HTTP --------------------
 async def send_message(payload: Dict) -> bool:
     try:
@@ -195,48 +175,9 @@ async def send_message(payload: Dict) -> bool:
             r.raise_for_status()
             logger.info(f"Message sent to {payload.get('to')} ({payload.get('type')})")
             return True
-    except httpx.HTTPStatusError as e:
-        logger.error(f"HTTP {e.response.status_code} sending message: {e.response.text}")
-        return False
     except Exception as e:
         logger.error(f"Error sending message: {e}")
         return False
-
-async def upload_media_from_url(url: str) -> Optional[str]:
-    """Descarga una imagen desde URL y la sube al endpoint /media de WhatsApp. Devuelve media_id o None."""
-    try:
-        async with httpx.AsyncClient() as client:
-            resp = await client.get(url, timeout=30.0)
-            resp.raise_for_status()
-            mime = resp.headers.get("Content-Type", "").split(";")[0].strip() or "image/jpeg"
-            filename = os.path.basename(url.split("?")[0]) or "image.jpg"
-
-            files = {"file": (filename, resp.content, mime)}
-            data = {
-                "messaging_product": "whatsapp",
-                "type": mime
-            }
-            headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}"}
-            up = await client.post(MEDIA_UPLOAD_URL, headers=headers, data=data, files=files, timeout=30.0)
-            up.raise_for_status()
-            media_id = up.json().get("id")
-            logger.info(f"Media uploaded. id={media_id}")
-            return media_id
-    except httpx.HTTPStatusError as e:
-        logger.error(f"HTTP {e.response.status_code} uploading media: {e.response.text}")
-        return None
-    except Exception as e:
-        logger.error(f"Error uploading media: {e}")
-        return None
-
-async def send_image_with_fallback(to: str, url: str, caption: Optional[str] = None):
-    """Intenta enviar por link; si falla, sube la imagen y reintenta por media_id."""
-    sent = await send_message(build_image_message(to, url, caption))
-    if sent:
-        return
-    media_id = await upload_media_from_url(url)
-    if media_id:
-        await send_message(build_image_id_message(to, media_id, caption))
 
 async def send_typing_indicator_and_wait(to: str, seconds: float = 1.2):
     try:
@@ -249,23 +190,20 @@ async def send_typing_indicator_and_wait(to: str, seconds: float = 1.2):
 async def send_welcome_sequence(to: str):
     name = get_first_name(to)
     saludo = f"¡Hola, {name}! 👋" if name else "¡Hola! 👋"
-    caption = (
+    txt = (
         f"{saludo} Bienvenido a *Tony's Pizza* 🍕\n\n"
         "Soy tu asistente virtual. Puedo ayudarte con el menú, promociones, delivery, pagos, horarios y más.\n\n"
         "¿Qué te gustaría saber?"
     )
     await send_typing_indicator_and_wait(to, 1.0)
-    # >>> ÚNICO cambio funcional: enviamos IMAGEN + MENSAJE como caption en un solo envío <<<
-    await send_image_with_fallback(
-        to,
-        "https://static.wixstatic.com/media/019f09_d9e4f80f0ad54e83be59f4bbfc95b8ca~mv2.png/v1/fill/w_430,h_426,al_c,q_85,usm_0.66_1.00_0.01,enc_avif,quality_auto/tonys%20pizza%20logos_FINAL_color.png",
-        caption=caption
-    )
+    await send_message(build_text_message(to, txt))
     await asyncio.sleep(0.5)
     await send_main_menu(to)
 
 def _ordered_categories() -> List[str]:
+    # primero, las que están en el orden preferido y existan
     ordered = [cid for cid in TONYS_PREFERRED_ORDER if cid in KNOWLEDGE_BASE]
+    # luego, cualquier otra categoría del JSON que no haya sido incluida
     remaining = [cid for cid in KNOWLEDGE_BASE.keys() if cid not in ordered]
     return ordered + remaining
 
@@ -280,9 +218,18 @@ async def send_main_menu(to: str):
         await send_message(build_text_message(to, "Aún no hay información disponible. Inténtalo más tarde."))
         return
 
-    sections = [{"title": "Menú Principal", "rows": rows}]
+    # NUEVO: sección superior para iniciar el pedido (wizard)
+    sections = [
+        {
+            "title": "Pedidos",
+            "rows": [
+                {"id": "ORDER_WIZARD_START", "title": "🧾 Hacer pedido", "description": "Arma tu orden paso a paso"}
+            ]
+        },
+        {"title": "Menú Principal", "rows": rows}
+    ]
     payload = build_interactive_list_message(
-        to=to, header="Tony's Pizza", body="Elige una categoría para ver preguntas frecuentes:", sections=sections
+        to=to, header="Tony's Pizza", body="Elige una opción:", sections=sections
     )
     await send_message(payload)
     user_sessions.setdefault(to, {})
@@ -321,6 +268,7 @@ async def send_category_questions(to: str, category_id: str):
 async def send_answer(to: str, question_id: str):
     answer = None
     question_text = None
+    # buscar la pregunta en todas las categorías
     for category in KNOWLEDGE_BASE.values():
         for q in category.get("questions", []):
             if q["id"] == question_id:
@@ -392,6 +340,124 @@ async def send_conversation_end(to: str):
     user_sessions[to].update({"state": "finished", "last_interaction": datetime.now().isoformat()})
     logger.info(f"Conversation ended for user {to}")
 
+# -------------------- WIZARD DE PEDIDOS (NUEVO) --------------------
+def _ensure_order_session(phone: str) -> Dict[str, Any]:
+    session = user_sessions.setdefault(phone, {})
+    order = session.get("order", {})
+    session["order"] = order
+    return order
+
+def _order_number() -> str:
+    return f"TP-{int(time.time())%1000000:06d}"
+
+def _order_summary_text(order: Dict[str, Any], phone: str) -> str:
+    mode = order.get("mode", "—")
+    name = user_sessions.get(phone, {}).get("first_name") or "Cliente"
+    address = order.get("address", "—")
+    items = order.get("items", "—")
+    notes = order.get("notes", "Sin notas")
+    pay = order.get("payment", "—")
+    return (
+        f"*Resumen de tu pedido*\n"
+        f"👤 Cliente: {name}\n"
+        f"📞 Teléfono: {phone}\n"
+        f"🚚 Modalidad: {mode}\n"
+        + (f"🏠 Dirección: {address}\n" if mode == "Delivery" else "")
+        + f"🍕 Orden: {items}\n"
+          f"📝 Notas: {notes}\n"
+          f"💳 Pago: {pay}"
+    )
+
+async def start_order_wizard(to: str):
+    _ensure_order_session(to).clear()
+    user_sessions[to]["state"] = "order_choose_mode"
+    name = get_first_name(to)
+    body = f"Genial{', ' + name if name else ''}! ¿Cómo deseas recibir tu pedido?"
+    buttons = [
+        {"type": "reply", "reply": {"id": "ORDER_MODE_DELIVERY", "title": "Delivery"}},
+        {"type": "reply", "reply": {"id": "ORDER_MODE_PICKUP", "title": "Retiro en local"}},
+        {"type": "reply", "reply": {"id": "ORDER_CANCEL", "title": "Cancelar"}}
+    ]
+    await send_message(build_reply_button_message(to=to, body=body, buttons=buttons))
+
+async def ask_address(to: str):
+    user_sessions[to]["state"] = "order_ask_address"
+    await send_message(build_text_message(
+        to,
+        "Perfecto, *Delivery*. Por favor escribe tu *dirección completa* (calle, edificio/casa, referencia)."
+        "\n\nSi deseas cancelar escribe *cancelar*."
+    ))
+
+async def ask_items(to: str):
+    user_sessions[to]["state"] = "order_ask_items"
+    await send_message(build_text_message(
+        to,
+        "Ahora, cuéntame tu *orden* (ej.: “1 Familiar Pepperoni + 1 Mediana Margarita + 2 refrescos”)."
+        "\n\nPuedes incluir tamaños y bebidas."
+    ))
+
+async def ask_notes(to: str):
+    user_sessions[to]["state"] = "order_ask_notes"
+    await send_message(build_text_message(
+        to,
+        "¿Alguna *nota* para la cocina o el repartidor? (ej.: poco queso, timbre dañado). "
+        "Si no, escribe *ninguna*."
+    ))
+
+async def ask_payment(to: str):
+    user_sessions[to]["state"] = "order_choose_payment"
+    buttons = [
+        {"type": "reply", "reply": {"id": "ORDER_PAY_CASH", "title": "Efectivo"}},
+        {"type": "reply", "reply": {"id": "ORDER_PAY_CARD", "title": "Tarjeta"}},
+        {"type": "reply", "reply": {"id": "ORDER_PAY_PM", "title": "Pago móvil"}},
+        {"type": "reply", "reply": {"id": "ORDER_PAY_ZELLE", "title": "Zelle"}}
+    ]
+    await send_message(build_reply_button_message(
+        to=to,
+        body="Elige tu *método de pago*:",
+        buttons=buttons
+    ))
+
+async def confirm_order(to: str):
+    order = _ensure_order_session(to)
+    summary = _order_summary_text(order, to)
+    user_sessions[to]["state"] = "order_confirm"
+    buttons = [
+        {"type": "reply", "reply": {"id": "ORDER_CONFIRM", "title": "Confirmar"}},
+        {"type": "reply", "reply": {"id": "ORDER_CANCEL", "title": "Cancelar"}}
+    ]
+    await send_message(build_text_message(to, summary))
+    await asyncio.sleep(0.4)
+    await send_message(build_reply_button_message(
+        to=to,
+        body="¿Confirmamos tu pedido?",
+        buttons=buttons
+    ))
+
+async def save_and_finish_order(to: str):
+    order = _ensure_order_session(to)
+    order_no = _order_number()
+    order["order_no"] = order_no
+    order["created_at"] = datetime.now().isoformat()
+    order["user"] = to
+    ORDERS.append(order.copy())
+
+    await send_message(build_text_message(
+        to,
+        f"✅ *Pedido confirmado!* N° {order_no}\n"
+        "Te avisaremos el tiempo estimado y estado por aquí. ¡Gracias por preferirnos! 🍕"
+    ))
+    # Limpia estado de wizard sin tocar otros datos de la sesión
+    user_sessions[to]["state"] = "more_help"
+    user_sessions[to]["order"] = {}
+    await asyncio.sleep(0.6)
+    await send_more_help_options(to)
+
+def cancel_order_session(to: str):
+    sess = user_sessions.setdefault(to, {})
+    sess["order"] = {}
+    sess["state"] = "main_menu"
+
 # -------------------- Procesamiento de mensajes --------------------
 def is_greeting(text: str) -> bool:
     greetings = ["hola", "hello", "hi", "buenas", "buenos dias", "buenas tardes",
@@ -402,12 +468,55 @@ def is_greeting(text: str) -> bool:
 def is_negative_response(text: str) -> bool:
     negative_responses = ["no", "no gracias", "no, gracias", "nada más", "nada mas",
                           "ya no", "suficiente", "está bien", "esta bien", "listo",
-                          "perfecto", "ok", "vale"]
+                          "perfecto", "ok", "vale", "cancelar"]
     return text.lower().strip() in negative_responses
+
+async def _handle_order_text_input(from_number: str, text: str) -> bool:
+    state = user_sessions.get(from_number, {}).get("state")
+    if not state or not state.startswith("order_"):
+        return False
+
+    # Cancelación por texto
+    if text.strip().lower() == "cancelar":
+        cancel_order_session(from_number)
+        await send_message(build_text_message(from_number, "Pedido cancelado. ¿Te muestro el menú principal?"))
+        await asyncio.sleep(0.4)
+        await send_main_menu(from_number)
+        return True
+
+    order = _ensure_order_session(from_number)
+
+    if state == "order_ask_address":
+        order["address"] = text.strip()
+        await ask_items(from_number)
+        return True
+
+    if state == "order_ask_items":
+        order["items"] = text.strip()
+        await ask_notes(from_number)
+        return True
+
+    if state == "order_ask_notes":
+        order["notes"] = "Sin notas" if text.strip().lower() in {"ninguna", "no"} else text.strip()
+        await ask_payment(from_number)
+        return True
+
+    # Si llega texto mientras espera botón de pago o confirmación, lo ignoramos y recordamos qué hacer
+    if state in {"order_choose_payment", "order_confirm"}:
+        await send_message(build_text_message(
+            from_number, "Por favor elige una opción usando los botones que te envié 😊"
+        ))
+        return True
+
+    return False
 
 async def process_text_message(from_number: str, text: str, message_id: str):
     logger.info(f"Processing text message from {from_number}: {text}")
     parsed_first = parse_and_set_name_from_text(from_number, text)
+
+    # NUEVO: si estamos dentro del wizard, priorizar manejo del texto del pedido
+    if await _handle_order_text_input(from_number, text):
+        return
 
     if is_greeting(text):
         await send_welcome_sequence(from_number)
@@ -441,6 +550,11 @@ async def process_interactive_message(from_number: str, interactive_data: Dict):
         sel = (interactive_data.get("list_reply") or {}).get("id")
         logger.info(f"List reply from {from_number}: {sel}")
 
+        # NUEVO: inicio del wizard
+        if sel == "ORDER_WIZARD_START":
+            await start_order_wizard(from_number)
+            return
+
         if sel in KNOWLEDGE_BASE:
             await send_category_questions(from_number, sel)
         else:
@@ -451,6 +565,40 @@ async def process_interactive_message(from_number: str, interactive_data: Dict):
         bid = (interactive_data.get("button_reply") or {}).get("id")
         logger.info(f"Button reply from {from_number}: {bid}")
 
+        # Wizard: elección de modalidad
+        if bid == "ORDER_MODE_DELIVERY":
+            _ensure_order_session(from_number)["mode"] = "Delivery"
+            await ask_address(from_number)
+            return
+        if bid == "ORDER_MODE_PICKUP":
+            _ensure_order_session(from_number)["mode"] = "Retiro en local"
+            await ask_items(from_number)
+            return
+
+        # Wizard: pago
+        if bid in {"ORDER_PAY_CASH", "ORDER_PAY_CARD", "ORDER_PAY_PM", "ORDER_PAY_ZELLE"}:
+            pay_map = {
+                "ORDER_PAY_CASH": "Efectivo",
+                "ORDER_PAY_CARD": "Tarjeta",
+                "ORDER_PAY_PM": "Pago móvil",
+                "ORDER_PAY_ZELLE": "Zelle"
+            }
+            _ensure_order_session(from_number)["payment"] = pay_map[bid]
+            await confirm_order(from_number)
+            return
+
+        # Wizard: confirmar o cancelar
+        if bid == "ORDER_CONFIRM":
+            await save_and_finish_order(from_number)
+            return
+        if bid == "ORDER_CANCEL":
+            cancel_order_session(from_number)
+            await send_message(build_text_message(from_number, "Pedido cancelado."))
+            await asyncio.sleep(0.4)
+            await send_main_menu(from_number)
+            return
+
+        # Flujo existente
         if bid == "HELP_YES":
             await send_main_menu(from_number)
         elif bid == "HELP_NO":
@@ -573,11 +721,12 @@ async def health_check():
     return {
         "status": "healthy",
         "service": "Tony's Pizza WhatsApp Chatbot",
-        "version": "1.0.3",
+        "version": "1.1.0",
         "active_sessions": len(user_sessions),
         "total_ratings": len(user_ratings),
         "categories": len(KNOWLEDGE_BASE),
-        "total_questions": get_total_questions(KNOWLEDGE_BASE)
+        "total_questions": get_total_questions(KNOWLEDGE_BASE),
+        "orders": len(ORDERS)  # NUEVO: cantidad de pedidos en memoria
     }
 
 @app.get("/stats")
@@ -585,13 +734,14 @@ async def get_stats():
     rating_counts = {}
     for rating_data in user_ratings:
         rating = rating_data["rating"]
-        rating_counts[rating] = rating_counts[rating] + 1 if rating in rating_counts else 1
+        rating_counts[rating] = rating_counts.get(rating, 0) + 1
     return {
         "active_sessions": len(user_sessions),
         "total_ratings": len(user_ratings),
         "rating_breakdown": rating_counts,
         "knowledge_base_categories": len(KNOWLEDGE_BASE),
-        "total_questions": get_total_questions(KNOWLEDGE_BASE)
+        "total_questions": get_total_questions(KNOWLEDGE_BASE),
+        "orders": len(ORDERS)
     }
 
 @app.post("/send-message")
