@@ -30,6 +30,7 @@ APP_SECRET = os.getenv("APP_SECRET", "your_app_secret_here")
 KNOWLEDGE_BASE_PATH = os.getenv("KNOWLEDGE_BASE_PATH", "pizzeria_kb.json")
 
 GRAPH_API_URL = f"https://graph.facebook.com/v18.0/{PHONE_NUMBER_ID}/messages"
+MEDIA_UPLOAD_URL = f"https://graph.facebook.com/v18.0/{PHONE_NUMBER_ID}/media"
 HEADERS = {"Authorization": f"Bearer {WHATSAPP_TOKEN}", "Content-Type": "application/json"}
 
 # -------------------- App & Estado --------------------
@@ -164,7 +165,6 @@ def build_reply_button_message(to: str, body: str, buttons: List[Dict]) -> Dict:
 def build_read_receipt(message_id: str) -> Dict:
     return {"messaging_product": "whatsapp", "status": "read", "message_id": message_id}
 
-# >>>>>>>>>>>>>>>>> AGREGADO: builder para IMAGEN <<<<<<<<<<<<<<<<<
 def build_image_message(to: str, link: str, caption: Optional[str] = None) -> Dict:
     payload = {
         "messaging_product": "whatsapp",
@@ -175,7 +175,17 @@ def build_image_message(to: str, link: str, caption: Optional[str] = None) -> Di
     if caption:
         payload["image"]["caption"] = caption
     return payload
-# >>>>>>>>>>>>>>>>> FIN AGREGADO <<<<<<<<<<<<<<<<<
+
+def build_image_id_message(to: str, media_id: str, caption: Optional[str] = None) -> Dict:
+    payload = {
+        "messaging_product": "whatsapp",
+        "to": to,
+        "type": "image",
+        "image": {"id": media_id}
+    }
+    if caption:
+        payload["image"]["caption"] = caption
+    return payload
 
 # -------------------- WhatsApp HTTP --------------------
 async def send_message(payload: Dict) -> bool:
@@ -188,6 +198,39 @@ async def send_message(payload: Dict) -> bool:
     except Exception as e:
         logger.error(f"Error sending message: {e}")
         return False
+
+async def upload_media_from_url(url: str) -> Optional[str]:
+    """Descarga una imagen desde URL y la sube al endpoint /media de WhatsApp. Devuelve media_id o None."""
+    try:
+        async with httpx.AsyncClient() as client:
+            # Descargar bytes (seguirá redirecciones si las hay)
+            resp = await client.get(url, timeout=30.0)
+            resp.raise_for_status()
+            mime = resp.headers.get("Content-Type", "image/jpeg")
+            filename = os.path.basename(url.split("?")[0]) or "image.jpg"
+
+            # Subir a /media (multipart, sin Content-Type JSON)
+            files = {"file": (filename, resp.content, mime)}
+            data = {"messaging_product": "whatsapp"}
+            headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}"}  # sin Content-Type para que httpx ponga boundary
+            up = await client.post(MEDIA_UPLOAD_URL, headers=headers, data=data, files=files, timeout=30.0)
+            up.raise_for_status()
+            media_id = up.json().get("id")
+            logger.info(f"Media uploaded. id={media_id}")
+            return media_id
+    except Exception as e:
+        logger.error(f"Error uploading media: {e}")
+        return None
+
+async def send_image_with_fallback(to: str, url: str, caption: Optional[str] = None):
+    """Intenta enviar por link; si falla, sube la imagen y reintenta por media_id."""
+    sent = await send_message(build_image_message(to, url, caption))
+    if sent:
+        return
+    # Fallback: subir y enviar por id
+    media_id = await upload_media_from_url(url)
+    if media_id:
+        await send_message(build_image_id_message(to, media_id, caption))
 
 async def send_typing_indicator_and_wait(to: str, seconds: float = 1.2):
     try:
@@ -206,18 +249,15 @@ async def send_welcome_sequence(to: str):
         "¿Qué te gustaría saber?"
     )
     await send_typing_indicator_and_wait(to, 1.0)
-    # >>>>>>>>>>>>>>>>> AGREGADO: enviar imagen en el mensaje inicial <<<<<<<<<<<<<<<<<
-    await send_message(build_image_message(to, "https://share.google/images/th0nQR8Cu7mMY1xnv"))
+    # Enviar imagen con fallback robusto (tu URL):
+    await send_image_with_fallback(to, "https://share.google/images/i8E9WC44PvClVr7jZ")
     await asyncio.sleep(0.3)
-    # >>>>>>>>>>>>>>>>> FIN AGREGADO <<<<<<<<<<<<<<<<<
     await send_message(build_text_message(to, txt))
     await asyncio.sleep(0.5)
     await send_main_menu(to)
 
 def _ordered_categories() -> List[str]:
-    # primero, las que están en el orden preferido y existan
     ordered = [cid for cid in TONYS_PREFERRED_ORDER if cid in KNOWLEDGE_BASE]
-    # luego, cualquier otra categoría del JSON que no haya sido incluida
     remaining = [cid for cid in KNOWLEDGE_BASE.keys() if cid not in ordered]
     return ordered + remaining
 
@@ -273,7 +313,6 @@ async def send_category_questions(to: str, category_id: str):
 async def send_answer(to: str, question_id: str):
     answer = None
     question_text = None
-    # buscar la pregunta en todas las categorías
     for category in KNOWLEDGE_BASE.values():
         for q in category.get("questions", []):
             if q["id"] == question_id:
@@ -397,7 +436,6 @@ async def process_interactive_message(from_number: str, interactive_data: Dict):
         if sel in KNOWLEDGE_BASE:
             await send_category_questions(from_number, sel)
         else:
-            # posiblemente sea una pregunta
             await send_answer(from_number, sel)
 
     elif mtype == "button_reply":
@@ -485,7 +523,6 @@ async def process_message(message: Dict):
         message_id = message.get("id")
         mtype = message.get("type")
 
-        # Si este mensaje trae nombre (poco común), guárdalo
         maybe_name = ((message.get("profile") or {}).get("name") or "").strip()
         if from_number and maybe_name:
             set_user_name(from_number, maybe_name)
@@ -526,7 +563,7 @@ async def health_check():
     return {
         "status": "healthy",
         "service": "Tony's Pizza WhatsApp Chatbot",
-        "version": "1.0.0",
+        "version": "1.0.1",
         "active_sessions": len(user_sessions),
         "total_ratings": len(user_ratings),
         "categories": len(KNOWLEDGE_BASE),
