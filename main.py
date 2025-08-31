@@ -1,5 +1,6 @@
 import os
 import json
+import time
 import asyncio
 import logging
 import hmac
@@ -25,26 +26,18 @@ PHONE_NUMBER_ID = os.getenv("PHONE_NUMBER_ID", "your_phone_number_id_here")
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "your_verify_token_here")
 APP_SECRET = os.getenv("APP_SECRET", "your_app_secret_here")
 
-# Ruta del JSON de conocimiento
-KNOWLEDGE_BASE_PATH = os.getenv("KNOWLEDGE_BASE_PATH", "knowledge_base.json")
-
-# Imagen (logo) a incluir en el saludo
-LOGO_URL = os.getenv(
-    "LOGO_URL",
-    "https://share.google/images/0Epk0kEFL7cQZuQY0"  # <- tu link
-).strip()
-LOGO_CAPTION = os.getenv("LOGO_CAPTION", "Tony's Pizza 🍕").strip()
+# Ruta del JSON con la base de conocimiento (usa tu pizzeria_kb.json)
+KNOWLEDGE_BASE_PATH = os.getenv("KNOWLEDGE_BASE_PATH", "pizzeria_kb.json")
 
 GRAPH_API_URL = f"https://graph.facebook.com/v18.0/{PHONE_NUMBER_ID}/messages"
 HEADERS = {"Authorization": f"Bearer {WHATSAPP_TOKEN}", "Content-Type": "application/json"}
 
 # -------------------- App & Estado --------------------
-app = FastAPI(title="Tony's Pizza • WhatsApp Bot")
+app = FastAPI(title="Tony's Pizza WhatsApp Chatbot")
 
 user_sessions: Dict[str, Dict] = {}
 user_ratings: List[Dict] = []
 KNOWLEDGE_BASE: Dict[str, Any] = {}  # se cargará desde JSON
-
 
 # ==================== Helpers de NOMBRE ====================
 def extract_first_name(full_name: str) -> str:
@@ -57,7 +50,6 @@ def extract_first_name(full_name: str) -> str:
     first = parts[0]
     return first[:1].upper() + first[1:]
 
-
 def set_user_name(phone: str, full_name: str):
     if not phone or not full_name:
         return
@@ -66,7 +58,6 @@ def set_user_name(phone: str, full_name: str):
     session["first_name"] = extract_first_name(full_name)
     session["last_interaction"] = datetime.now().isoformat()
     logger.info(f"Saved name for {phone}: {session['first_name']} ({session['full_name']})")
-
 
 def parse_and_set_name_from_text(phone: str, text: str) -> Optional[str]:
     if not text:
@@ -85,17 +76,14 @@ def parse_and_set_name_from_text(phone: str, text: str) -> Optional[str]:
             return user_sessions.get(phone, {}).get("first_name")
     return None
 
-
 def get_first_name(phone: str) -> str:
     return user_sessions.get(phone, {}).get("first_name", "")
-
 
 # ==================== Utilidades ====================
 def truncate_text(text: str, max_length: int, add_ellipsis: bool = True) -> str:
     if len(text) <= max_length:
         return text
     return text[:max_length-3] + "..." if add_ellipsis and max_length > 3 else text[:max_length]
-
 
 def format_question_for_list(question: Dict, index: int) -> Dict:
     title = f"{index}. {question.get('short_title', truncate_text(question['text'], 20))}"
@@ -104,14 +92,12 @@ def format_question_for_list(question: Dict, index: int) -> Dict:
     description = truncate_text(question["text"], 72)
     return {"title": title, "description": description}
 
-
 def format_question_for_button(question: Dict, index: int) -> str:
     short_title = question.get('short_title', truncate_text(question['text'], 15))
     title = f"{index}. {short_title}"
     return title[:20] if len(title) > 20 else title
 
-
-# ==================== Carga de Knowledge Base ====================
+# -------------------- Knowledge Base --------------------
 def _validate_kb(kb: Dict[str, Any]):
     if not isinstance(kb, dict):
         raise ValueError("El JSON debe ser un objeto (dict) de categorías.")
@@ -128,7 +114,6 @@ def _validate_kb(kb: Dict[str, Any]):
                 if qk not in q:
                     raise ValueError(f"La categoría {cid} posee una pregunta sin '{qk}'.")
 
-
 def load_knowledge_base(path: str) -> Dict[str, Any]:
     with open(path, "r", encoding="utf-8") as f:
         kb = json.load(f)
@@ -136,34 +121,18 @@ def load_knowledge_base(path: str) -> Dict[str, Any]:
     logger.info(f"Knowledge base cargada: {len(kb)} categorías")
     return kb
 
-
 def get_total_questions(kb: Dict[str, Any]) -> int:
     return sum(len(cat.get("questions", [])) for cat in kb.values())
 
+# Orden sugerido para Tony's Pizza (si existen en el JSON)
+TONYS_PREFERRED_ORDER = [
+    "PIZZERIA_INFO", "MENU_PIZZAS", "PROMOCIONES", "PEDIDOS",
+    "DELIVERY", "RETIRO_LOCAL", "PAGO", "HORARIOS", "ALERGIAS", "SOPORTE"
+]
 
-# ==================== Builders de WhatsApp ====================
+# -------------------- Builders de WhatsApp --------------------
 def build_text_message(to: str, text: str) -> Dict:
-    return {
-        "messaging_product": "whatsapp",
-        "to": to,
-        "type": "text",
-        "text": {"body": text}
-    }
-
-
-def build_image_message(to: str, *, link: Optional[str] = None, caption: Optional[str] = None) -> Dict:
-    if not link:
-        raise ValueError("Debes pasar link de imagen")
-    img_obj: Dict[str, Any] = {"link": link}
-    if caption:
-        img_obj["caption"] = caption
-    return {
-        "messaging_product": "whatsapp",
-        "to": to,
-        "type": "image",
-        "image": img_obj
-    }
-
+    return {"messaging_product": "whatsapp", "to": to, "type": "text", "text": {"body": text}}
 
 def build_interactive_list_message(to: str, header: str, body: str, sections: List[Dict]) -> Dict:
     return {
@@ -174,11 +143,10 @@ def build_interactive_list_message(to: str, header: str, body: str, sections: Li
             "type": "list",
             "header": {"type": "text", "text": header},
             "body": {"text": body},
-            "footer": {"text": "Tony's Pizza - Asistente"},
+            "footer": {"text": "Tony's Pizza — Tu asistente virtual"},
             "action": {"button": "Ver opciones", "sections": sections}
         }
     }
-
 
 def build_reply_button_message(to: str, body: str, buttons: List[Dict]) -> Dict:
     return {
@@ -188,13 +156,28 @@ def build_reply_button_message(to: str, body: str, buttons: List[Dict]) -> Dict:
         "interactive": {
             "type": "button",
             "body": {"text": body},
-            "footer": {"text": "Tony's Pizza - Asistente"},
+            "footer": {"text": "Tony's Pizza — Tu asistente virtual"},
             "action": {"buttons": buttons}
         }
     }
 
+def build_read_receipt(message_id: str) -> Dict:
+    return {"messaging_product": "whatsapp", "status": "read", "message_id": message_id}
 
-# ==================== WhatsApp HTTP ====================
+# >>>>>>>>>>>>>>>>> AGREGADO: builder para IMAGEN <<<<<<<<<<<<<<<<<
+def build_image_message(to: str, link: str, caption: Optional[str] = None) -> Dict:
+    payload = {
+        "messaging_product": "whatsapp",
+        "to": to,
+        "type": "image",
+        "image": {"link": link}
+    }
+    if caption:
+        payload["image"]["caption"] = caption
+    return payload
+# >>>>>>>>>>>>>>>>> FIN AGREGADO <<<<<<<<<<<<<<<<<
+
+# -------------------- WhatsApp HTTP --------------------
 async def send_message(payload: Dict) -> bool:
     try:
         async with httpx.AsyncClient() as client:
@@ -206,113 +189,91 @@ async def send_message(payload: Dict) -> bool:
         logger.error(f"Error sending message: {e}")
         return False
 
-
-async def send_typing_indicator_and_wait(to: str, seconds: float = 1.0):
-    # En la Cloud API no se envía "typing" real; usamos una pequeña pausa para realismo.
+async def send_typing_indicator_and_wait(to: str, seconds: float = 1.2):
     try:
+        await asyncio.sleep(0.4)
         await asyncio.sleep(seconds)
     except Exception as e:
         logger.error(f"Typing indicator error: {e}")
 
-
-# ==================== Flujos conversacionales ====================
+# -------------------- Flujos conversacionales --------------------
 async def send_welcome_sequence(to: str):
     name = get_first_name(to)
     saludo = f"¡Hola, {name}! 👋" if name else "¡Hola! 👋"
     txt = (
         f"{saludo} Bienvenido a *Tony's Pizza* 🍕\n\n"
-        "Soy tu asistente virtual. Puedo ayudarte con el menú, promociones, pedidos, delivery, horarios, pagos y más.\n\n"
+        "Soy tu asistente virtual. Puedo ayudarte con el menú, promociones, delivery, pagos, horarios y más.\n\n"
         "¿Qué te gustaría saber?"
     )
     await send_typing_indicator_and_wait(to, 1.0)
+    # >>>>>>>>>>>>>>>>> AGREGADO: enviar imagen en el mensaje inicial <<<<<<<<<<<<<<<<<
+    await send_message(build_image_message(to, "https://share.google/images/th0nQR8Cu7mMY1xnv"))
+    await asyncio.sleep(0.3)
+    # >>>>>>>>>>>>>>>>> FIN AGREGADO <<<<<<<<<<<<<<<<<
     await send_message(build_text_message(to, txt))
-
-    # 👉 Enviar imagen (logo / portada) en el mensaje inicial
-    if LOGO_URL:
-        await asyncio.sleep(0.2)
-        await send_message(build_image_message(to, link=LOGO_URL, caption=LOGO_CAPTION))
-
-    await asyncio.sleep(0.4)
+    await asyncio.sleep(0.5)
     await send_main_menu(to)
 
-
-def _rows_from_kb() -> List[Dict]:
-    rows = []
-    for cid, cat in KNOWLEDGE_BASE.items():
-        title = cat.get("title", cid)
-        rows.append({
-            "id": cid,
-            "title": title if len(title) <= 24 else title[:24],
-            "description": f"Información sobre {title}"[:72]
-        })
-    return rows
-
+def _ordered_categories() -> List[str]:
+    # primero, las que están en el orden preferido y existan
+    ordered = [cid for cid in TONYS_PREFERRED_ORDER if cid in KNOWLEDGE_BASE]
+    # luego, cualquier otra categoría del JSON que no haya sido incluida
+    remaining = [cid for cid in KNOWLEDGE_BASE.keys() if cid not in ordered]
+    return ordered + remaining
 
 async def send_main_menu(to: str):
-    rows = _rows_from_kb()
+    rows = []
+    for cid in _ordered_categories():
+        cat = KNOWLEDGE_BASE[cid]
+        title = cat["title"]
+        desc = f"Información sobre {title}" if cid != "MENU_PIZZAS" else "Explora pizzas y tamaños"
+        rows.append({"id": cid, "title": title if len(title) <= 24 else title[:24], "description": desc})
     if not rows:
-        await send_message(build_text_message(to, "Aún no hay categorías disponibles. Intenta más tarde."))
+        await send_message(build_text_message(to, "Aún no hay información disponible. Inténtalo más tarde."))
         return
 
-    # WhatsApp list: máx 10 filas por sección. Haremos una sección única si <=10.
-    sections: List[Dict] = []
-    if len(rows) <= 10:
-        sections = [{"title": "Categorías disponibles", "rows": rows}]
-    else:
-        # chunk en grupos de 10
-        chunk_size = 10
-        for i in range(0, len(rows), chunk_size):
-            part = rows[i:i + chunk_size]
-            sections.append({"title": f"Opciones ({i+1}-{i+len(part)})", "rows": part})
-
+    sections = [{"title": "Menú Principal", "rows": rows}]
     payload = build_interactive_list_message(
-        to=to,
-        header="Menú Principal",
-        body="Elige una categoría:",
-        sections=sections
+        to=to, header="Tony's Pizza", body="Elige una categoría para ver preguntas frecuentes:", sections=sections
     )
     await send_message(payload)
     user_sessions.setdefault(to, {})
     user_sessions[to].update({"state": "main_menu", "last_interaction": datetime.now().isoformat()})
 
-
 async def send_category_questions(to: str, category_id: str):
     category = KNOWLEDGE_BASE.get(category_id)
     if not category:
-        await send_message(build_text_message(to, "Lo siento, no pude encontrar esa categoría."))
+        await send_message(build_text_message(to, "Lo siento, no encontré esa categoría."))
         await send_main_menu(to)
         return
 
     questions = category.get("questions", [])
+    if not questions:
+        await send_message(build_text_message(to, "No hay preguntas disponibles en esta categoría."))
+        await send_main_menu(to)
+        return
+
     if len(questions) <= 3:
         buttons = []
         for i, q in enumerate(questions[:3]):
             buttons.append({"type": "reply", "reply": {"id": q["id"], "title": format_question_for_button(q, i+1)}})
-        payload = build_reply_button_message(
-            to=to,
-            body=f"*{category['title']}*\n\nSelecciona tu pregunta:",
-            buttons=buttons
-        )
+        payload = build_reply_button_message(to=to, body=f"*{category['title']}*\n\nSelecciona tu pregunta:", buttons=buttons)
     else:
         rows = []
-        for i, q in enumerate(questions[:10]):  # hasta 10 por sección
+        for i, q in enumerate(questions[:10]):
             fq = format_question_for_list(q, i+1)
             rows.append({"id": q["id"], "title": fq["title"], "description": fq["description"]})
-        payload = build_interactive_list_message(
-            to=to,
-            header=category["title"],
-            body="Selecciona tu pregunta:",
-            sections=[{"title": category["title"], "rows": rows}]
-        )
+        sections = [{"title": category["title"], "rows": rows}]
+        payload = build_interactive_list_message(to=to, header=category["title"], body="Selecciona tu pregunta:", sections=sections)
 
     await send_message(payload)
     user_sessions.setdefault(to, {})
     user_sessions[to].update({"state": "questions_menu", "category": category_id, "last_interaction": datetime.now().isoformat()})
 
-
 async def send_answer(to: str, question_id: str):
     answer = None
     question_text = None
+    # buscar la pregunta en todas las categorías
     for category in KNOWLEDGE_BASE.values():
         for q in category.get("questions", []):
             if q["id"] == question_id:
@@ -327,14 +288,13 @@ async def send_answer(to: str, question_id: str):
         await send_main_menu(to)
         return
 
-    await send_typing_indicator_and_wait(to, 0.9)
+    await send_typing_indicator_and_wait(to, 1.0)
     name = get_first_name(to)
     header = f"📋 *Pregunta*{f' ({name})' if name else ''}:\n"
     txt = f"{header}{question_text}\n\n💡 *Respuesta:*\n{answer}"
     await send_message(build_text_message(to, txt))
-    await asyncio.sleep(0.8)
+    await asyncio.sleep(0.9)
     await send_more_help_options(to)
-
 
 async def send_more_help_options(to: str):
     name = get_first_name(to)
@@ -347,7 +307,6 @@ async def send_more_help_options(to: str):
     user_sessions.setdefault(to, {})
     user_sessions[to].update({"state": "more_help", "last_interaction": datetime.now().isoformat()})
 
-
 async def send_rating_request(to: str):
     name = get_first_name(to)
     pref = f"¡Gracias{', ' + name if name else ''} por usar nuestro asistente! 😊"
@@ -355,54 +314,49 @@ async def send_rating_request(to: str):
     buttons = [
         {"type": "reply", "reply": {"id": "RATE_EXCELLENT", "title": "⭐⭐⭐ Excelente"}},
         {"type": "reply", "reply": {"id": "RATE_GOOD", "title": "⭐⭐ Bueno"}},
-        {"type": "reply", "reply": {"id": "RATE_POOR", "title": "⭐ Mejorable"}}
+        {"type": "reply", "reply": {"id": "RATE_POOR", "title": "⭐ Necesita mejorar"}}
     ]
     await send_message(build_reply_button_message(to=to, body=body, buttons=buttons))
     user_sessions.setdefault(to, {})
     user_sessions[to].update({"state": "rating", "last_interaction": datetime.now().isoformat()})
 
-
 async def handle_rating(to: str, rating_id: str):
-    rating_map = {"RATE_EXCELLENT": "Excelente ⭐⭐⭐", "RATE_GOOD": "Bueno ⭐⭐", "RATE_POOR": "Mejorable ⭐"}
+    rating_map = {"RATE_EXCELLENT": "Excelente ⭐⭐⭐", "RATE_GOOD": "Bueno ⭐⭐", "RATE_POOR": "Necesita mejorar ⭐"}
     rating = rating_map.get(rating_id, "Desconocida")
     user_ratings.append({"user": to, "rating": rating, "timestamp": datetime.now().isoformat()})
     name = get_first_name(to)
     txt = (
         f"¡Muchas gracias{', ' + name if name else ''} por tu calificación: *{rating}*! 🙏\n\n"
-        "Tu opinión nos ayuda a mejorar nuestro servicio."
+        "Tu opinión nos ayuda a mejorar cada día."
     )
     await send_message(build_text_message(to, txt))
-    await asyncio.sleep(1.0)
+    await asyncio.sleep(1.2)
     await send_conversation_end(to)
-
 
 async def send_conversation_end(to: str):
     name = get_first_name(to)
     end = (
         f"🔚 *Esta conversación ha terminado*{f', {name}' if name else ''}\n\n"
-        "Si necesitas algo más, escríbenos cuando quieras. ¡Estaremos aquí para ayudarte! 😊\n\n"
-        "_Tony's Pizza_"
+        "Si necesitas algo más, escríbenos cuando quieras. ¡Estamos para servirte! 🍕\n\n"
+        "_Tony's Pizza — hecha con amor_"
     )
     await send_message(build_text_message(to, end))
     user_sessions.setdefault(to, {})
     user_sessions[to].update({"state": "finished", "last_interaction": datetime.now().isoformat()})
     logger.info(f"Conversation ended for user {to}")
 
-
-# ==================== Procesamiento de mensajes ====================
+# -------------------- Procesamiento de mensajes --------------------
 def is_greeting(text: str) -> bool:
     greetings = ["hola", "hello", "hi", "buenas", "buenos dias", "buenas tardes",
                  "buenas noches", "saludos", "que tal", "hey", "inicio", "empezar",
                  "comenzar", "start"]
     return text.lower().strip() in greetings
 
-
 def is_negative_response(text: str) -> bool:
     negative_responses = ["no", "no gracias", "no, gracias", "nada más", "nada mas",
                           "ya no", "suficiente", "está bien", "esta bien", "listo",
                           "perfecto", "ok", "vale"]
     return text.lower().strip() in negative_responses
-
 
 async def process_text_message(from_number: str, text: str, message_id: str):
     logger.info(f"Processing text message from {from_number}: {text}")
@@ -422,17 +376,16 @@ async def process_text_message(from_number: str, text: str, message_id: str):
         return
 
     if parsed_first and user_state not in ["main_menu", "questions_menu"]:
-        await send_message(build_text_message(from_number, f"¡Encantado, {parsed_first}! He guardado tu nombre. Te muestro el menú:"))
-        await asyncio.sleep(0.4)
+        await send_message(build_text_message(from_number, f"¡Encantado, {parsed_first}! He guardado tu nombre. Te muestro el menú principal:"))
+        await asyncio.sleep(0.5)
         await send_main_menu(from_number)
         return
 
-    redirect = ("Para ayudarte mejor, usa los botones del menú. "
-                "Te muestro nuevamente las opciones:")
+    redirect = ("Para ayudarte mejor, utiliza los botones del menú. "
+                "Te muestro nuevamente las opciones disponibles:")
     await send_message(build_text_message(from_number, redirect))
-    await asyncio.sleep(0.6)
+    await asyncio.sleep(0.7)
     await send_main_menu(from_number)
-
 
 async def process_interactive_message(from_number: str, interactive_data: Dict):
     mtype = interactive_data.get("type")
@@ -444,6 +397,7 @@ async def process_interactive_message(from_number: str, interactive_data: Dict):
         if sel in KNOWLEDGE_BASE:
             await send_category_questions(from_number, sel)
         else:
+            # posiblemente sea una pregunta
             await send_answer(from_number, sel)
 
     elif mtype == "button_reply":
@@ -459,8 +413,7 @@ async def process_interactive_message(from_number: str, interactive_data: Dict):
         else:
             await send_answer(from_number, bid)
 
-
-# ==================== Webhook / Firma ====================
+# -------------------- Webhook / Firma --------------------
 def verify_webhook_signature(payload: bytes, signature: str) -> bool:
     if not APP_SECRET:
         logger.warning("APP_SECRET not set, skipping signature verification")
@@ -468,8 +421,7 @@ def verify_webhook_signature(payload: bytes, signature: str) -> bool:
     expected_signature = hmac.new(APP_SECRET.encode('utf-8'), payload, hashlib.sha256).hexdigest()
     return hmac.compare_digest(f"sha256={expected_signature}", signature)
 
-
-# ==================== Endpoints ====================
+# -------------------- Endpoints --------------------
 @app.get("/webhook")
 async def verify_webhook(request: Request):
     hub_mode = request.query_params.get("hub.mode")
@@ -485,7 +437,6 @@ async def verify_webhook(request: Request):
 
     logger.error("Webhook verification failed")
     raise HTTPException(status_code=403, detail="Forbidden")
-
 
 @app.post("/webhook")
 async def handle_webhook(request: Request, background_tasks: BackgroundTasks):
@@ -528,7 +479,6 @@ async def handle_webhook(request: Request, background_tasks: BackgroundTasks):
         logger.error(f"Error processing webhook: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
-
 async def process_message(message: Dict):
     try:
         from_number = message.get("from")
@@ -563,7 +513,6 @@ async def process_message(message: Dict):
     except Exception as e:
         logger.error(f"Error processing message: {e}")
 
-
 # -------------------- Admin: recargar KB --------------------
 @app.post("/admin/reload-kb")
 async def reload_kb():
@@ -571,20 +520,18 @@ async def reload_kb():
     KNOWLEDGE_BASE = load_knowledge_base(KNOWLEDGE_BASE_PATH)
     return {"status": "ok", "categories": len(KNOWLEDGE_BASE), "total_questions": get_total_questions(KNOWLEDGE_BASE)}
 
-
 # -------------------- Health & Stats --------------------
 @app.get("/")
 async def health_check():
     return {
         "status": "healthy",
-        "service": "Tony's Pizza WhatsApp Bot",
-        "version": "3.0.0",
+        "service": "Tony's Pizza WhatsApp Chatbot",
+        "version": "1.0.0",
         "active_sessions": len(user_sessions),
         "total_ratings": len(user_ratings),
         "categories": len(KNOWLEDGE_BASE),
         "total_questions": get_total_questions(KNOWLEDGE_BASE)
     }
-
 
 @app.get("/stats")
 async def get_stats():
@@ -599,7 +546,6 @@ async def get_stats():
         "knowledge_base_categories": len(KNOWLEDGE_BASE),
         "total_questions": get_total_questions(KNOWLEDGE_BASE)
     }
-
 
 @app.post("/send-message")
 async def send_manual_message(request: Request):
@@ -625,7 +571,6 @@ async def send_manual_message(request: Request):
     except json.JSONDecodeError:
         raise HTTPException(status_code=400, detail="Invalid JSON")
 
-
 @app.delete("/sessions/{phone_number}")
 async def clear_user_session(phone_number: str):
     if phone_number in user_sessions:
@@ -634,13 +579,11 @@ async def clear_user_session(phone_number: str):
     else:
         raise HTTPException(status_code=404, detail="Session not found")
 
-
 @app.delete("/sessions")
 async def clear_all_sessions():
     count = len(user_sessions)
     user_sessions.clear()
     return {"status": "success", "message": f"Cleared {count} sessions"}
-
 
 # -------------------- Startup --------------------
 @app.on_event("startup")
@@ -651,23 +594,20 @@ async def startup_event():
     except Exception as e:
         logger.error(f"No se pudo cargar el knowledge_base.json: {e}")
         KNOWLEDGE_BASE = {}
-    required = {"WHATSAPP_TOKEN": WHATSAPP_TOKEN, "PHONE_NUMBER_ID": PHONE_NUMBER_ID, "VERIFY_TOKEN": VERIFY_TOKEN}
-    missing = [k for k, v in required.items() if not v]
+    required_vars = {"WHATSAPP_TOKEN": WHATSAPP_TOKEN, "PHONE_NUMBER_ID": PHONE_NUMBER_ID, "VERIFY_TOKEN": VERIFY_TOKEN}
+    missing = [k for k, v in required_vars.items() if not v]
     if missing:
         logger.error(f"Missing required env vars: {', '.join(missing)}")
     logger.info(f"Bot iniciado. KB categorías={len(KNOWLEDGE_BASE)} preguntas={get_total_questions(KNOWLEDGE_BASE)}")
-    logger.info(f"LOGO_URL={'configurado' if LOGO_URL else 'no configurado'}")
-
 
 # -------------------- Main --------------------
 if __name__ == "__main__":
     import uvicorn
-    print("Starting Tony's Pizza WhatsApp Bot...")
+    print("Starting Tony's Pizza WhatsApp Chatbot...")
     print("Env check:")
     print(f"  WHATSAPP_TOKEN: {'✓' if WHATSAPP_TOKEN and 'your_' not in WHATSAPP_TOKEN.lower() else '✗'}")
     print(f"  PHONE_NUMBER_ID: {'✓' if PHONE_NUMBER_ID and 'your_' not in PHONE_NUMBER_ID.lower() else '✗'}")
     print(f"  VERIFY_TOKEN: {'✓' if VERIFY_TOKEN and 'your_' not in VERIFY_TOKEN.lower() else '✗'}")
     print(f"  APP_SECRET: {'✓' if APP_SECRET and 'your_' not in APP_SECRET.lower() else '✗ (optional)'}")
     print(f"  KNOWLEDGE_BASE_PATH: {KNOWLEDGE_BASE_PATH}")
-    print(f"  LOGO_URL: {LOGO_URL or '(no configurado)'}")
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True, log_level="info")
