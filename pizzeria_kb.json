@@ -1,0 +1,278 @@
+{
+  "PIZZERIA_INFO": {
+    "id": "PIZZERIA_INFO",
+    "title": "Sobre la Pizzería",
+    "questions": [
+      {
+        "id": "Q1_PZ_INFO",
+        "text": "¿Quiénes somos?",
+        "answer": "Somos Pizzería Don Basilico, especialistas en pizzas artesanales horneadas en piedra con ingredientes frescos y masa madre.",
+        "short_title": "Quiénes somos"
+      },
+      {
+        "id": "Q2_PZ_INFO",
+        "text": "¿Dónde están ubicados?",
+        "answer": "Estamos en Av. Central 123, Local 4. Contamos con estacionamiento y fácil acceso.",
+        "short_title": "Ubicación"
+      },
+      {
+        "id": "Q3_PZ_INFO",
+        "text": "¿Cuál es su teléfono de contacto?",
+        "answer": "Puedes escribirnos por WhatsApp al +58 412-0000000 o llamar al 0212-0000000.",
+        "short_title": "Contacto"
+      },
+      {
+        "id": "Q4_PZ_INFO",
+        "text": "¿Tienen opciones para vegetarianos o veganos?",
+        "answer": "Sí. Ofrecemos pizzas vegetarianas, pizzas con queso vegano y toppings vegetales. Consulta la sección *Alergias y preferencias*.",
+        "short_title": "Opciones veggie"
+      },
+      {
+        "id": "Q5_PZ_INFO",
+        "text": "¿Atienden eventos o catering?",
+        "answer": "Sí, atendemos eventos corporativos y celebraciones. Escríbenos con la fecha, cantidad de personas y presupuesto.",
+        "short_title": "Catering"
+      }
+    ]
+  },
+  "MENU_PIZZAS": {
+    "id": "MENU_PIZZAS",
+    "title": "Menú de Pizzas",
+    "questions": [
+      {
+        "id": "Q1_MENU",
+        "text": "¿Cuáles son las pizzas más vendidas?",
+        "answer": "Margarita, Pepperoni, Cuatro Quesos y BBQ Pollo. Todas pueden personalizarse con toppings extra.",
+        "short_title": "Más vendidas"
+      },
+      {
+        "id": "Q2_MENU",
+        "text": "¿Qué tamaños manejan?",
+        "answer": "Personal (20 cm), Mediana (30 cm) y Familiar (40 cm).",
+        "short_title": "Tamaños"
+      },
+      {
+        "id": "Q3_MENU",
+        "text": "¿Cuáles son los precios?",
+        "answer": "Varían por tamaño y receta. Ejemplo: Margarita Personal $6, Mediana $9, Familiar $13. Consulta lista actualizada en la carta digital.",
+        "short_title": "Precios"
+      },
+      {
+        "id": "Q4_MENU",
+        "text": "¿Puedo armar mi pizza?",
+        "answer": "¡Claro! Elige base, salsa y hasta 5 toppings. Toppings extra tienen costo adicional.",
+        "short_title": "Arma tu pizza"
+      },
+      {
+        "id": "Q5_MENU",
+        "text": "¿Qué masas ofrecen?",
+        "answer": "Clásica, integral y sin gluten (con recargo). Todas con fermentación lenta.",
+        "short_title": "Tipos de masa"
+      },
+      {
+        "id": "Q6_MENU",
+        "text": "¿Tienen otros productos?",
+        "answer": "Sí: calzones, focaccias, ensaladas, alitas, postres y bebidas.",
+        "short_title": "Otros productos"
+      }
+    ]
+  },
+  "PROMOCIONES": {
+    "id": "PROMOCIONES",
+    "title": "Promociones",
+    "questions": [
+      {
+        "id": "Q1_PROMO",
+        "text": "¿Tienen combo 2x1?",
+        "answer": "Los martes hay 2x1 en pizzas medianas Margarita y Pepperoni, para consumo en local o pickup.",
+        "short_title": "Martes 2x1"
+      },
+      {
+        "id": "Q2_PROMO",
+        "text": "¿Descuentos por primera compra?",
+        "answer": "Sí, 10% en tu primer pedido vía WhatsApp o web. Usa el código PRIMERA10.",
+        "short_title": "Primera compra"
+      },
+      {
+        "id": "Q3_PROMO",
+        "text": "¿Promos de fin de semana?",
+        "answer": "Combo Familiar: Pizza Familiar + 2 bebidas + postre a precio especial viernes-domingo.",
+        "short_title": "Fin de semana"
+      },
+      {
+        "id": "Q4_PROMO",
+        "text": "¿Programa de fidelidad?",
+        "answer": "Cada compra suma puntos. Al llegar a 100 puntos recibes una pizza mediana gratis.",
+        "short_title": "Fidelidad"
+      }
+    ]
+  },
+  "PEDIDOS": {
+    "id": "PEDIDOS",
+    "title": "Cómo Pedir",
+    "questions": [
+      {
+        "id": "Q1_ORDER",
+        "text": "¿Cómo hago un pedido?",
+        "answer": "Escríbenos por WhatsApp con tu orden (tamaño, pizza o toppings, bebida, dirección). Te confirmamos total y tiempo estimado.",
+        "short_title": "Hacer pedido"
+      },
+      {
+        "id": "Q2_ORDER",
+        "text": "¿Cuánto tarda mi pedido?",
+        "answer": "Entre 25 y 45 minutos según horario, cola y zona de entrega.",
+        "short_title": "Tiempo"
+      },
+      {
+        "id": "Q3_ORDER",
+        "text": "¿Puedo programar pedidos?",
+        "answer": "Sí, puedes programarlo con hora específica el mismo día.",
+        "short_title": "Programar"
+      },
+      {
+        "id": "Q4_ORDER",
+        "text": "¿Puedo modificar o cancelar?",
+        "answer": "Puedes modificar/cancelar antes de que la pizza entre al horno. Luego no es posible.",
+        "short_title": "Modificar/cancelar"
+      }
+    ]
+  },
+  "DELIVERY": {
+    "id": "DELIVERY",
+    "title": "Delivery",
+    "questions": [
+      {
+        "id": "Q1_DEL",
+        "text": "¿Hacen delivery? ¿Zonas?",
+        "answer": "Sí. Centro, Norte y Este. Para zonas fuera del radio, consultar disponibilidad.",
+        "short_title": "Zonas"
+      },
+      {
+        "id": "Q2_DEL",
+        "text": "¿Costo de envío?",
+        "answer": "Desde $2 según distancia. Se cotiza al momento de confirmar la dirección.",
+        "short_title": "Costo envío"
+      },
+      {
+        "id": "Q3_DEL",
+        "text": "¿Cómo rastreo mi pedido?",
+        "answer": "Te enviamos estado por WhatsApp (en preparación, en camino, entregado).",
+        "short_title": "Rastreo"
+      }
+    ]
+  },
+  "RETIRO_LOCAL": {
+    "id": "RETIRO_LOCAL",
+    "title": "Retiro en Local",
+    "questions": [
+      {
+        "id": "Q1_PICK",
+        "text": "¿Puedo pedir y retirar?",
+        "answer": "Sí. Te confirmamos el tiempo de preparación y pasas a retirar en mostrador.",
+        "short_title": "Pickup"
+      },
+      {
+        "id": "Q2_PICK",
+        "text": "¿Tienen estacionamiento?",
+        "answer": "Contamos con 6 puestos frente al local. También tenemos zona rápida de pickup.",
+        "short_title": "Estacionamiento"
+      }
+    ]
+  },
+  "PAGO": {
+    "id": "PAGO",
+    "title": "Medios de Pago",
+    "questions": [
+      {
+        "id": "Q1_PAY",
+        "text": "¿Qué medios aceptan?",
+        "answer": "Efectivo, tarjeta débito/crédito, pago móvil, Zelle y transferencia.",
+        "short_title": "Medios"
+      },
+      {
+        "id": "Q2_PAY",
+        "text": "¿Puedo pagar al recibir?",
+        "answer": "Sí, en efectivo o tarjeta (datáfono con el repartidor en zonas habilitadas).",
+        "short_title": "Contraentrega"
+      },
+      {
+        "id": "Q3_PAY",
+        "text": "¿Facturan fiscalmente?",
+        "answer": "Sí, emite tu RIF al momento del pedido para incluir datos en la factura.",
+        "short_title": "Factura"
+      }
+    ]
+  },
+  "HORARIOS": {
+    "id": "HORARIOS",
+    "title": "Horarios",
+    "questions": [
+      {
+        "id": "Q1_HR",
+        "text": "¿Cuál es su horario?",
+        "answer": "Lun-Jue 12:00–22:00, Vie-Sáb 12:00–23:30, Dom 12:00–21:30.",
+        "short_title": "Horario"
+      },
+      {
+        "id": "Q2_HR",
+        "text": "¿Abren días feriados?",
+        "answer": "Sí, operamos en la mayoría de los feriados. Te avisamos por redes si hay cambios.",
+        "short_title": "Feriados"
+      }
+    ]
+  },
+  "ALERGIAS": {
+    "id": "ALERGIAS",
+    "title": "Alergias y Preferencias",
+    "questions": [
+      {
+        "id": "Q1_ALG",
+        "text": "¿Tienen pizza sin gluten?",
+        "answer": "Sí, masa sin gluten con recargo. Se elabora por separado, pero puede existir trazas.",
+        "short_title": "Sin gluten"
+      },
+      {
+        "id": "Q2_ALG",
+        "text": "¿Tienen queso vegano?",
+        "answer": "Sí, queso estilo mozzarella vegano y abundantes vegetales frescos.",
+        "short_title": "Vegano"
+      },
+      {
+        "id": "Q3_ALG",
+        "text": "¿Puedo pedir sin lactosa?",
+        "answer": "Podemos preparar la pizza sin queso o con queso vegano. Indícanos tu preferencia.",
+        "short_title": "Sin lactosa"
+      },
+      {
+        "id": "Q4_ALG",
+        "text": "¿Cómo manejo alergias específicas?",
+        "answer": "Indícanos tus alergias (maní, mariscos, etc.) para tomar precauciones al preparar.",
+        "short_title": "Alergias"
+      }
+    ]
+  },
+  "SOPORTE": {
+    "id": "SOPORTE",
+    "title": "Soporte",
+    "questions": [
+      {
+        "id": "Q1_SUP",
+        "text": "Mi pedido llegó frío o con error, ¿qué hago?",
+        "answer": "Escríbenos el número de pedido y fotos. Reponemos o reembolsamos según el caso.",
+        "short_title": "Pedido con error"
+      },
+      {
+        "id": "Q2_SUP",
+        "text": "No puedo finalizar mi pedido por WhatsApp/web",
+        "answer": "Indícanos tu orden, dirección y medio de pago. Lo gestionamos manualmente.",
+        "short_title": "Ayuda con pedido"
+      },
+      {
+        "id": "Q3_SUP",
+        "text": "Quiero dejar una sugerencia o felicitación",
+        "answer": "¡Nos encanta escucharte! Envíala por aquí o por correo a hola@donbasilico.com.",
+        "short_title": "Sugerencias"
+      }
+    ]
+  }
+}
