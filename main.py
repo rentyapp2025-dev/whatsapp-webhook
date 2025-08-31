@@ -91,6 +91,53 @@ async def send_ops_email(subject: str, text: str) -> bool:
         logging.error(f"Error enviando email (Mailjet): {e}")
         return False
 
+# >>> SUPABASE (REST) <<<
+SUPABASE_URL = (os.getenv("SUPABASE_URL") or "").rstrip("/")
+SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or ""
+
+_SUPA_HEADERS = {
+    "apikey": SUPABASE_SERVICE_ROLE_KEY,
+    "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
+    "Content-Type": "application/json",
+} if SUPABASE_SERVICE_ROLE_KEY else {}
+
+async def supabase_insert_rating(phone: str, name: Optional[str], rating: str) -> None:
+    """Inserta una fila en public.ratings (no rompe el flujo si falla)."""
+    if not (SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY):
+        return
+    payload = {"phone": phone, "name": name or "", "rating": rating}
+    try:
+        async with httpx.AsyncClient() as client:
+            r = await client.post(
+                f"{SUPABASE_URL}/rest/v1/ratings",
+                headers=_SUPA_HEADERS,
+                json=payload,
+                params={"select": "*"},
+                timeout=15.0
+            )
+            r.raise_for_status()
+            logging.info("Rating enviado a Supabase")
+    except Exception as e:
+        logging.error(f"Supabase ratings error: {e}")
+
+async def supabase_insert_order(order: Dict[str, Any]) -> None:
+    """Inserta una fila en public.orders (no rompe el flujo si falla)."""
+    if not (SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY):
+        return
+    try:
+        async with httpx.AsyncClient() as client:
+            r = await client.post(
+                f"{SUPABASE_URL}/rest/v1/orders",
+                headers=_SUPA_HEADERS,
+                json=order,
+                params={"select": "*"},
+                timeout=15.0
+            )
+            r.raise_for_status()
+            logging.info("Pedido guardado en Supabase")
+    except Exception as e:
+        logging.error(f"Supabase orders error: {e}")
+
 # -------------------- App & Estado --------------------
 app = FastAPI(title="Tony's Pizza WhatsApp Chatbot")
 
@@ -432,6 +479,12 @@ async def handle_rating(to: str, rating_id: str):
     rating_map = {"RATE_EXCELLENT": "Excelente ⭐⭐⭐", "RATE_GOOD": "Bueno ⭐⭐", "RATE_POOR": "Necesita mejorar ⭐"}
     rating = rating_map.get(rating_id, "Desconocida")
     user_ratings.append({"user": to, "rating": rating, "timestamp": datetime.now().isoformat()})
+    # >>> SUPABASE: guardar rating (normalizado sin emojis)
+    try:
+        norm = "Excelente" if rating.startswith("Excelente") else "Bueno" if rating.startswith("Bueno") else "Necesita mejorar" if rating.startswith("Necesita") else rating
+        await supabase_insert_rating(to, get_first_name(to), norm)
+    except Exception as e:
+        logger.error(f"No se pudo guardar rating en Supabase: {e}")
     name = get_first_name(to)
     txt = (
         f"¡Muchas gracias{', ' + name if name else ''} por tu calificación: *{rating}*! 🙏\n\n"
@@ -550,6 +603,21 @@ async def save_and_finish_order(to: str):
         f"🕒 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
     )
     await send_ops_email(email_subject, email_text)
+
+    # >>> SUPABASE: guardar pedido (best-effort)
+    try:
+        await supabase_insert_order({
+            "order_no": order_no,
+            "phone": to,
+            "name": get_first_name(to),
+            "mode": order.get("mode"),
+            "address": order.get("address"),
+            "items": order.get("items"),
+            "payment": order.get("payment"),
+            "note": order.get("note")
+        })
+    except Exception as e:
+        logger.error(f"No se pudo guardar pedido en Supabase: {e}")
 
     # limpiar subestado de orden pero mantener la sesión general
     user_sessions.get(to, {}).pop("order", None)
