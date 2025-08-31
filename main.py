@@ -35,6 +35,9 @@ HEADERS = {"Authorization": f"Bearer {WHATSAPP_TOKEN}", "Content-Type": "applica
 
 # >>> REENVÍO: número de WhatsApp del encargado (E.164 sin '+')
 FORWARD_WHATSAPP_NUMBER = os.getenv("FORWARD_WHATSAPP_NUMBER", "584226103010")
+# >>> REENVÍO POR PLANTILLA (opcional y recomendado)
+FORWARD_TEMPLATE_NAME = os.getenv("FORWARD_TEMPLATE_NAME", "")  # p.ej. "order_alert"
+FORWARD_TEMPLATE_LANG = os.getenv("FORWARD_TEMPLATE_LANG", "es")  # p.ej. "es" o "es_ES"
 
 # -------------------- App & Estado --------------------
 app = FastAPI(title="Tony's Pizza WhatsApp Chatbot")
@@ -193,6 +196,21 @@ def build_image_id_message(to: str, media_id: str, caption: Optional[str] = None
         payload["image"]["caption"] = caption
     return payload
 
+def build_template_message(to: str, template_name: str, parameters: List[str], lang_code: str = "es") -> Dict:
+    return {
+        "messaging_product": "whatsapp",
+        "to": to,
+        "type": "template",
+        "template": {
+            "name": template_name,
+            "language": {"code": lang_code},
+            "components": [{
+                "type": "body",
+                "parameters": [{"type": "text", "text": str(p)} for p in parameters]
+            }]
+        }
+    }
+
 # -------------------- WhatsApp HTTP --------------------
 async def send_message(payload: Dict) -> bool:
     try:
@@ -251,10 +269,23 @@ async def send_typing_indicator_and_wait(to: str, seconds: float = 1.2):
     except Exception as e:
         logger.error(f"Typing indicator error: {e}")
 
-# >>> REENVÍO: helper para mandar texto al encargado
-async def forward_to_ops(text: str):
+# >>> REENVÍO: helper para mandar texto/plantilla al encargado
+async def forward_to_ops(text: str, template_params: Optional[List[str]] = None):
     if not FORWARD_WHATSAPP_NUMBER:
         return
+    # 1) Intentar plantilla si está configurada y hay parámetros
+    if FORWARD_TEMPLATE_NAME and template_params:
+        payload = build_template_message(
+            FORWARD_WHATSAPP_NUMBER,
+            FORWARD_TEMPLATE_NAME,
+            template_params,
+            FORWARD_TEMPLATE_LANG
+        )
+        ok = await send_message(payload)
+        if ok:
+            return
+        logger.warning("Fallo envío por plantilla; intento reenvío por texto.")
+    # 2) Fallback a texto (requiere ventana activa de 24h)
     payload = build_text_message(FORWARD_WHATSAPP_NUMBER, text)
     ok = await send_message(payload)
     if not ok:
@@ -493,15 +524,24 @@ async def save_and_finish_order(to: str):
         "Te avisaremos cuando esté en camino o listo para retirar. ¡Gracias por elegir Tony's Pizza! 🍕"
     ))
 
-    # >>> REENVÍO: enviar resumen al número del encargado
-    ops_name = get_first_name(to) or to
+    # >>> REENVÍO: enviar resumen al número del encargado (intenta plantilla -> fallback texto)
     ops_text = (
         f"📦 *Nuevo pedido confirmado* #{order_no}\n"
         f"{_order_summary_text(to)}\n"
         f"📱 Cliente WA: {to}\n"
         f"🕒 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
     )
-    await forward_to_ops(ops_text)
+    # Parámetros para plantilla (ajusta a tu template aprobado)
+    template_params = [
+        order_no,
+        get_first_name(to) or to,
+        order.get("mode") or "-",
+        order.get("address") or "-",
+        order.get("items") or "-",
+        order.get("payment") or "-",
+        datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    ]
+    await forward_to_ops(ops_text, template_params=template_params)
 
     # limpiar subestado de orden pero mantener la sesión general
     user_sessions.get(to, {}).pop("order", None)
