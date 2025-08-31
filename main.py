@@ -195,6 +195,9 @@ async def send_message(payload: Dict) -> bool:
             r.raise_for_status()
             logger.info(f"Message sent to {payload.get('to')} ({payload.get('type')})")
             return True
+    except httpx.HTTPStatusError as e:
+        logger.error(f"HTTP {e.response.status_code} sending message: {e.response.text}")
+        return False
     except Exception as e:
         logger.error(f"Error sending message: {e}")
         return False
@@ -203,21 +206,26 @@ async def upload_media_from_url(url: str) -> Optional[str]:
     """Descarga una imagen desde URL y la sube al endpoint /media de WhatsApp. Devuelve media_id o None."""
     try:
         async with httpx.AsyncClient() as client:
-            # Descargar bytes (seguirá redirecciones si las hay)
             resp = await client.get(url, timeout=30.0)
             resp.raise_for_status()
-            mime = resp.headers.get("Content-Type", "image/jpeg")
+            mime = resp.headers.get("Content-Type", "").split(";")[0].strip() or "image/jpeg"
+            # si el servidor devuelve html/text, forzamos jpeg pero probablemente no sea una imagen válida
             filename = os.path.basename(url.split("?")[0]) or "image.jpg"
 
-            # Subir a /media (multipart, sin Content-Type JSON)
             files = {"file": (filename, resp.content, mime)}
-            data = {"messaging_product": "whatsapp"}
-            headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}"}  # sin Content-Type para que httpx ponga boundary
+            data = {
+                "messaging_product": "whatsapp",
+                "type": mime  # <-- corrección: incluir MIME
+            }
+            headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}"}
             up = await client.post(MEDIA_UPLOAD_URL, headers=headers, data=data, files=files, timeout=30.0)
             up.raise_for_status()
             media_id = up.json().get("id")
             logger.info(f"Media uploaded. id={media_id}")
             return media_id
+    except httpx.HTTPStatusError as e:
+        logger.error(f"HTTP {e.response.status_code} uploading media: {e.response.text}")
+        return None
     except Exception as e:
         logger.error(f"Error uploading media: {e}")
         return None
@@ -227,7 +235,6 @@ async def send_image_with_fallback(to: str, url: str, caption: Optional[str] = N
     sent = await send_message(build_image_message(to, url, caption))
     if sent:
         return
-    # Fallback: subir y enviar por id
     media_id = await upload_media_from_url(url)
     if media_id:
         await send_message(build_image_id_message(to, media_id, caption))
@@ -415,6 +422,7 @@ async def process_text_message(from_number: str, text: str, message_id: str):
         return
 
     if parsed_first and user_state not in ["main_menu", "questions_menu"]:
+        # FIX del typo: quitamos la llave extra '}' en el f-string
         await send_message(build_text_message(from_number, f"¡Encantado, {parsed_first}! He guardado tu nombre. Te muestro el menú principal:"))
         await asyncio.sleep(0.5)
         await send_main_menu(from_number)
@@ -436,6 +444,7 @@ async def process_interactive_message(from_number: str, interactive_data: Dict):
         if sel in KNOWLEDGE_BASE:
             await send_category_questions(from_number, sel)
         else:
+            # posiblemente sea una pregunta
             await send_answer(from_number, sel)
 
     elif mtype == "button_reply":
@@ -523,6 +532,7 @@ async def process_message(message: Dict):
         message_id = message.get("id")
         mtype = message.get("type")
 
+        # Si este mensaje trae nombre (poco común), guárdalo
         maybe_name = ((message.get("profile") or {}).get("name") or "").strip()
         if from_number and maybe_name:
             set_user_name(from_number, maybe_name)
@@ -563,7 +573,7 @@ async def health_check():
     return {
         "status": "healthy",
         "service": "Tony's Pizza WhatsApp Chatbot",
-        "version": "1.0.1",
+        "version": "1.0.2",
         "active_sessions": len(user_sessions),
         "total_ratings": len(user_ratings),
         "categories": len(KNOWLEDGE_BASE),
