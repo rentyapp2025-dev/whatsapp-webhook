@@ -33,11 +33,63 @@ GRAPH_API_URL = f"https://graph.facebook.com/v18.0/{PHONE_NUMBER_ID}/messages"
 MEDIA_UPLOAD_URL = f"https://graph.facebook.com/v18.0/{PHONE_NUMBER_ID}/media"
 HEADERS = {"Authorization": f"Bearer {WHATSAPP_TOKEN}", "Content-Type": "application/json"}
 
-# >>> REENVÍO: número de WhatsApp del encargado (E.164 sin '+')
-FORWARD_WHATSAPP_NUMBER = os.getenv("FORWARD_WHATSAPP_NUMBER", "584226103010")
-# >>> REENVÍO POR PLANTILLA (obligatorio para iniciar conversación)
-FORWARD_TEMPLATE_NAME = os.getenv("FORWARD_TEMPLATE_NAME", "order_alert")  # nombre EXACTO de la plantilla aprobada
-FORWARD_TEMPLATE_LANG = os.getenv("FORWARD_TEMPLATE_LANG", "es_VE")       # código EXACTO del idioma aprobado, p.ej. es_VE
+# >>> EMAIL (Mailjet SMTP) <<<
+import smtplib, ssl
+from email.utils import formataddr, make_msgid
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+
+SMTP_HOST = os.getenv("SMTP_HOST", "in-v3.mailjet.com")
+SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
+SMTP_USER = os.getenv("SMTP_USER", "436f971e525f9e2ff955ad1dc84de9d3")  # Mailjet API Key
+SMTP_PASS = os.getenv("SMTP_PASS", "345c10295f46f0c78d8279fea3533acc")  # Mailjet API Secret
+OPS_EMAIL_TO = os.getenv("OPS_EMAIL_TO", "planasnico@gmail.com")       # uno o varios separados por coma
+OPS_EMAIL_FROM = os.getenv("OPS_EMAIL_FROM", "rentyapp2025@gmail.com") # remitente verificado en Mailjet
+REPLY_TO = os.getenv("REPLY_TO")                                     # opcional
+ORDERS_BCC = os.getenv("ORDERS_BCC")                                 # opcional, coma-separado
+
+def _split_csv(s: Optional[str]) -> List[str]:
+    return [x.strip() for x in s.split(",")] if s else []
+
+async def send_ops_email(subject: str, text: str) -> bool:
+    """
+    Envía correo operacional (pedido) usando SMTP de Mailjet.
+    Envía texto plano; si quieres HTML, añade otra parte MIMEText('html').
+    """
+    try:
+        if not all([SMTP_USER, SMTP_PASS, OPS_EMAIL_FROM, OPS_EMAIL_TO]):
+            logging.error("SMTP/ENV incompletos para Mailjet (revisa SMTP_USER, SMTP_PASS, OPS_EMAIL_FROM, OPS_EMAIL_TO).")
+            return False
+
+        tos = _split_csv(OPS_EMAIL_TO)
+        bccs = _split_csv(ORDERS_BCC)
+
+        msg = MIMEMultipart("alternative")
+        msg["Subject"] = subject
+        msg["From"] = formataddr(("Tony's Pizza Bot", OPS_EMAIL_FROM))
+        msg["To"] = ", ".join(tos)
+        if REPLY_TO:
+            msg.add_header("Reply-To", REPLY_TO)
+        if bccs:
+            msg["Bcc"] = ", ".join(bccs)
+        msg.add_header("Message-ID", make_msgid(domain=OPS_EMAIL_FROM.split("@")[-1]))
+        msg.add_header("X-Mailer", "TonysPizzaWA/1.0")
+        msg.add_header("X-Mailjet-Campaign", "whatsapp-orders")
+
+        msg.attach(MIMEText(text, "plain", "utf-8"))
+
+        context = ssl.create_default_context()
+        # Nota: smtplib es bloqueante; si necesitas alto volumen, mueve esto a un worker/cola
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
+            server.starttls(context=context)
+            server.login(SMTP_USER, SMTP_PASS)
+            server.sendmail(OPS_EMAIL_FROM, tos + bccs, msg.as_string())
+
+        logging.info(f"Pedido reenviado por email (Mailjet) a: {tos} (bcc: {bccs})")
+        return True
+    except Exception as e:
+        logging.error(f"Error enviando email (Mailjet): {e}")
+        return False
 
 # -------------------- App & Estado --------------------
 app = FastAPI(title="Tony's Pizza WhatsApp Chatbot")
@@ -196,21 +248,6 @@ def build_image_id_message(to: str, media_id: str, caption: Optional[str] = None
         payload["image"]["caption"] = caption
     return payload
 
-def build_template_message(to: str, template_name: str, parameters: List[str], lang_code: str = "es") -> Dict:
-    return {
-        "messaging_product": "whatsapp",
-        "to": to,
-        "type": "template",
-        "template": {
-            "name": template_name,
-            "language": {"code": lang_code},
-            "components": [{
-                "type": "body",
-                "parameters": [{"type": "text", "text": str(p)} for p in parameters]
-            }]
-        }
-    }
-
 # -------------------- WhatsApp HTTP --------------------
 async def send_message(payload: Dict) -> bool:
     try:
@@ -268,26 +305,6 @@ async def send_typing_indicator_and_wait(to: str, seconds: float = 1.2):
         await asyncio.sleep(seconds)
     except Exception as e:
         logger.error(f"Typing indicator error: {e}")
-
-# >>> REENVÍO: usar SIEMPRE plantilla aprobada (sin fallback a texto)
-async def forward_to_ops(text: str, template_params: Optional[List[str]] = None):
-    if not FORWARD_WHATSAPP_NUMBER:
-        logger.error("FORWARD_WHATSAPP_NUMBER no está configurado.")
-        return
-    if not FORWARD_TEMPLATE_NAME:
-        logger.error("FORWARD_TEMPLATE_NAME no está configurado. Debes definir una plantilla aprobada.")
-        return
-    if template_params is None:
-        template_params = []
-    payload = build_template_message(
-        FORWARD_WHATSAPP_NUMBER,
-        FORWARD_TEMPLATE_NAME,
-        template_params,
-        FORWARD_TEMPLATE_LANG
-    )
-    ok = await send_message(payload)
-    if not ok:
-        logger.error("No se pudo reenviar por plantilla. Revisa nombre/idioma de la plantilla y variables.")
 
 # -------------------- Flujos conversacionales --------------------
 async def send_welcome_sequence(to: str):
@@ -497,6 +514,8 @@ def _order_summary_text(phone: str) -> str:
         parts.append(f"📍 Dirección: {order.get('address') or '-'}")
     parts.append(f"🍕 Pedido: {order.get('items') or '-'}")
     parts.append(f"💳 Pago: {order.get('payment') or '-'}")
+    if order.get("note"):
+        parts.append(f"📝 Nota: {order.get('note')}")
     return "\n".join(parts)
 
 async def _ask_for_confirmation(to: str):
@@ -522,23 +541,15 @@ async def save_and_finish_order(to: str):
         "Te avisaremos cuando esté en camino o listo para retirar. ¡Gracias por elegir Tony's Pizza! 🍕"
     ))
 
-    # >>> REENVÍO: enviar resumen al número del encargado (SIEMPRE por plantilla)
-    ops_text = (
-        f"📦 *Nuevo pedido confirmado* #{order_no}\n"
+    # >>> EMAIL: enviar resumen al correo del encargado
+    email_subject = f"Nuevo pedido #{order_no} - Tony's Pizza"
+    email_text = (
+        f"📦 Nuevo pedido confirmado #{order_no}\n"
         f"{_order_summary_text(to)}\n"
         f"📱 Cliente WA: {to}\n"
-        f"🕒 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        f"🕒 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
     )
-    template_params = [
-        order_no,
-        get_first_name(to) or to,
-        order.get("mode") or "-",
-        order.get("address") or "-",
-        order.get("items") or "-",
-        order.get("payment") or "-",
-        datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    ]
-    await forward_to_ops(ops_text, template_params=template_params)
+    await send_ops_email(email_subject, email_text)
 
     # limpiar subestado de orden pero mantener la sesión general
     user_sessions.get(to, {}).pop("order", None)
@@ -885,7 +896,11 @@ async def startup_event():
     except Exception as e:
         logger.error(f"No se pudo cargar el knowledge_base.json: {e}")
         KNOWLEDGE_BASE = {}
-    required_vars = {"WHATSAPP_TOKEN": WHATSAPP_TOKEN, "PHONE_NUMBER_ID": PHONE_NUMBER_ID, "VERIFY_TOKEN": VERIFY_TOKEN}
+    required_vars = {
+        "WHATSAPP_TOKEN": WHATSAPP_TOKEN,
+        "PHONE_NUMBER_ID": PHONE_NUMBER_ID,
+        "VERIFY_TOKEN": VERIFY_TOKEN
+    }
     missing = [k for k, v in required_vars.items() if not v]
     if missing:
         logger.error(f"Missing required env vars: {', '.join(missing)}")
@@ -901,4 +916,8 @@ if __name__ == "__main__":
     print(f"  VERIFY_TOKEN: {'✓' if VERIFY_TOKEN and 'your_' not in VERIFY_TOKEN.lower() else '✗'}")
     print(f"  APP_SECRET: {'✓' if APP_SECRET and 'your_' not in APP_SECRET.lower() else '✗ (optional)'}")
     print(f"  KNOWLEDGE_BASE_PATH: {KNOWLEDGE_BASE_PATH}")
+    print(f"  SMTP_USER set: {'✓' if SMTP_USER else '✗'}")
+    print(f"  SMTP_PASS set: {'✓' if SMTP_PASS else '✗'}")
+    print(f"  OPS_EMAIL_FROM: {OPS_EMAIL_FROM}")
+    print(f"  OPS_EMAIL_TO: {OPS_EMAIL_TO}")
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True, log_level="info")
