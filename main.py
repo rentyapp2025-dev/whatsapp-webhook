@@ -249,16 +249,18 @@ async def send_typing_indicator_and_wait(to: str, seconds: float = 1.2):
 async def send_welcome_sequence(to: str):
     name = get_first_name(to)
     saludo = f"¡Hola, {name}! 👋" if name else "¡Hola! 👋"
-    txt = (
+    caption = (
         f"{saludo} Bienvenido a *Tony's Pizza* 🍕\n\n"
         "Soy tu asistente virtual. Puedo ayudarte con el menú, promociones, delivery, pagos, horarios y más.\n\n"
         "¿Qué te gustaría saber?"
     )
     await send_typing_indicator_and_wait(to, 1.0)
-    # --- ÚNICO CAMBIO: usar el nuevo link de la imagen ---
-    await send_image_with_fallback(to, "https://www.tonys.com/cdn/shop/files/703x703-tonys-pepp.jpg?v=1740758302")
-    await asyncio.sleep(0.3)
-    await send_message(build_text_message(to, txt))
+    # >>> ÚNICO cambio funcional: enviamos IMAGEN + MENSAJE como caption en un solo envío <<<
+    await send_image_with_fallback(
+        to,
+        "https://static.wixstatic.com/media/019f09_d9e4f80f0ad54e83be59f4bbfc95b8ca~mv2.png/v1/fill/w_430,h_426,al_c,q_85,usm_0.66_1.00_0.01,enc_avif,quality_auto/tonys%20pizza%20logos_FINAL_color.png",
+        caption=caption
+    )
     await asyncio.sleep(0.5)
     await send_main_menu(to)
 
@@ -571,7 +573,7 @@ async def health_check():
     return {
         "status": "healthy",
         "service": "Tony's Pizza WhatsApp Chatbot",
-        "version": "1.0.2",
+        "version": "1.0.3",
         "active_sessions": len(user_sessions),
         "total_ratings": len(user_ratings),
         "categories": len(KNOWLEDGE_BASE),
@@ -583,7 +585,7 @@ async def get_stats():
     rating_counts = {}
     for rating_data in user_ratings:
         rating = rating_data["rating"]
-        rating_counts[rating] = rating_counts.get(rating, 0) + 1
+        rating_counts[rating] = rating_counts[rating] + 1 if rating in rating_counts else 1
     return {
         "active_sessions": len(user_sessions),
         "total_ratings": len(user_ratings),
