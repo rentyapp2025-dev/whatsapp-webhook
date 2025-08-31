@@ -35,9 +35,9 @@ HEADERS = {"Authorization": f"Bearer {WHATSAPP_TOKEN}", "Content-Type": "applica
 
 # >>> REENVÍO: número de WhatsApp del encargado (E.164 sin '+')
 FORWARD_WHATSAPP_NUMBER = os.getenv("FORWARD_WHATSAPP_NUMBER", "584226103010")
-# >>> REENVÍO POR PLANTILLA (opcional y recomendado)
-FORWARD_TEMPLATE_NAME = os.getenv("FORWARD_TEMPLATE_NAME", "")  # p.ej. "order_alert"
-FORWARD_TEMPLATE_LANG = os.getenv("FORWARD_TEMPLATE_LANG", "es")  # p.ej. "es" o "es_ES"
+# >>> REENVÍO POR PLANTILLA (obligatorio para iniciar conversación)
+FORWARD_TEMPLATE_NAME = os.getenv("FORWARD_TEMPLATE_NAME", "order_alert")  # nombre EXACTO de la plantilla aprobada
+FORWARD_TEMPLATE_LANG = os.getenv("FORWARD_TEMPLATE_LANG", "es_VE")       # código EXACTO del idioma aprobado, p.ej. es_VE
 
 # -------------------- App & Estado --------------------
 app = FastAPI(title="Tony's Pizza WhatsApp Chatbot")
@@ -269,27 +269,25 @@ async def send_typing_indicator_and_wait(to: str, seconds: float = 1.2):
     except Exception as e:
         logger.error(f"Typing indicator error: {e}")
 
-# >>> REENVÍO: helper para mandar texto/plantilla al encargado
+# >>> REENVÍO: usar SIEMPRE plantilla aprobada (sin fallback a texto)
 async def forward_to_ops(text: str, template_params: Optional[List[str]] = None):
     if not FORWARD_WHATSAPP_NUMBER:
+        logger.error("FORWARD_WHATSAPP_NUMBER no está configurado.")
         return
-    # 1) Intentar plantilla si está configurada y hay parámetros
-    if FORWARD_TEMPLATE_NAME and template_params:
-        payload = build_template_message(
-            FORWARD_WHATSAPP_NUMBER,
-            FORWARD_TEMPLATE_NAME,
-            template_params,
-            FORWARD_TEMPLATE_LANG
-        )
-        ok = await send_message(payload)
-        if ok:
-            return
-        logger.warning("Fallo envío por plantilla; intento reenvío por texto.")
-    # 2) Fallback a texto (requiere ventana activa de 24h)
-    payload = build_text_message(FORWARD_WHATSAPP_NUMBER, text)
+    if not FORWARD_TEMPLATE_NAME:
+        logger.error("FORWARD_TEMPLATE_NAME no está configurado. Debes definir una plantilla aprobada.")
+        return
+    if template_params is None:
+        template_params = []
+    payload = build_template_message(
+        FORWARD_WHATSAPP_NUMBER,
+        FORWARD_TEMPLATE_NAME,
+        template_params,
+        FORWARD_TEMPLATE_LANG
+    )
     ok = await send_message(payload)
     if not ok:
-        logger.error("No se pudo reenviar el mensaje al número del encargado.")
+        logger.error("No se pudo reenviar por plantilla. Revisa nombre/idioma de la plantilla y variables.")
 
 # -------------------- Flujos conversacionales --------------------
 async def send_welcome_sequence(to: str):
@@ -524,14 +522,13 @@ async def save_and_finish_order(to: str):
         "Te avisaremos cuando esté en camino o listo para retirar. ¡Gracias por elegir Tony's Pizza! 🍕"
     ))
 
-    # >>> REENVÍO: enviar resumen al número del encargado (intenta plantilla -> fallback texto)
+    # >>> REENVÍO: enviar resumen al número del encargado (SIEMPRE por plantilla)
     ops_text = (
         f"📦 *Nuevo pedido confirmado* #{order_no}\n"
         f"{_order_summary_text(to)}\n"
         f"📱 Cliente WA: {to}\n"
         f"🕒 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
     )
-    # Parámetros para plantilla (ajusta a tu template aprobado)
     template_params = [
         order_no,
         get_first_name(to) or to,
@@ -608,7 +605,6 @@ async def handle_order_text_input(phone: str, text: str):
         return
 
     if step == "confirm":
-        # Si escribe algo aquí, lo tratamos como nota adicional y pedimos confirmación otra vez
         note = text.strip()
         if note:
             order["note"] = note
@@ -638,12 +634,12 @@ async def process_text_message(from_number: str, text: str, message_id: str):
     logger.info(f"Processing text message from {from_number}: {text}")
     parsed_first = parse_and_set_name_from_text(from_number, text)
 
-    # >>> NUEVO: si el usuario ya está en el wizard de pedidos, dirigir aquí
+    # si el usuario ya está en el wizard de pedidos, dirigir aquí
     if user_sessions.get(from_number, {}).get("order", {}).get("status") == "in_progress":
         await handle_order_text_input(from_number, text)
         return
 
-    # >>> NUEVO: intención de pedido por texto libre
+    # intención de pedido por texto libre
     if is_order_intent(text):
         await start_order_wizard(from_number)
         return
@@ -680,7 +676,7 @@ async def process_interactive_message(from_number: str, interactive_data: Dict):
         sel = (interactive_data.get("list_reply") or {}).get("id")
         logger.info(f"List reply from {from_number}: {sel}")
 
-        # >>> NUEVO: si selecciona la categoría PEDIDOS, iniciar wizard
+        # si selecciona la categoría PEDIDOS, iniciar wizard
         if sel == "PEDIDOS":
             await start_order_wizard(from_number)
             return
@@ -688,14 +684,13 @@ async def process_interactive_message(from_number: str, interactive_data: Dict):
         if sel in KNOWLEDGE_BASE:
             await send_category_questions(from_number, sel)
         else:
-            # posiblemente sea una pregunta
             await send_answer(from_number, sel)
 
     elif mtype == "button_reply":
         bid = (interactive_data.get("button_reply") or {}).get("id")
         logger.info(f"Button reply from {from_number}: {bid}")
 
-        # >>> NUEVO: manejar botones del wizard de pedidos
+        # botones del wizard de pedidos
         if isinstance(bid, str) and (bid.startswith("ORDER_")):
             await handle_order_button_reply(from_number, bid)
             return
