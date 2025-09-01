@@ -45,17 +45,14 @@ SMTP_USER = os.getenv("SMTP_USER", "436f971e525f9e2ff955ad1dc84de9d3")  # Mailje
 SMTP_PASS = os.getenv("SMTP_PASS", "345c10295f46f0c78d8279fea3533acc")  # Mailjet API Secret
 OPS_EMAIL_TO = os.getenv("OPS_EMAIL_TO", "planasnico@gmail.com")       # uno o varios separados por coma
 OPS_EMAIL_FROM = os.getenv("OPS_EMAIL_FROM", "rentyapp2025@gmail.com") # remitente verificado en Mailjet
-REPLY_TO = os.getenv("REPLY_TO")                                     # opcional
-ORDERS_BCC = os.getenv("ORDERS_BCC")                                 # opcional, coma-separado
+REPLY_TO = os.getenv("REPLY_TO")                                       # opcional
+ORDERS_BCC = os.getenv("ORDERS_BCC")                                   # opcional, coma-separado
 
 def _split_csv(s: Optional[str]) -> List[str]:
     return [x.strip() for x in s.split(",")] if s else []
 
 async def send_ops_email(subject: str, text: str) -> bool:
-    """
-    Envía correo operacional (pedido) usando SMTP de Mailjet.
-    Envía texto plano; si quieres HTML, añade otra parte MIMEText('html').
-    """
+    """Envía correo operacional (pedido) usando SMTP de Mailjet. Texto plano."""
     try:
         if not all([SMTP_USER, SMTP_PASS, OPS_EMAIL_FROM, OPS_EMAIL_TO]):
             logging.error("SMTP/ENV incompletos para Mailjet (revisa SMTP_USER, SMTP_PASS, OPS_EMAIL_FROM, OPS_EMAIL_TO).")
@@ -79,7 +76,6 @@ async def send_ops_email(subject: str, text: str) -> bool:
         msg.attach(MIMEText(text, "plain", "utf-8"))
 
         context = ssl.create_default_context()
-        # Nota: smtplib es bloqueante; si necesitas alto volumen, mueve esto a un worker/cola
         with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
             server.starttls(context=context)
             server.login(SMTP_USER, SMTP_PASS)
@@ -99,11 +95,13 @@ _SUPA_HEADERS = {
     "apikey": SUPABASE_SERVICE_ROLE_KEY,
     "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
     "Content-Type": "application/json",
+    "Prefer": "return=representation"
 } if SUPABASE_SERVICE_ROLE_KEY else {}
 
 async def supabase_insert_rating(phone: str, name: Optional[str], rating: str) -> None:
     """Inserta una fila en public.ratings (no rompe el flujo si falla)."""
     if not (SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY):
+        logger.error("Supabase ENV faltantes: SUPABASE_URL o SUPABASE_SERVICE_ROLE_KEY no están definidos.")
         return
     payload = {"phone": phone, "name": name or "", "rating": rating}
     try:
@@ -112,17 +110,19 @@ async def supabase_insert_rating(phone: str, name: Optional[str], rating: str) -
                 f"{SUPABASE_URL}/rest/v1/ratings",
                 headers=_SUPA_HEADERS,
                 json=payload,
-                params={"select": "*"},
                 timeout=15.0
             )
-            r.raise_for_status()
-            logging.info("Rating enviado a Supabase")
+            if r.status_code >= 400:
+                logger.error(f"Supabase ratings HTTP {r.status_code}: {r.text}")
+                return
+            logger.info(f"Rating enviado a Supabase: {r.json() if r.content else 'OK (sin cuerpo)'}")
     except Exception as e:
         logging.error(f"Supabase ratings error: {e}")
 
 async def supabase_insert_order(order: Dict[str, Any]) -> None:
     """Inserta una fila en public.orders (no rompe el flujo si falla)."""
     if not (SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY):
+        logger.error("Supabase ENV faltantes: SUPABASE_URL o SUPABASE_SERVICE_ROLE_KEY no están definidos.")
         return
     try:
         async with httpx.AsyncClient() as client:
@@ -130,13 +130,14 @@ async def supabase_insert_order(order: Dict[str, Any]) -> None:
                 f"{SUPABASE_URL}/rest/v1/orders",
                 headers=_SUPA_HEADERS,
                 json=order,
-                params={"select": "*"},
                 timeout=15.0
             )
-            r.raise_for_status()
-            logging.info("Pedido guardado en Supabase")
+            if r.status_code >= 400:
+                logger.error(f"Supabase orders HTTP {r.status_code}: {r.text}")
+                return
+            logger.info(f"Pedido guardado en Supabase: {r.json() if r.content else 'OK (sin cuerpo)'}")
     except Exception as e:
-        logging.error(f"Supabase orders error: {e}")
+        logger.error(f"Supabase orders error: {e}")
 
 # -------------------- App & Estado --------------------
 app = FastAPI(title="Tony's Pizza WhatsApp Chatbot")
@@ -187,6 +188,10 @@ def parse_and_set_name_from_text(phone: str, text: str) -> Optional[str]:
 
 def get_first_name(phone: str) -> str:
     return user_sessions.get(phone, {}).get("first_name", "")
+
+# >>> Normalización de teléfonos (quita '+')
+def normalize_phone(p: Optional[str]) -> str:
+    return re.sub(r'^\+', '', (p or '').strip())
 
 # ==================== Utilidades ====================
 def truncate_text(text: str, max_length: int, add_ellipsis: bool = True) -> str:
@@ -320,10 +325,7 @@ async def upload_media_from_url(url: str) -> Optional[str]:
             filename = os.path.basename(url.split("?")[0]) or "image.jpg"
 
             files = {"file": (filename, resp.content, mime)}
-            data = {
-                "messaging_product": "whatsapp",
-                "type": mime
-            }
+            data = {"messaging_product": "whatsapp", "type": mime}
             headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}"}
             up = await client.post(MEDIA_UPLOAD_URL, headers=headers, data=data, files=files, timeout=30.0)
             up.raise_for_status()
@@ -441,15 +443,14 @@ async def send_answer(to: str, question_id: str):
     if not answer:
         await send_message(build_text_message(to, "Lo siento, no pude encontrar la respuesta a esa pregunta."))
         await send_main_menu(to)
-        return
-
-    await send_typing_indicator_and_wait(to, 1.0)
-    name = get_first_name(to)
-    header = f"📋 *Pregunta*{f' ({name})' if name else ''}:\n"
-    txt = f"{header}{question_text}\n\n💡 *Respuesta:*\n{answer}"
-    await send_message(build_text_message(to, txt))
-    await asyncio.sleep(0.9)
-    await send_more_help_options(to)
+    else:
+        await send_typing_indicator_and_wait(to, 1.0)
+        name = get_first_name(to)
+        header = f"📋 *Pregunta*{f' ({name})' if name else ''}:\n"
+        txt = f"{header}{question_text}\n\n💡 *Respuesta:*\n{answer}"
+        await send_message(build_text_message(to, txt))
+        await asyncio.sleep(0.9)
+        await send_more_help_options(to)
 
 async def send_more_help_options(to: str):
     name = get_first_name(to)
@@ -482,7 +483,8 @@ async def handle_rating(to: str, rating_id: str):
     # >>> SUPABASE: guardar rating (normalizado sin emojis)
     try:
         norm = "Excelente" if rating.startswith("Excelente") else "Bueno" if rating.startswith("Bueno") else "Necesita mejorar" if rating.startswith("Necesita") else rating
-        await supabase_insert_rating(to, get_first_name(to), norm)
+        phone_norm = normalize_phone(to)
+        await supabase_insert_rating(phone_norm, get_first_name(to), norm)
     except Exception as e:
         logger.error(f"No se pudo guardar rating en Supabase: {e}")
     name = get_first_name(to)
@@ -533,7 +535,6 @@ async def start_order_wizard(to: str):
         {"type": "reply", "reply": {"id": "ORDER_PICKUP", "title": "🏬 Retiro en local"}}
     ]
     await send_message(build_reply_button_message(to=to, body=body, buttons=buttons))
-    # NO cambiamos user_sessions['state'] global del menú; usamos el subestado 'order' para no romper nada
 
 async def _ask_for_address(to: str):
     await send_message(build_text_message(
@@ -594,7 +595,7 @@ async def save_and_finish_order(to: str):
         "Te avisaremos cuando esté en camino o listo para retirar. ¡Gracias por elegir Tony's Pizza! 🍕"
     ))
 
-    # >>> EMAIL: enviar resumen al correo del encargado
+    # >>> EMAIL
     email_subject = f"Nuevo pedido #{order_no} - Tony's Pizza"
     email_text = (
         f"📦 Nuevo pedido confirmado #{order_no}\n"
@@ -604,11 +605,11 @@ async def save_and_finish_order(to: str):
     )
     await send_ops_email(email_subject, email_text)
 
-    # >>> SUPABASE: guardar pedido (best-effort)
+    # >>> SUPABASE
     try:
         await supabase_insert_order({
             "order_no": order_no,
-            "phone": to,
+            "phone": normalize_phone(to),
             "name": get_first_name(to),
             "mode": order.get("mode"),
             "address": order.get("address"),
@@ -619,7 +620,6 @@ async def save_and_finish_order(to: str):
     except Exception as e:
         logger.error(f"No se pudo guardar pedido en Supabase: {e}")
 
-    # limpiar subestado de orden pero mantener la sesión general
     user_sessions.get(to, {}).pop("order", None)
     await asyncio.sleep(0.6)
     await send_more_help_options(to)
@@ -973,6 +973,12 @@ async def startup_event():
     if missing:
         logger.error(f"Missing required env vars: {', '.join(missing)}")
     logger.info(f"Bot iniciado. KB categorías={len(KNOWLEDGE_BASE)} preguntas={get_total_questions(KNOWLEDGE_BASE)}")
+
+    # Supabase env checks
+    if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
+        logger.error("Supabase no configurado: define SUPABASE_URL y SUPABASE_SERVICE_ROLE_KEY.")
+    else:
+        logger.info(f"Supabase listo. URL={SUPABASE_URL} KEY_LEN={len(SUPABASE_SERVICE_ROLE_KEY)}")
 
 # -------------------- Main --------------------
 if __name__ == "__main__":
