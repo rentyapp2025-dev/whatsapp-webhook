@@ -785,11 +785,23 @@ async def process_interactive_message(from_number: str, interactive_data: Dict):
 
 # -------------------- Webhook / Firma --------------------
 def verify_webhook_signature(payload: bytes, signature: str) -> bool:
-    if not APP_SECRET:
-        logger.warning("APP_SECRET not set, skipping signature verification")
+    # Permite pruebas si APP_SECRET es placeholder o si el header no viene
+    if (not APP_SECRET) or APP_SECRET.startswith("your_") or (not signature):
+        logger.warning("Skipping webhook signature verification (APP_SECRET vacío/placeholder o header ausente).")
         return True
-    expected_signature = hmac.new(APP_SECRET.encode('utf-8'), payload, hashlib.sha256).hexdigest()
-    return hmac.compare_digest(f"sha256={expected_signature}", signature)
+    try:
+        if not signature.strip().startswith("sha256="):
+            logger.error("Firma de webhook con formato inválido (sin prefijo sha256=).")
+            return False
+        expected_hex = hmac.new(APP_SECRET.encode("utf-8"), payload, hashlib.sha256).hexdigest()
+        expected_header = f"sha256={expected_hex}"
+        ok = hmac.compare_digest(expected_header, signature.strip())
+        if not ok:
+            logger.error("Webhook signature mismatch (no coincide con APP_SECRET).")
+        return ok
+    except Exception as e:
+        logger.error(f"Error verificando firma de webhook: {e}")
+        return False
 
 # -------------------- Endpoints --------------------
 @app.get("/webhook")
@@ -834,7 +846,8 @@ async def handle_webhook(request: Request, background_tasks: BackgroundTasks):
 
                     if "messages" in value:
                         for message in value["messages"]:
-                            background_tasks.add_task(process_message, message)
+                            # Procesar inline para depurar mejor (en lugar de BackgroundTasks)
+                            await process_message(message)
 
                     if "statuses" in value:
                         for status in value["statuses"]:
