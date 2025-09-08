@@ -17,9 +17,6 @@ from supabase_client import (
     insert_listing, get_listing,
     upsert_consent, set_consent_flag, get_consent,
     create_rental_request,
-    BASE as SUPA_BASE,
-    HEADERS as SUPA_HEADERS,
-    HEADERS_RETURN as SUPA_HEADERS_RETURN,
 )
 
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "")
@@ -28,6 +25,17 @@ PHONE_NUMBER_ID = os.getenv("PHONE_NUMBER_ID", "")
 APP_SECRET = os.getenv("APP_SECRET", "").encode("utf-8")
 GRAPH_API_VERSION = os.getenv("GRAPH_API_VERSION", "v20.0")
 GRAPH_BASE = f"https://graph.facebook.com/{GRAPH_API_VERSION}"
+
+# === Vars locales para llamar a PostgREST sin depender de exports del módulo ===
+SUPABASE_URL = os.getenv("SUPABASE_URL", "").rstrip("/")
+SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
+SUPA_BASE = f"{SUPABASE_URL}/rest/v1"
+SUPA_HEADERS = {
+    "apikey": SUPABASE_KEY,
+    "Authorization": f"Bearer {SUPABASE_KEY}",
+}
+SUPA_HEADERS_JSON = {**SUPA_HEADERS, "Content-Type": "application/json"}
+SUPA_HEADERS_RETURN = {**SUPA_HEADERS_JSON, "Prefer": "return=representation"}
 
 app = FastAPI(title="WhatsApp Cloud API Webhook (Render/FastAPI)")
 
@@ -156,13 +164,13 @@ async def send_main_menu(to_msisdn: str):
         body_text="¿Qué te gustaría hacer?",
         button_text="Abrir menú",
         rows=rows,
-        footer_text="Puedes escribir MENU en cualquier momento",
+        footer_text="Escribe MENU en cualquier momento",
         section_title="Acciones",
     )
 
 # ---------- verificación (simple usando reputation como flag) ----------
 async def set_user_verified_flag(msisdn: str, value: bool) -> bool:
-    """Marca verificado usando users.reputation (>=1 => verificado). Si tienes users.verified, cambia este PATCH."""
+    """Marca verificado usando users.reputation (>=1 => verificado). Si usas users.verified boolean, ajusta este PATCH."""
     payload = {"reputation": 1 if value else 0}
     async with httpx.AsyncClient(timeout=15) as c:
         r = await c.patch(
@@ -190,7 +198,7 @@ async def is_user_verified(msisdn: str) -> Optional[bool]:
 # ---------- consentimiento + contactos ----------
 async def send_consent_buttons(to_msisdn: str, role: str, item_id: str):
     body = (
-        f"¿Autorizas que compartamos tu contacto con la otra parte para el artículo #{item_id}?"
+        f"¿Autorizas que compartamos tu contacto con la otra parte para el artículo #{item_id}?"\
         f"\nRol: {role.capitalize()}"
     )
     return await send_reply_buttons(
@@ -237,7 +245,7 @@ async def send_contact(to_msisdn: str, display_name: str, phone_e164: str):
     }
     return await _post_messages(payload)
 
-async def introduce_parties(item_id: str, actor_msisdn: str | None = None):
+async def introduce_parties(item_id: str, actor_msisdn: Optional[str] = None):
     c = await get_consent(item_id)
     if not c:
         return
@@ -351,7 +359,7 @@ async def receive_webhook(request: Request):
                             continue
                         if btn_id == "see_details":
                             await send_text(from_msisdn, "Detalles del artículo:\n• Estado: excelente\n• Precio: consultar publicación\n• Depósito: según acuerdo")
-                            return Response(status_code=200)
+                            continue
                         if btn_id == "cancel":
                             await send_text(from_msisdn, "Cancelado ✅.")
                             await send_main_menu(from_msisdn)
