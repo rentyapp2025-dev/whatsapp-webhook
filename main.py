@@ -137,6 +137,21 @@ async def send_list(
     }
     return await _post_messages(payload)
 
+# ---------- MENÚ PRINCIPAL ----------
+async def send_main_menu(to_msisdn: str):
+    """Envía siempre el menú principal con 3 botones."""
+    return await send_reply_buttons(
+        to_msisdn,
+        header_text="Renty",
+        body_text="¿Qué te gustaría hacer?",
+        footer_text="Selecciona una opción",
+        buttons=[
+            {"id": "menu_publish", "title": "Publicar"},
+            {"id": "menu_rent", "title": "Alquilar"},
+            {"id": "menu_help", "title": "Ayuda"},
+        ],
+    )
+
 # ---------- consentimiento + contactos ----------
 async def send_consent_buttons(to_msisdn: str, role: str, item_id: str):
     body = (
@@ -245,6 +260,10 @@ async def receive_webhook(request: Request):
                 from_msisdn = msg.get("from")
                 # asegura registro mínimo de usuario
                 await ensure_user(from_msisdn)
+
+                # ✅ Enviar SIEMPRE el menú principal al recibir cualquier mensaje
+                await send_main_menu(from_msisdn)
+
                 msg_type = msg.get("type")
 
                 # ========== respuestas interactivas ==========
@@ -257,6 +276,18 @@ async def receive_webhook(request: Request):
                         btn = interactive.get("button_reply", {}) or {}
                         btn_id = btn.get("id")
                         btn_title = btn.get("title", "")
+
+                        # --- Menú principal ---
+                        if btn_id == "menu_publish":
+                            await set_session(from_msisdn, Step.PUBLISH_TITLE, {"title": "", "price": "", "location": ""})
+                            await send_text(from_msisdn, "Perfecto. Dime el *título* del artículo.")
+                            continue
+                        if btn_id == "menu_rent":
+                            await send_text(from_msisdn, "Para alquilar, envía: ALQUILAR #ID (ej: ALQUILAR #123)")
+                            continue
+                        if btn_id == "menu_help":
+                            await send_text(from_msisdn, "Ayuda rápida:\n• PUBLICAR: crea un artículo\n• ALQUILAR #ID: inicia solicitud\n• Fechas: 'ALQUILAR #ID del YYYY-MM-DD al YYYY-MM-DD'")
+                            continue
 
                         # consentimiento: consent_yes_<ID> / consent_no_<ID>
                         if btn_id and btn_id.startswith("consent_"):
@@ -402,7 +433,7 @@ async def receive_webhook(request: Request):
                     # ---- respuesta por defecto ----
                     await send_text(
                         from_msisdn,
-                        "Recibido ✅. Escribe PUBLICAR para crear un artículo o ALQUILAR #ID para iniciar un alquiler.\n"
+                        "Tip: puedes escribir PUBLICAR para crear un artículo o ALQUILAR #ID para iniciar un alquiler.\n"
                         "También puedes enviar: 'ALQUILAR #ID del YYYY-MM-DD al YYYY-MM-DD'."
                     )
                     continue
