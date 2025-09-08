@@ -26,7 +26,7 @@ APP_SECRET = os.getenv("APP_SECRET", "").encode("utf-8")
 GRAPH_API_VERSION = os.getenv("GRAPH_API_VERSION", "v20.0")
 GRAPH_BASE = f"https://graph.facebook.com/{GRAPH_API_VERSION}"
 
-# === Vars locales para llamar a PostgREST sin depender de exports del módulo ===
+# === Vars locales para PostgREST usados en verificación simple ===
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").rstrip("/")
 SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
 SUPA_BASE = f"{SUPABASE_URL}/rest/v1"
@@ -46,6 +46,13 @@ class Step(str, Enum):
     PUBLISH_PRICE = "publish_price"
     PUBLISH_LOCATION = "publish_location"
     VERIFY_LOOKUP_WAIT_NUMBER = "verify_lookup_wait_number"
+
+# Helpers de estado para evitar comparaciones Enum vs str
+def step_val(st: Dict[str, Any] | None) -> str:
+    v = (st or {}).get("step")
+    if isinstance(v, Step):
+        return v.value
+    return v or Step.IDLE.value
 
 # ==================== utilidades WhatsApp ====================
 def verify_signature(signature: Optional[str], body: bytes) -> bool:
@@ -91,7 +98,6 @@ async def send_reply_buttons(
     footer_text: str = "",
     buttons: Optional[list] = None
 ) -> Dict[str, Any]:
-    # buttons: [{"id":"rent_yes", "title":"Alquilar"}, ...]  (máx 3)
     if not buttons:
         buttons = [
             {"id": "rent_yes", "title": "Alquilar"},
@@ -126,7 +132,6 @@ async def send_list(
     footer_text: str = "",
     section_title: str = "Opciones"
 ) -> Dict[str, Any]:
-    # rows: [{"id":"publish_new","title":"Crear publicación", "description":"..."}, ...]
     interactive = {
         "type": "list",
         "header": {"type": "text", "text": header_text},
@@ -170,7 +175,6 @@ async def send_main_menu(to_msisdn: str):
 
 # ---------- verificación (simple usando reputation como flag) ----------
 async def set_user_verified_flag(msisdn: str, value: bool) -> bool:
-    """Marca verificado usando users.reputation (>=1 => verificado). Si usas users.verified boolean, ajusta este PATCH."""
     payload = {"reputation": 1 if value else 0}
     async with httpx.AsyncClient(timeout=15) as c:
         r = await c.patch(
@@ -268,7 +272,6 @@ async def introduce_parties(item_id: str, actor_msisdn: Optional[str] = None):
         f"{buyer_name} está interesado en el artículo #{item_id}. Ya tienen sus contactos para coordinar."
     )
 
-    # tras terminar el flujo, ofrece menú al actor (si viene de un botón)
     if actor_msisdn:
         await send_main_menu(actor_msisdn)
 
@@ -276,7 +279,6 @@ async def introduce_parties(item_id: str, actor_msisdn: Optional[str] = None):
 PHONE_RX = re.compile(r"\+?\d{7,15}")
 
 def normalize_msisdn(s: str) -> str:
-    # Convierte a solo dígitos (como viene en from: de WhatsApp)
     return re.sub(r"\D", "", s or "")
 
 # ==================== endpoints ====================
@@ -312,7 +314,6 @@ async def receive_webhook(request: Request):
 
             for msg in messages:
                 from_msisdn = msg.get("from")
-                # asegura registro mínimo de usuario
                 await ensure_user(from_msisdn)
                 msg_type = msg.get("type")
 
@@ -327,7 +328,6 @@ async def receive_webhook(request: Request):
                         btn_id = btn.get("id")
                         btn_title = btn.get("title", "")
 
-                        # consentimiento: consent_yes_<ID> / consent_no_<ID>
                         if btn_id and btn_id.startswith("consent_"):
                             parts = btn_id.split("_")
                             if len(parts) == 3:
@@ -337,12 +337,10 @@ async def receive_webhook(request: Request):
                                     await send_text(from_msisdn, "No encontré la solicitud. Usa: ALQUILAR #ID.")
                                     continue
 
-                                # si ambos autorizaron, presentar contactos y luego menú
                                 if cons.get("buyer_ok") and cons.get("seller_ok"):
                                     await send_text(from_msisdn, "¡Perfecto! Conectando a ambas partes…")
                                     await introduce_parties(item_id, actor_msisdn=from_msisdn)
                                 else:
-                                    # avisa a la otra parte
                                     other = cons["seller_wa"] if from_msisdn == cons["buyer_wa"] else cons["buyer_wa"]
                                     if answer == "yes":
                                         await send_text(from_msisdn, "Gracias. Esperamos la autorización de la otra parte.")
@@ -353,7 +351,6 @@ async def receive_webhook(request: Request):
                                         await send_main_menu(from_msisdn)
                             continue
 
-                        # otros botones de ejemplo
                         if btn_id == "rent_yes":
                             await send_text(from_msisdn, "¡Genial! ¿Qué fechas te sirven para el alquiler? (formato: YYYY-MM-DD a YYYY-MM-DD)")
                             continue
@@ -365,9 +362,8 @@ async def receive_webhook(request: Request):
                             await send_main_menu(from_msisdn)
                             continue
 
-                        # Fallback para botones desconocidos
                         await send_text(from_msisdn, f"Seleccionaste: {btn_title}")
-                        continue  # siguiente mensaje
+                        continue
 
                     # ----- lista -----
                     if itype == "list_reply":
@@ -399,17 +395,15 @@ async def receive_webhook(request: Request):
                             await send_text(from_msisdn, "Ayuda rápida:\n• PUBLICAR: crea un artículo\n• ALQUILAR #ID: inicia solicitud\n• Verificación: mejora la confianza entre usuarios\n• Escribe MENU para ver las opciones")
                             continue
 
-                        # Fallback
                         await send_text(from_msisdn, f"Opción elegida: {row_title}")
                         continue
 
                 # ========== mensajes de texto ==========
-                # Extrae texto robustamente: usa body si es text, o caption si vino con imagen/documento
                 text = ""
                 if msg_type == "text":
                     text = (msg.get("text") or {}).get("body", "") or ""
                 else:
-                    text = (msg.get("caption") or "")  # algunos tipos traen caption
+                    text = (msg.get("caption") or "")
                 text = text.strip()
                 upper = text.upper()
 
@@ -419,9 +413,11 @@ async def receive_webhook(request: Request):
                     continue
 
                 if text:
-                    # ---- flujo de consulta de verificación ----
                     st = await get_session(from_msisdn)
-                    if st.get("step") == Step.VERIFY_LOOKUP_WAIT_NUMBER:
+                    s = step_val(st)
+
+                    # ---- flujo de consulta de verificación ----
+                    if s == Step.VERIFY_LOOKUP_WAIT_NUMBER.value:
                         if not PHONE_RX.fullmatch(text):
                             await send_text(from_msisdn, "Por favor envía un número válido (7-15 dígitos, puede empezar con +).")
                             continue
@@ -437,36 +433,40 @@ async def receive_webhook(request: Request):
                         await send_main_menu(from_msisdn)
                         continue
 
-                    # ---- flujo ALQUILAR #ID (acepta ALQUILAR en cualquier parte) ----
+                    # ---- flujo ALQUILAR #ID ----
                     if "ALQUILAR" in upper:
                         m = re.search(r"ALQUILAR\s*#?(\d+)", upper)
                         item_id = (m.group(1) if m else "").strip()
                         listing = await get_listing(item_id) if item_id else None
                         if not listing:
                             await send_text(from_msisdn, "No encuentro ese artículo. Asegúrate de usar: ALQUILAR #ID")
+                            if s == Step.IDLE.value:
+                                await send_main_menu(from_msisdn)
                             continue
 
                         seller = listing["owner_wa"]
                         buyer = from_msisdn
                         await upsert_consent(item_id, buyer, seller)
-
                         await send_consent_buttons(buyer, "comprador", item_id)
                         await send_consent_buttons(seller, "vendedor", item_id)
                         await send_text(buyer, "Te pedimos autorización para compartir tu contacto con el vendedor.")
                         await send_text(seller, f"Tienes una solicitud de alquiler para #{item_id}. ¿Autorizas compartir tu contacto?")
                         continue
 
-                    # ---- captar fechas para crear solicitud de rental (opcional MVP) ----
-                    # Formato esperado: "DEL 2025-09-10 AL 2025-09-12" o "2025-09-10 a 2025-09-12"
+                    # ---- captar fechas para solicitud de rental ----
                     if re.search(r"\d{4}-\d{2}-\d{2}.*\d{4}-\d{2}-\d{2}", text):
                         m_id = re.search(r"#(\d+)", text)
                         if not m_id:
                             await send_text(from_msisdn, "Para crear la solicitud necesito el ID del artículo. Ej: ALQUILAR #123 del 2025-09-10 al 2025-09-12")
+                            if s == Step.IDLE.value:
+                                await send_main_menu(from_msisdn)
                             continue
                         item_id = m_id.group(1)
                         listing = await get_listing(item_id)
                         if not listing:
                             await send_text(from_msisdn, "No encuentro ese artículo. Revisa el ID.")
+                            if s == Step.IDLE.value:
+                                await send_main_menu(from_msisdn)
                             continue
                         m_dates = re.findall(r"(\d{4}-\d{2}-\d{2})", text)
                         if len(m_dates) >= 2:
@@ -481,27 +481,26 @@ async def receive_webhook(request: Request):
                                     await send_text(from_msisdn, "Hubo un problema al registrar tu solicitud. Intenta de nuevo más tarde.")
                             continue
 
-                    # ---- flujo PUBLICAR (acepta PUBLICAR en cualquier parte) ----
+                    # ---- flujo PUBLICAR ----
                     if "PUBLICAR" in upper:
                         await set_session(from_msisdn, Step.PUBLISH_TITLE, {"title": "", "price": "", "location": ""})
                         await send_text(from_msisdn, "¡Genial! Dime el *título* del artículo.")
                         continue
 
                     # ---- pasos de publicación ----
-                    st = await get_session(from_msisdn)
-                    if st.get("step") == Step.PUBLISH_TITLE:
+                    if s == Step.PUBLISH_TITLE.value:
                         st["draft"]["title"] = text
                         await set_session(from_msisdn, Step.PUBLISH_PRICE, st["draft"])
                         await send_text(from_msisdn, "Anota el *precio por día* (ej: 10 USD).")
                         continue
 
-                    if st.get("step") == Step.PUBLISH_PRICE:
+                    if s == Step.PUBLISH_PRICE.value:
                         st["draft"]["price"] = text
                         await set_session(from_msisdn, Step.PUBLISH_LOCATION, st["draft"])
                         await send_text(from_msisdn, "¿En qué *ciudad* está el artículo?")
                         continue
 
-                    if st.get("step") == Step.PUBLISH_LOCATION:
+                    if s == Step.PUBLISH_LOCATION.value:
                         st["draft"]["location"] = text
                         d = st["draft"]
                         item_id = await insert_listing(from_msisdn, d["title"], d["price"], d["location"])
@@ -512,13 +511,11 @@ async def receive_webhook(request: Request):
                             f"• {d['title']}\n• Precio/día: {d['price']}\n• Ciudad: {d['location']}\n"
                             f"Estado: activa ✅"
                         )
-                        # Al terminar un flujo, mostramos menú
                         await send_main_menu(from_msisdn)
                         continue
 
-                    # ---- respuesta por defecto ----
-                    # Si el usuario está idle y no reconocimos el comando, mostramos el menú (sin spam durante flujos)
-                    if (st.get("step") == Step.IDLE):
+                    # ---- fallback: mostrar menú si está idle ----
+                    if s == Step.IDLE.value:
                         await send_main_menu(from_msisdn)
                     else:
                         await send_text(from_msisdn, "Entendido. Continúa con el flujo actual o escribe MENU para ver opciones.")
