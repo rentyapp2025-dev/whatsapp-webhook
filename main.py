@@ -43,7 +43,7 @@ SMTP_HOST = os.getenv("SMTP_HOST", "in-v3.mailjet.com")
 SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
 SMTP_USER = os.getenv("SMTP_USER", "436f971e525f9e2ff955ad1dc84de9d3")  # Mailjet API Key
 SMTP_PASS = os.getenv("SMTP_PASS", "345c10295f46f0c78d8279fea3533acc")  # Mailjet API Secret
-OPS_EMAIL_TO = os.getenv("OPS_EMAIL_TO", "javierpercapital@gmail.com")       # uno o varios separados por coma
+OPS_EMAIL_TO = os.getenv("OPS_EMAIL_TO", "planasnico@gmail.com")       # uno o varios separados por coma
 OPS_EMAIL_FROM = os.getenv("OPS_EMAIL_FROM", "rentyapp2025@gmail.com") # remitente verificado en Mailjet
 REPLY_TO = os.getenv("REPLY_TO")                                       # opcional
 ORDERS_BCC = os.getenv("ORDERS_BCC")                                   # opcional, coma-separado
@@ -379,7 +379,7 @@ async def send_welcome_sequence(to: str):
     # Imagen de hielo (placeholder libre)
     await send_image_with_fallback(
         to,
-        "https://images.unsplash.com/photo-1609781636660-6da14c0f5b7d?q=80&w=800&auto=format&fit=crop",
+        "https://scontent-mia3-2.xx.fbcdn.net/v/t1.15752-9/542420442_1423330479507859_180935009960783780_n.jpg?_nc_cat=103&ccb=1-7&_nc_sid=0024fc&_nc_ohc=j95AxKjQrxUQ7kNvwHaocEX&_nc_oc=Adlfyk4fp1YSi5lrn5OyA0s7g3jEdkooYQxpilTzacQxn3jpuRYl5CwmtKV8ZnKb-0s&_nc_ad=z-m&_nc_cid=0&_nc_zt=23&_nc_ht=scontent-mia3-2.xx&oh=03_Q7cD3QE2ZNy1DvyfHNcuHd0kQ3UDrsU5NDHpGYfFj9BRC1jofA&oe=68E70ABE",
         caption=caption
     )
     await asyncio.sleep(0.5)
