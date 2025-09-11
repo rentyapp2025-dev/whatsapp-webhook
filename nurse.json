@@ -1,0 +1,151 @@
+{
+  "INFO_NEGOCIO": {
+    "id": "INFO_NEGOCIO",
+    "title": "Sobre Nurse Life Shop",
+    "questions": [
+      {
+        "id": "Q1_INFO",
+        "text": "¿Quiénes somos?",
+        "answer": "Somos Nurse Life Shop, tienda especializada en calzados, uniformes, gorros, medias y accesorios para personal de salud.",
+        "short_title": "Quiénes somos"
+      },
+      {
+        "id": "Q2_INFO",
+        "text": "¿Dónde están ubicados?",
+        "answer": "Atendemos principalmente vía catálogo online: https://nurselife.zobaze.shop/catalog. (Completar con dirección física si aplica).",
+        "short_title": "Ubicación"
+      },
+      {
+        "id": "Q3_INFO",
+        "text": "¿Cuál es su teléfono o contacto?",
+        "answer": "Puedes escribirnos por WhatsApp al (Completar con número).",
+        "short_title": "Contacto"
+      }
+    ]
+  },
+  "PRODUCTOS": {
+    "id": "PRODUCTOS",
+    "title": "Productos",
+    "questions": [
+      {
+        "id": "Q1_PROD",
+        "text": "¿Qué categorías ofrecen?",
+        "answer": "Gorros engomados, uniformes, calzados, medias de compresión y accesorios.",
+        "short_title": "Categorías"
+      }
+    ]
+  },
+  "PRECIOS": {
+    "id": "PRECIOS",
+    "title": "Precios",
+    "questions": [
+      {
+        "id": "Q1_PREC",
+        "text": "¿Cuánto cuestan los gorros?",
+        "answer": "Bs. 670.00 cada uno.",
+        "short_title": "Precio gorros"
+      },
+      {
+        "id": "Q2_PREC",
+        "text": "¿Cuánto cuestan los uniformes?",
+        "answer": "Desde Bs. 3,680.00 hasta Bs. 6,200.00 según modelo.",
+        "short_title": "Precio uniformes"
+      },
+      {
+        "id": "Q3_PREC",
+        "text": "¿Cuánto cuestan los zapatos?",
+        "answer": "Bs. 6,990.00 cada par (modelos Difarfala y Ares).",
+        "short_title": "Precio calzados"
+      },
+      {
+        "id": "Q4_PREC",
+        "text": "¿Cuánto cuestan las medias?",
+        "answer": "Bs. 1,450.00 (Samsara, talla única).",
+        "short_title": "Precio medias"
+      },
+      {
+        "id": "Q5_PREC",
+        "text": "¿Cuál es el precio del detergente Grifin?",
+        "answer": "Bs. 1,300.00.",
+        "short_title": "Precio Grifin"
+      }
+    ]
+  },
+  "CATALOGO": {
+    "id": "CATALOGO",
+    "title": "Catálogo Completo",
+    "products": [
+      { "id": "P1", "nombre": "Tropical", "categoria": "Gorro", "precio": "Bs. 670.00" },
+      { "id": "P2", "nombre": "Paisley Crema", "categoria": "Gorro", "precio": "Bs. 670.00" },
+      { "id": "P3", "nombre": "Rojo Punteado", "categoria": "Gorro", "precio": "Bs. 670.00" },
+      { "id": "P4", "nombre": "Selfie Gris", "categoria": "Gorro", "precio": "Bs. 670.00" },
+      { "id": "P5", "nombre": "Stitch Azul", "categoria": "Gorro", "precio": "Bs. 670.00" },
+      { "id": "P6", "nombre": "Stitch Blanco", "categoria": "Gorro", "precio": "Bs. 670.00" },
+      { "id": "P7", "nombre": "Minnie & Daisy", "categoria": "Gorro", "precio": "Bs. 670.00" },
+      { "id": "P8", "nombre": "Estrella Amarilla", "categoria": "Gorro", "precio": "Bs. 670.00" },
+      { "id": "P9", "nombre": "Estrella Azul", "categoria": "Gorro", "precio": "Bs. 670.00" },
+      { "id": "P10", "nombre": "Flor Blanca", "categoria": "Gorro", "precio": "Bs. 670.00" },
+      { "id": "P11", "nombre": "Flor Colorida", "categoria": "Gorro", "precio": "Bs. 670.00" },
+      { "id": "P12", "nombre": "Kitty Medic", "categoria": "Gorro", "precio": "Bs. 670.00" },
+      { "id": "P13", "nombre": "Lazos Rosad", "categoria": "Gorro", "precio": "Bs. 670.00" },
+      { "id": "P14", "nombre": "Mariposas Mini", "categoria": "Gorro", "precio": "Bs. 670.00" },
+      { "id": "P15", "nombre": "Elmo", "categoria": "Gorro", "precio": "Bs. 670.00" },
+      { "id": "P16", "nombre": "Enfermera Rosa", "categoria": "Gorro", "precio": "Bs. 670.00" },
+      { "id": "P17", "nombre": "Caritas", "categoria": "Gorro", "precio": "Bs. 670.00" },
+      { "id": "P18", "nombre": "Coquito Azul", "categoria": "Gorro", "precio": "Bs. 670.00" },
+      { "id": "P19", "nombre": "Coquito Fucsia", "categoria": "Gorro", "precio": "Bs. 670.00" },
+      { "id": "P20", "nombre": "Corazón Fucsia", "categoria": "Gorro", "precio": "Bs. 670.00" },
+
+      { "id": "U1", "nombre": "Modelo Ventolin", "categoria": "Uniforme", "precio": "Bs. 5,500.00" },
+      { "id": "U2", "nombre": "Modelo Ciclofosfamida", "categoria": "Uniforme", "precio": "Bs. 6,200.00" },
+      { "id": "U3", "nombre": "Modelo Cisplatino", "categoria": "Uniforme", "precio": "Bs. 3,680.00" },
+      { "id": "U4", "nombre": "Modelo Ketorolaco", "categoria": "Uniforme", "precio": "Bs. 5,500.00" },
+      { "id": "U5", "nombre": "Modelo Meropenem", "categoria": "Uniforme", "precio": "Bs. 5,500.00" },
+
+      { "id": "C1", "nombre": "Difarfala 503", "categoria": "Calzado", "precio": "Bs. 6,990.00" },
+      { "id": "C2", "nombre": "Difarfala 623", "categoria": "Calzado", "precio": "Bs. 6,990.00" },
+      { "id": "C3", "nombre": "Difarfala 821", "categoria": "Calzado", "precio": "Bs. 6,990.00" },
+      { "id": "C4", "nombre": "Difarfala 995", "categoria": "Calzado", "precio": "Bs. 6,990.00" },
+      { "id": "C5", "nombre": "Difarfala Ares", "categoria": "Calzado", "precio": "Bs. 6,990.00" },
+      { "id": "C6", "nombre": "Difarfala Volga", "categoria": "Calzado", "precio": "Bs. 6,990.00" },
+      { "id": "C7", "nombre": "Difarfala 016", "categoria": "Calzado", "precio": "Bs. 6,990.00" },
+      { "id": "C8", "nombre": "Difarfala 030", "categoria": "Calzado", "precio": "Bs. 6,990.00" },
+      { "id": "C9", "nombre": "Difarfala 068", "categoria": "Calzado", "precio": "Bs. 6,990.00" },
+      { "id": "C10", "nombre": "Ares", "categoria": "Calzado", "precio": "Bs. 6,990.00" },
+
+      { "id": "M1", "nombre": "Medias Samsara", "categoria": "Media", "precio": "Bs. 1,450.00" },
+
+      { "id": "A1", "nombre": "Grifin", "categoria": "Accesorio", "precio": "Bs. 1,300.00" }
+    ]
+  },
+  "PAGO": {
+    "id": "PAGO",
+    "title": "Medios de Pago",
+    "questions": [
+      {
+        "id": "Q1_PAY",
+        "text": "¿Qué medios aceptan?",
+        "answer": "Transferencias bancarias, pago móvil y efectivo.",
+        "short_title": "Medios"
+      },
+      {
+        "id": "Q2_PAY",
+        "text": "¿Puedo pagar al recibir?",
+        "answer": "Sí, puedes pagar contraentrega en efectivo en zonas disponibles.",
+        "short_title": "Contraentrega"
+      }
+    ]
+  },
+  "DELIVERY": {
+    "id": "DELIVERY",
+    "title": "Métodos de Envío",
+    "questions": [
+      {
+        "id": "Q1_DEL",
+        "text": "¿Hacen delivery?",
+        "answer": "Sí, hacemos envíos a distintas zonas. (Completar con zonas exactas).",
+        "short_title": "Delivery"
+      }
+    ]
+  }
+}
