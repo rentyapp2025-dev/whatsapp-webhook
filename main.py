@@ -384,12 +384,17 @@ async def send_welcome_sequence(to: str):
     saludo = f"¡Hola, {name}! 👋" if name else "¡Hola! 👋"
     caption = (
         f"{saludo} Bienvenido a *Nurse Life Shop* 🩺\n\n"
-        "Soy tu asistente virtual. Puedo ayudarte con ubicaciones, precios (zapatos, uniformes, accesorios), métodos de envío y pago, y el *catálogo*.\n\n"
+        "Puedo ayudarte con ubicaciones, precios (zapatos, uniformes, accesorios), métodos de envío y pago, y el *catálogo*.\n\n"
         "¿Qué te gustaría saber?"
     )
+
+    # 1) Usa una URL de imagen (logo/foto de bienvenida)
+    LOGO_URL = os.getenv("WELCOME_IMAGE_URL", "https://res.cloudinary.com/doyt5r47e/image/upload/v1757573109/Screenshot_2025-09-11_at_2.40.19_AM_ue5nia.png")
+
     await send_typing_indicator_and_wait(to, 1.0)
-    # Enviar solo texto (si tienes un logo, puedes llamar a send_image_with_fallback)
-    await send_message(build_text_message(to, caption))
+    # Imagen + caption en el mismo mensaje
+    await send_image_with_fallback(to, LOGO_URL, caption=caption)
+
     await asyncio.sleep(0.5)
     await send_main_menu(to)
 
