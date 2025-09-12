@@ -8,6 +8,11 @@ import hashlib
 import re
 from typing import Dict, List, Optional, Any
 from datetime import datetime
+from rapidfuzz import process, fuzz
+
+# --- Router de lenguaje natural ---
+from typing import Tuple
+from llm_client import chat_completion
 
 from fastapi import FastAPI, Request, HTTPException, BackgroundTasks
 from fastapi.responses import JSONResponse
@@ -33,6 +38,7 @@ GRAPH_API_URL = f"https://graph.facebook.com/v18.0/{PHONE_NUMBER_ID}/messages"
 MEDIA_UPLOAD_URL = f"https://graph.facebook.com/v18.0/{PHONE_NUMBER_ID}/media"
 HEADERS = {"Authorization": f"Bearer {WHATSAPP_TOKEN}", "Content-Type": "application/json"}
 
+
 # >>> EMAIL (Mailjet SMTP) <<<
 import smtplib, ssl
 from email.utils import formataddr, make_msgid
@@ -47,6 +53,57 @@ OPS_EMAIL_TO = os.getenv("OPS_EMAIL_TO", "ops@nurselifeshop.local")   # uno o va
 OPS_EMAIL_FROM = os.getenv("OPS_EMAIL_FROM", "bot@nurselifeshop.local")
 REPLY_TO = os.getenv("REPLY_TO")                                       # opcional
 ORDERS_BCC = os.getenv("ORDERS_BCC")                                   # opcional, coma-separado
+
+# --- Perfil de negocio para el LLM ---
+BUSINESS_NAME = os.getenv("BUSINESS_NAME", "Nurse Life Shop")
+BUSINESS_TONE = os.getenv("BUSINESS_TONE", "amable, cercano y claro")
+
+ROUTER_INSTRUCTION = (
+    "Clasifica la intención del usuario en una sola palabra: "
+    "FAQ | ORDER | CHITCHAT | OTHER.\n"
+    "Responde SIEMPRE con este JSON plano (sin explicación):\n"
+    "{\"intent\":\"...\",\"answer\":\"...\"}"
+)
+
+def nlu_answer(user_text: str) -> Tuple[str, str]:
+    """
+    Devuelve (intent, answer)
+    """
+    ctx_snippets = retrieve_context(user_text, k=5)
+    context_block = "\n\n".join(ctx_snippets) if ctx_snippets else "SIN_CONTEXTO"
+
+    messages = [
+        {"role": "system", "content": build_system_prompt()},
+        {"role": "user", "content": (
+            f"{ROUTER_INSTRUCTION}\n\n"
+            f"[CONTEXTO DEL NEGOCIO]\n{context_block}\n\n"
+            f"[PREGUNTA]\n{user_text}\n"
+            f"[NOTAS]\n- Si 'ORDER', sugiere iniciar el flujo de compra existente del bot.\n"
+            f"- Si 'FAQ', usa SOLO el contexto si aplica; si no hay datos, dilo breve y ofrece el menú.\n"
+            f"- Si 'CHITCHAT', responde amable y breve.\n"
+        )}
+    ]
+    raw = chat_completion(messages, temperature=0.3, max_tokens=400)
+
+    # Parseo robusto del JSON devuelto
+    import json, re
+    try:
+        m = re.search(r"\{.*\}", raw, flags=re.S)
+        obj = json.loads(m.group(0)) if m else {"intent":"OTHER","answer":raw}
+        intent = (obj.get("intent") or "OTHER").upper().strip()
+        answer = (obj.get("answer") or "").strip()
+        return intent, answer
+    except Exception:
+        return "OTHER", raw.strip()
+
+def build_system_prompt() -> str:
+    return (
+        f"Eres un asistente de WhatsApp para {BUSINESS_NAME}. "
+        f"Respondes SIEMPRE en español con un tono {BUSINESS_TONE}. "
+        "Si la pregunta es sobre productos, precios, delivery, pagos o catálogo, "
+        "responde de forma breve y clara. Si no tienes datos en el contexto, dilo y ofrece el menú. "
+        "Si detectas intención de ORDEN/COMPRA, devuelve una recomendación de iniciar el proceso de pedido."
+    )
 
 def _split_csv(s: Optional[str]) -> List[str]:
     return [x.strip() for x in s.split(",")] if s else []
@@ -238,6 +295,45 @@ def _validate_kb(kb: Dict[str, Any]):
                 for pk in ("id", "nombre", "categoria", "precio"):
                     if pk not in p:
                         raise ValueError(f"La categoría {cid} posee un producto sin '{pk}'.")
+                    
+
+# --- Mini RAG: buscar contexto relevante en tu KB ---
+
+def kb_iter_texts() -> List[Dict]:
+    """
+    Devuelve una lista de dicts {"text": str, "source": str}
+    con preguntas+respuestas y/o productos.
+    """
+    out = []
+    for cid, cat in KNOWLEDGE_BASE.items():
+        # FAQs
+        for q in cat.get("questions", []) or []:
+            full = f"PREGUNTA: {q['text']}\nRESPUESTA: {q['answer']}"
+            out.append({"text": full, "source": f"faq:{cid}:{q['id']}"})
+        # Productos
+        for p in cat.get("products", []) or []:
+            full = f"PRODUCTO: {p['nombre']} | CATEGORÍA: {p['categoria']} | PRECIO: {p['precio']}"
+            out.append({"text": full, "source": f"prod:{cid}:{p['id']}"})
+    return out
+
+_KB_CACHE = None
+def get_kb_corpus():
+    global _KB_CACHE
+    if _KB_CACHE is None:
+        _KB_CACHE = kb_iter_texts()
+    return _KB_CACHE
+
+def retrieve_context(user_text: str, k: int = 5) -> List[str]:
+    corpus = get_kb_corpus()
+    # rapid heuristic: match against full strings
+    choices = [c["text"] for c in corpus]
+    results = process.extract(user_text, choices, scorer=fuzz.token_set_ratio, limit=k)
+    # results: List[(match_text, score, index)]
+    top_texts = []
+    for match_text, score, idx in results:
+        if score >= 55:  # umbral simple
+            top_texts.append(match_text)
+    return top_texts
 
 def load_knowledge_base(path: str) -> Dict[str, Any]:
     with open(path, "r", encoding="utf-8") as f:
@@ -795,35 +891,54 @@ async def process_text_message(from_number: str, text: str, message_id: str):
     logger.info(f"Processing text message from {from_number}: {text}")
     parsed_first = parse_and_set_name_from_text(from_number, text)
 
-    # si el usuario ya está en el wizard de pedidos, dirigir aquí
+    # 1) Wizard de pedidos activo tiene prioridad
     if user_sessions.get(from_number, {}).get("order", {}).get("status") == "in_progress":
         await handle_order_text_input(from_number, text)
         return
 
-    # intención de pedido por texto libre
+    # 2) Intención de pedido por heurística rápida
     if is_order_intent(text):
         await start_order_wizard(from_number)
         return
 
+    # 3) Saludos => secuencia de bienvenida
     if is_greeting(text):
         await send_welcome_sequence(from_number)
         return
 
-    user_state = user_sessions.get(from_number, {}).get("state", "new")
-    if user_state in ["new", "finished"] or from_number not in user_sessions:
-        await send_welcome_sequence(from_number)
-        return
+    # 4) LLM NLU cuando no hay flujo claro
+    try:
+        intent, answer = nlu_answer(text)
+        logger.info(f"NLU intent={intent}")
 
-    if user_state == "more_help" and is_negative_response(text):
-        await send_rating_request(from_number)
-        return
+        if intent == "ORDER":
+            # Puedes saludar + breve confirmación y entrar al wizard
+            await send_message(build_text_message(from_number, "¡Puedo ayudarte con tu compra! Empezamos el pedido."))
+            await start_order_wizard(from_number)
+            return
 
-    if parsed_first and user_state not in ["main_menu", "questions_menu", "catalog_menu"]:
-        await send_message(build_text_message(from_number, f"¡Encantado, {parsed_first}! He guardado tu nombre. Te muestro el menú principal:"))
-        await asyncio.sleep(0.5)
-        await send_main_menu(from_number)
-        return
+        elif intent == "FAQ":
+            if answer:
+                await send_message(build_text_message(from_number, answer))
+                await asyncio.sleep(0.6)
+                await send_more_help_options(from_number)
+                return
 
+        elif intent == "CHITCHAT":
+            await send_message(build_text_message(from_number, answer or "¡Hola! ¿En qué más te ayudo?"))
+            await asyncio.sleep(0.6)
+            await send_more_help_options(from_number)
+            return
+
+        # OTHER o sin respuesta clara
+        if answer:
+            await send_message(build_text_message(from_number, answer))
+            await asyncio.sleep(0.6)
+
+    except Exception as e:
+        logger.error(f"NLU error: {e}")
+
+    # 5) Fallback a tu menú
     redirect = ("Para ayudarte mejor, utiliza los botones del menú. "
                 "Te muestro nuevamente las opciones disponibles:")
     await send_message(build_text_message(from_number, redirect))
