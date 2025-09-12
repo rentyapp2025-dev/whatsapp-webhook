@@ -6,9 +6,20 @@ import logging
 import hmac
 import hashlib
 import re
-import random
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Tuple
 from datetime import datetime
+
+# NEW: load .env in local/dev
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except Exception:
+    pass
+
+from rapidfuzz import process, fuzz
+
+# --- Router de lenguaje natural ---
+from llm_client import chat_completion
 
 from fastapi import FastAPI, Request, HTTPException, BackgroundTasks
 from fastapi.responses import JSONResponse
@@ -27,16 +38,15 @@ PHONE_NUMBER_ID = os.getenv("PHONE_NUMBER_ID", "your_phone_number_id_here")
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "your_verify_token_here")
 APP_SECRET = os.getenv("APP_SECRET", "your_app_secret_here")
 
-# >>> GEMINI AI INTEGRATION <<<
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AIzaSyBL1D3lLUAf1D_OEFcuZewjzLFSHE1y96w")
-GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
-
 # Ruta del JSON con la base de conocimiento
 KNOWLEDGE_BASE_PATH = os.getenv("KNOWLEDGE_BASE_PATH", "nurse.json")
 
 GRAPH_API_URL = f"https://graph.facebook.com/v18.0/{PHONE_NUMBER_ID}/messages"
 MEDIA_UPLOAD_URL = f"https://graph.facebook.com/v18.0/{PHONE_NUMBER_ID}/media"
 HEADERS = {"Authorization": f"Bearer {WHATSAPP_TOKEN}", "Content-Type": "application/json"}
+
+# Modo exclusivamente lenguaje natural
+NL_ONLY = (os.getenv("NL_ONLY", "true").lower() == "true")
 
 # >>> EMAIL (Mailjet SMTP) <<<
 import smtplib, ssl
@@ -46,191 +56,68 @@ from email.mime.multipart import MIMEMultipart
 
 SMTP_HOST = os.getenv("SMTP_HOST", "in-v3.mailjet.com")
 SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
-SMTP_USER = os.getenv("SMTP_USER", "")
-SMTP_PASS = os.getenv("SMTP_PASS", "")
-OPS_EMAIL_TO = os.getenv("OPS_EMAIL_TO", "ops@nurselifeshop.local")
+SMTP_USER = os.getenv("SMTP_USER", "")  # Mailjet API Key
+SMTP_PASS = os.getenv("SMTP_PASS", "")  # Mailjet API Secret
+OPS_EMAIL_TO = os.getenv("OPS_EMAIL_TO", "ops@nurselifeshop.local")   # uno o varios separados por coma
 OPS_EMAIL_FROM = os.getenv("OPS_EMAIL_FROM", "bot@nurselifeshop.local")
-REPLY_TO = os.getenv("REPLY_TO")
-ORDERS_BCC = os.getenv("ORDERS_BCC")
+REPLY_TO = os.getenv("REPLY_TO")                                       # opcional
+ORDERS_BCC = os.getenv("ORDERS_BCC")                                   # opcional, coma-separado
 
+# --- Perfil de negocio para el LLM ---
+BUSINESS_NAME = os.getenv("BUSINESS_NAME", "Nurse Life Shop")
+BUSINESS_TONE = os.getenv("BUSINESS_TONE", "amable, cercano y claro")
+
+ROUTER_INSTRUCTION = (
+    "Clasifica la intención del usuario en una sola palabra: "
+    "FAQ | ORDER | CHITCHAT | OTHER.\n"
+    "Responde SIEMPRE con este JSON plano (sin explicación):\n"
+    "{\"intent\":\"...\",\"answer\":\"...\"}"
+)
+
+def nlu_answer(user_text: str) -> Tuple[str, str]:
+    """
+    Devuelve (intent, answer)
+    """
+    ctx_snippets = retrieve_context(user_text, k=5)
+    context_block = "\n\n".join(ctx_snippets) if ctx_snippets else "SIN_CONTEXTO"
+
+    messages = [
+        {"role": "system", "content": build_system_prompt()},
+        {"role": "user", "content": (
+            f"{ROUTER_INSTRUCTION}\n\n"
+            f"[CONTEXTO DEL NEGOCIO]\n{context_block}\n\n"
+            f"[PREGUNTA]\n{user_text}\n"
+            f"[NOTAS]\n- Si 'ORDER', pregunta en lenguaje natural por datos de compra (producto, talla/color, cantidad, dirección si aplica y método de pago).\n"
+            f"- Si 'FAQ', usa SOLO el contexto si aplica; si no hay datos, dilo breve y pide más detalle.\n"
+            f"- Si 'CHITCHAT', responde amable y breve.\n"
+        )}
+    ]
+    raw = chat_completion(messages, temperature=0.3, max_tokens=400)
+
+    # Parseo robusto del JSON devuelto
+    try:
+        m = re.search(r"\{.*\}", raw, flags=re.S)
+        obj = json.loads(m.group(0)) if m else {"intent":"OTHER","answer":raw}
+        intent = (obj.get("intent") or "OTHER").upper().strip()
+        answer = (obj.get("answer") or "").strip()
+        return intent, answer
+    except Exception:
+        return "OTHER", raw.strip()
+
+def build_system_prompt() -> str:
+    return (
+        f"Eres un asistente de WhatsApp para {BUSINESS_NAME}. "
+        f"Respondes SIEMPRE en español con un tono {BUSINESS_TONE}. "
+        "Usa el contexto del negocio si existe para responder preguntas sobre productos, precios, delivery, pagos y catálogo. "
+        "Si no hay datos en el contexto, dilo breve y pide más detalle. "
+        "Si detectas intención de ORDEN/COMPRA, guía por TEXTO LIBRE (sin botones) para pedir los datos necesarios y confirmar el pedido. "
+        "No uses botones ni menús; todo debe fluir por texto libre."
+    )
+
+# -------------------- Utils --------------------
 def _split_csv(s: Optional[str]) -> List[str]:
     return [x.strip() for x in s.split(",")] if s else []
 
-# >>> GEMINI AI FUNCTIONS <<<
-async def generate_humanized_response(context: str, question: str, base_answer: str, user_name: str = "") -> str:
-    """Genera una respuesta humanizada usando Gemini AI"""
-    if not GEMINI_API_KEY or GEMINI_API_KEY.startswith("your_"):
-        logger.warning("GEMINI_API_KEY no configurada, usando respuesta base")
-        return base_answer
-   
-    try:
-        prompt = f"""
-Eres un asistente virtual amigable y profesional de Nurse Life Shop, una tienda especializada en uniformes médicos, zapatos y accesorios para profesionales de la salud.
-
-Contexto: {context}
-Pregunta del usuario: {question}
-Respuesta base: {base_answer}
-Nombre del usuario: {user_name if user_name else ""}
-
-Instrucciones:
-- Mejora la respuesta base haciéndola más natural, amigable y conversacional
-- Mantén toda la información importante de la respuesta original
-- Usa un tono profesional pero cálido, apropiado para profesionales de la salud
-- Si conoces el nombre del usuario, úsalo de manera natural (no en exceso)
-- Incluye emojis apropiados pero sin exagerar (máximo 2-3 por respuesta)
-- Mantén las URLs y información técnica exactamente como aparecen
-- La respuesta debe sonar natural, como si fuera escrita por una persona real
-- Máximo 300 caracteres para WhatsApp
-
-Responde únicamente con la versión mejorada de la respuesta:
-"""
-
-        headers = {
-            "Content-Type": "application/json",
-            "X-goog-api-key": GEMINI_API_KEY
-        }
-       
-        payload = {
-            "contents": [
-                {
-                    "parts": [
-                        {
-                            "text": prompt
-                        }
-                    ]
-                }
-            ],
-            "generationConfig": {
-                "temperature": 0.7,
-                "maxOutputTokens": 200,
-                "topP": 0.8
-            }
-        }
-
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                GEMINI_API_URL,
-                headers=headers,
-                json=payload,
-                timeout=15.0
-            )
-           
-            if response.status_code == 200:
-                result = response.json()
-                if "candidates" in result and len(result["candidates"]) > 0:
-                    generated_text = result["candidates"][0]["content"]["parts"][0]["text"].strip()
-                    logger.info(f"Respuesta humanizada generada por Gemini: {len(generated_text)} chars")
-                    return generated_text
-                else:
-                    logger.warning("Respuesta de Gemini sin contenido válido")
-                    return base_answer
-            else:
-                logger.error(f"Error en API de Gemini: {response.status_code} - {response.text}")
-                return base_answer
-
-    except Exception as e:
-        logger.error(f"Error generando respuesta humanizada: {e}")
-        return base_answer
-
-async def generate_contextual_greeting(user_name: str = "", is_returning: bool = False) -> str:
-    """Genera un saludo contextual usando Gemini"""
-    base_greeting = f"¡Hola{', ' + user_name if user_name else ''}! 👋 Bienvenido a Nurse Life Shop 🩺"
-   
-    if not GEMINI_API_KEY or GEMINI_API_KEY.startswith("your_"):
-        return base_greeting
-   
-    try:
-        context = "usuario que regresa" if is_returning else "usuario nuevo"
-        prompt = f"""
-Genera un saludo cálido y profesional para {context} de Nurse Life Shop (tienda de uniformes médicos).
-Nombre del usuario: {user_name if user_name else "sin nombre"}
-Contexto: {context}
-
-El saludo debe:
-- Ser amigable pero profesional
-- Mencionar Nurse Life Shop de manera natural
-- Usar máximo 2 emojis apropiados
-- Máximo 150 caracteres
-- Sonar natural y humano
-
-Ejemplo de tono: amigable, como una persona real de atención al cliente.
-
-Responde solo con el saludo:
-"""
-
-        headers = {
-            "Content-Type": "application/json",
-            "X-goog-api-key": GEMINI_API_KEY
-        }
-       
-        payload = {
-            "contents": [
-                {
-                    "parts": [
-                        {
-                            "text": prompt
-                        }
-                    ]
-                }
-            ],
-            "generationConfig": {
-                "temperature": 0.8,
-                "maxOutputTokens": 100,
-                "topP": 0.9
-            }
-        }
-
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                GEMINI_API_URL,
-                headers=headers,
-                json=payload,
-                timeout=10.0
-            )
-           
-            if response.status_code == 200:
-                result = response.json()
-                if "candidates" in result and len(result["candidates"]) > 0:
-                    generated_greeting = result["candidates"][0]["content"]["parts"][0]["text"].strip()
-                    logger.info("Saludo contextual generado por Gemini")
-                    return generated_greeting
-               
-        return base_greeting
-
-    except Exception as e:
-        logger.error(f"Error generando saludo contextual: {e}")
-        return base_greeting
-
-# >>> ENHANCED TYPING INDICATORS <<<
-async def send_enhanced_typing_indicator(to: str, message_length: int = 100):
-    """Simula escritura realista basada en la longitud del mensaje"""
-    try:
-        # Calcula tiempo de escritura realista (aproximadamente 40-60 WPM)
-        words = max(message_length // 5, 5)  # Estima palabras
-        base_time = words / 50  # 50 WPM promedio
-        variation = random.uniform(0.8, 1.2)  # Variación natural
-        typing_time = min(max(base_time * variation, 0.8), 4.0)  # Entre 0.8 y 4 segundos
-       
-        # Simula pausa antes de empezar a escribir
-        await asyncio.sleep(random.uniform(0.3, 0.7))
-       
-        # Tiempo de escritura
-        await asyncio.sleep(typing_time)
-       
-        logger.info(f"Typing simulation: {typing_time:.1f}s for {message_length} chars")
-       
-    except Exception as e:
-        logger.error(f"Error en typing indicator: {e}")
-        await asyncio.sleep(1.0)  # Fallback
-
-async def send_thinking_pause(to: str, duration: float = None):
-    """Simula una pausa de 'pensamiento' antes de responder"""
-    if duration is None:
-        duration = random.uniform(0.5, 1.5)
-   
-    await asyncio.sleep(duration)
-
-# >>> EMAIL FUNCTIONS (mantenidas igual) <<<
 async def send_ops_email(subject: str, text: str) -> bool:
     """Envía correo operacional usando SMTP de Mailjet. Texto plano."""
     try:
@@ -267,64 +154,12 @@ async def send_ops_email(subject: str, text: str) -> bool:
         logging.error(f"Error enviando email (Mailjet): {e}")
         return False
 
-# >>> SUPABASE (REST) <<<
-SUPABASE_URL = (os.getenv("SUPABASE_URL") or "").rstrip("/")
-SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or ""
-
-_SUPA_HEADERS = {
-    "apikey": SUPABASE_SERVICE_ROLE_KEY,
-    "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
-    "Content-Type": "application/json",
-    "Prefer": "return=representation"
-} if SUPABASE_SERVICE_ROLE_KEY else {}
-
-async def supabase_insert_rating(phone: str, name: Optional[str], rating: str) -> None:
-    """Inserta una fila en public.ratings (no rompe el flujo si falla)."""
-    if not (SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY):
-        logger.error("Supabase ENV faltantes: SUPABASE_URL o SUPABASE_SERVICE_ROLE_KEY no están definidos.")
-        return
-    payload = {"phone": phone, "name": name or "", "rating": rating}
-    try:
-        async with httpx.AsyncClient() as client:
-            r = await client.post(
-                f"{SUPABASE_URL}/rest/v1/ratings",
-                headers=_SUPA_HEADERS,
-                json=payload,
-                timeout=15.0
-            )
-            if r.status_code >= 400:
-                logger.error(f"Supabase ratings HTTP {r.status_code}: {r.text}")
-                return
-            logger.info(f"Rating enviado a Supabase: {r.json() if r.content else 'OK (sin cuerpo)'}")
-    except Exception as e:
-        logging.error(f"Supabase ratings error: {e}")
-
-async def supabase_insert_order(order: Dict[str, Any]) -> None:
-    """Inserta una fila en public.orders (no rompe el flujo si falla)."""
-    if not (SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY):
-        logger.error("Supabase ENV faltantes: SUPABASE_URL o SUPABASE_SERVICE_ROLE_KEY no están definidos.")
-        return
-    try:
-        async with httpx.AsyncClient() as client:
-            r = await client.post(
-                f"{SUPABASE_URL}/rest/v1/orders",
-                headers=_SUPA_HEADERS,
-                json=order,
-                timeout=15.0
-            )
-            if r.status_code >= 400:
-                logger.error(f"Supabase orders HTTP {r.status_code}: {r.text}")
-                return
-            logger.info(f"Pedido guardado en Supabase: {r.json() if r.content else 'OK (sin cuerpo)'}")
-    except Exception as e:
-        logger.error(f"Supabase orders error: {e}")
-
 # -------------------- App & Estado --------------------
 app = FastAPI(title="Nurse Life Shop WhatsApp Chatbot")
 
 user_sessions: Dict[str, Dict] = {}
 user_ratings: List[Dict] = []
-KNOWLEDGE_BASE: Dict[str, Any] = {}
+KNOWLEDGE_BASE: Dict[str, Any] = {}  # se cargará desde JSON
 
 # >>> NUEVO: almacenamiento en memoria de pedidos
 ORDERS: List[Dict[str, Any]] = []
@@ -369,33 +204,12 @@ def parse_and_set_name_from_text(phone: str, text: str) -> Optional[str]:
 def get_first_name(phone: str) -> str:
     return user_sessions.get(phone, {}).get("first_name", "")
 
+# >>> Normalización de teléfonos (quita '+')
 def normalize_phone(p: Optional[str]) -> str:
     return re.sub(r'^\+', '', (p or '').strip())
 
-def is_returning_user(phone: str) -> bool:
-    """Determina si es un usuario que regresa"""
-    session = user_sessions.get(phone, {})
-    return bool(session.get("last_interaction"))
+# ==================== KB & Mini-RAG ====================
 
-# ==================== Utilidades ====================
-def truncate_text(text: str, max_length: int, add_ellipsis: bool = True) -> str:
-    if len(text) <= max_length:
-        return text
-    return text[:max_length-3] + "..." if add_ellipsis and max_length > 3 else text[:max_length]
-
-def format_question_for_list(question: Dict, index: int) -> Dict:
-    title = f"{index}. {question.get('short_title', truncate_text(question['text'], 20))}"
-    if len(title) > 24:
-        title = title[:24]
-    description = truncate_text(question["text"], 72)
-    return {"title": title, "description": description}
-
-def format_question_for_button(question: Dict, index: int) -> str:
-    short_title = question.get('short_title', truncate_text(question['text'], 15))
-    title = f"{index}. {short_title}"
-    return title[:20] if len(title) > 20 else title
-
-# -------------------- Knowledge Base --------------------
 def _validate_kb(kb: Dict[str, Any]):
     """Admite categorías con 'questions' o con 'products' (catálogo)."""
     if not isinstance(kb, dict):
@@ -407,7 +221,7 @@ def _validate_kb(kb: Dict[str, Any]):
             raise ValueError(f"La categoría {cid} debe incluir 'id' y 'title'.")
 
         has_questions = isinstance(cat.get("questions"), list)
-        has_products = isinstance(cat.get("products"), list)
+        has_products  = isinstance(cat.get("products"), list)
 
         if not has_questions and not has_products:
             raise ValueError(f"La categoría {cid} debe tener 'questions' o 'products'.")
@@ -423,91 +237,41 @@ def _validate_kb(kb: Dict[str, Any]):
                     if pk not in p:
                         raise ValueError(f"La categoría {cid} posee un producto sin '{pk}'.")
 
-def load_knowledge_base(path: str) -> Dict[str, Any]:
-    with open(path, "r", encoding="utf-8") as f:
-        kb = json.load(f)
-    _validate_kb(kb)
-    logger.info(f"Knowledge base cargada: {len(kb)} categorías")
-    return kb
 
-def get_total_questions(kb: Dict[str, Any]) -> int:
-    total = 0
-    for cat in kb.values():
-        total += len(cat.get("questions", []))
-    return total
+def kb_iter_texts() -> List[Dict]:
+    out = []
+    for cid, cat in KNOWLEDGE_BASE.items():
+        for q in cat.get("questions", []) or []:
+            full = f"PREGUNTA: {q['text']}\nRESPUESTA: {q['answer']}"
+            out.append({"text": full, "source": f"faq:{cid}:{q['id']}"})
+        for p in cat.get("products", []) or []:
+            full = f"PRODUCTO: {p['nombre']} | CATEGORÍA: {p['categoria']} | PRECIO: {p['precio']}"
+            out.append({"text": full, "source": f"prod:{cid}:{p['id']}"})
+    return out
 
-def get_all_products() -> List[Dict[str, Any]]:
-    cat = KNOWLEDGE_BASE.get("CATALOGO") or {}
-    return cat.get("products", [])
+_KB_CACHE = None
 
-def find_product_by_id(pid: str) -> Optional[Dict[str, Any]]:
-    for p in get_all_products():
-        if p.get("id") == pid:
-            return p
-    return None
+def get_kb_corpus():
+    global _KB_CACHE
+    if _KB_CACHE is None:
+        _KB_CACHE = kb_iter_texts()
+    return _KB_CACHE
 
-# Orden sugerido para Nurse Life Shop
-NURSE_PREFERRED_ORDER = [
-    "INFO_NEGOCIO", "PRODUCTOS", "PRECIOS", "CATALOGO", "DELIVERY", "PAGO"
-]
+def retrieve_context(user_text: str, k: int = 5) -> List[str]:
+    corpus = get_kb_corpus()
+    choices = [c["text"] for c in corpus]
+    results = process.extract(user_text, choices, scorer=fuzz.token_set_ratio, limit=k)
+    top_texts = []
+    for match_text, score, idx in results:
+        if score >= 55:
+            top_texts.append(match_text)
+    return top_texts
 
 # -------------------- Builders de WhatsApp --------------------
+
 def build_text_message(to: str, text: str) -> Dict:
     return {"messaging_product": "whatsapp", "to": to, "type": "text", "text": {"body": text}}
 
-def build_interactive_list_message(to: str, header: str, body: str, sections: List[Dict]) -> Dict:
-    return {
-        "messaging_product": "whatsapp",
-        "to": to,
-        "type": "interactive",
-        "interactive": {
-            "type": "list",
-            "header": {"type": "text", "text": header},
-            "body": {"text": body},
-            "footer": {"text": "Nurse Life Shop — Tu asistente virtual"},
-            "action": {"button": "Ver opciones", "sections": sections}
-        }
-    }
-
-def build_reply_button_message(to: str, body: str, buttons: List[Dict]) -> Dict:
-    return {
-        "messaging_product": "whatsapp",
-        "to": to,
-        "type": "interactive",
-        "interactive": {
-            "type": "button",
-            "body": {"text": body},
-            "footer": {"text": "Nurse Life Shop — Tu asistente virtual"},
-            "action": {"buttons": buttons}
-        }
-    }
-
-def build_read_receipt(message_id: str) -> Dict:
-    return {"messaging_product": "whatsapp", "status": "read", "message_id": message_id}
-
-def build_image_message(to: str, link: str, caption: Optional[str] = None) -> Dict:
-    payload = {
-        "messaging_product": "whatsapp",
-        "to": to,
-        "type": "image",
-        "image": {"link": link}
-    }
-    if caption:
-        payload["image"]["caption"] = caption
-    return payload
-
-def build_image_id_message(to: str, media_id: str, caption: Optional[str] = None) -> Dict:
-    payload = {
-        "messaging_product": "whatsapp",
-        "to": to,
-        "type": "image",
-        "image": {"id": media_id}
-    }
-    if caption:
-        payload["image"]["caption"] = caption
-    return payload
-
-# -------------------- WhatsApp HTTP --------------------
 async def send_message(payload: Dict) -> bool:
     try:
         async with httpx.AsyncClient() as client:
@@ -522,356 +286,27 @@ async def send_message(payload: Dict) -> bool:
         logger.error(f"Error sending message: {e}")
         return False
 
-async def upload_media_from_url(url: str) -> Optional[str]:
-    """Descarga una imagen desde URL y la sube al endpoint /media de WhatsApp. Devuelve media_id o None."""
+async def send_typing_indicator_and_wait(to: str, seconds: float = 1.0):
     try:
-        async with httpx.AsyncClient() as client:
-            resp = await client.get(url, timeout=30.0)
-            resp.raise_for_status()
-            mime = resp.headers.get("Content-Type", "").split(";")[0].strip() or "image/jpeg"
-            filename = os.path.basename(url.split("?")[0]) or "image.jpg"
-
-            files = {"file": (filename, resp.content, mime)}
-            data = {"messaging_product": "whatsapp", "type": mime}
-            headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}"}
-            up = await client.post(MEDIA_UPLOAD_URL, headers=headers, data=data, files=files, timeout=30.0)
-            up.raise_for_status()
-            media_id = up.json().get("id")
-            logger.info(f"Media uploaded. id={media_id}")
-            return media_id
-    except httpx.HTTPStatusError as e:
-        logger.error(f"HTTP {e.response.status_code} uploading media: {e.response.text}")
-        return None
+        await asyncio.sleep(0.3)
+        await asyncio.sleep(seconds)
     except Exception as e:
-        logger.error(f"Error uploading media: {e}")
-        return None
+        logger.error(f"Typing indicator error: {e}")
 
-async def send_image_with_fallback(to: str, url: str, caption: Optional[str] = None):
-    """Intenta enviar por link; si falla, sube la imagen y reintenta por media_id."""
-    sent = await send_message(build_image_message(to, url, caption))
-    if sent:
-        return
-    media_id = await upload_media_from_url(url)
-    if media_id:
-        await send_message(build_image_id_message(to, media_id, caption))
-
-# -------------------- Flujos conversacionales MEJORADOS --------------------
+# -------------------- NL Welcome --------------------
 async def send_welcome_sequence(to: str):
     name = get_first_name(to)
-    is_returning = is_returning_user(to)
-   
-    # Genera saludo personalizado con Gemini
-    greeting = await generate_contextual_greeting(name, is_returning)
-   
-    welcome_text = f"{greeting}\n\nPuedo ayudarte con ubicaciones, precios (zapatos, uniformes, accesorios), métodos de envío y pago, y el *catálogo*.\n\n¿Qué te gustaría saber?"
-   
-    # Simula typing realista
-    await send_enhanced_typing_indicator(to, len(welcome_text))
-   
-    # URL de imagen de bienvenida
-    LOGO_URL = os.getenv("WELCOME_IMAGE_URL", "https://res.cloudinary.com/doyt5r47e/image/upload/v1757573109/Screenshot_2025-09-11_at_2.40.19_AM_ue5nia.png")
-   
-    # Envía imagen con caption
-    await send_image_with_fallback(to, LOGO_URL, caption=welcome_text)
-   
-    # Pausa natural antes del menú
-    await send_thinking_pause(to, 0.8)
-    await send_main_menu(to)
-
-def _ordered_categories() -> List[str]:
-    ordered = [cid for cid in NURSE_PREFERRED_ORDER if cid in KNOWLEDGE_BASE]
-    remaining = [cid for cid in KNOWLEDGE_BASE.keys() if cid not in ordered]
-    return ordered + remaining
-
-async def send_main_menu(to: str):
-    rows = []
-    for cid in _ordered_categories():
-        cat = KNOWLEDGE_BASE[cid]
-        title = cat["title"]
-        desc = f"Información sobre {title}" if cid != "CATALOGO" else "Explora productos y precios"
-        rows.append({"id": cid, "title": title if len(title) <= 24 else title[:24], "description": desc})
-   
-    if not rows:
-        await send_message(build_text_message(to, "Aún no hay información disponible. Inténtalo más tarde."))
-        return
-
-    sections = [{"title": "Menú Principal", "rows": rows}]
-    payload = build_interactive_list_message(
-        to=to, header="Nurse Life Shop", body="Elige una categoría para ver opciones:", sections=sections
+    saludo = f"¡Hola, {name}! 👋" if name else "¡Hola! 👋"
+    text = (
+        f"{saludo} Soy el asistente de *{BUSINESS_NAME}*. \n"
+        "Cuéntame en tus palabras qué necesitas: precios, disponibilidad, envíos, pagos o hacer un pedido."
     )
-    await send_message(payload)
-    user_sessions.setdefault(to, {})
-    user_sessions[to].update({"state": "main_menu", "last_interaction": datetime.now().isoformat()})
+    await send_typing_indicator_and_wait(to, 0.8)
+    await send_message(build_text_message(to, text))
 
-async def send_catalog_list(to: str):
-    products = get_all_products()
-    if not products:
-        fallback_text = "No hay productos cargados en el catálogo por ahora. También puedes ver el catálogo online: https://nurselife.zobaze.shop/catalog"
-       
-        # Humaniza la respuesta
-        humanized = await generate_humanized_response(
-            "catálogo de productos",
-            "mostrar catálogo",
-            fallback_text,
-            get_first_name(to)
-        )
-       
-        await send_enhanced_typing_indicator(to, len(humanized))
-        await send_message(build_text_message(to, humanized))
-        await send_main_menu(to)
-        return
-
-    rows = []
-    for p in products[:10]:
-        title = truncate_text(p["nombre"], 24, add_ellipsis=True)
-        desc = truncate_text(f"{p['categoria']} — {p['precio']}", 64)
-        rows.append({"id": p["id"], "title": title, "description": desc})
-
-    sections = [{"title": "Catálogo — Top 10", "rows": rows}]
-    payload = build_interactive_list_message(
-        to=to,
-        header="Catálogo Completo",
-        body="Selecciona un producto para ver detalles:",
-        sections=sections
-    )
-    await send_message(payload)
-    user_sessions.setdefault(to, {})
-    user_sessions[to].update({"state": "catalog_menu", "last_interaction": datetime.now().isoformat()})
-
-async def send_product_detail(to: str, product_id: str):
-    p = find_product_by_id(product_id)
-    if not p:
-        error_text = "No encontré ese producto en el catálogo."
-        humanized = await generate_humanized_response(
-            "búsqueda de producto",
-            f"producto {product_id}",
-            error_text,
-            get_first_name(to)
-        )
-       
-        await send_enhanced_typing_indicator(to, len(humanized))
-        await send_message(build_text_message(to, humanized))
-        await send_catalog_list(to)
-        return
-   
-    base_text = (
-        f"🛍️ *{p['nombre']}*\n"
-        f"Categoría: {p['categoria']}\n"
-        f"Precio: {p['precio']}\n\n"
-        "Si deseas comprarlo o consultar tallas/colores, escríbenos aquí.\n"
-        "Catálogo online: https://nurselife.zobaze.shop/catalog"
-    )
-   
-    # Humaniza la respuesta del producto
-    humanized = await generate_humanized_response(
-        "detalle de producto",
-        f"información sobre {p['nombre']}",
-        base_text,
-        get_first_name(to)
-    )
-   
-    await send_enhanced_typing_indicator(to, len(humanized))
-    await send_message(build_text_message(to, humanized))
-    await send_thinking_pause(to, 0.6)
-    await send_more_help_options(to)
-
-async def send_category_questions(to: str, category_id: str):
-    category = KNOWLEDGE_BASE.get(category_id)
-    if not category:
-        error_text = "Lo siento, no encontré esa categoría."
-        humanized = await generate_humanized_response(
-            "navegación de categorías",
-            f"categoría {category_id}",
-            error_text,
-            get_first_name(to)
-        )
-       
-        await send_enhanced_typing_indicator(to, len(humanized))
-        await send_message(build_text_message(to, humanized))
-        await send_main_menu(to)
-        return
-
-    # Si la categoría es de catálogo (con 'products'), mostrar lista del catálogo
-    if category.get("products"):
-        await send_catalog_list(to)
-        return
-
-    questions = category.get("questions", [])
-    if not questions:
-        error_text = "No hay preguntas disponibles en esta categoría."
-        humanized = await generate_humanized_response(
-            f"categoría {category['title']}",
-            "mostrar preguntas",
-            error_text,
-            get_first_name(to)
-        )
-       
-        await send_enhanced_typing_indicator(to, len(humanized))
-        await send_message(build_text_message(to, humanized))
-        await send_main_menu(to)
-        return
-
-    if len(questions) <= 3:
-        buttons = []
-        for i, q in enumerate(questions[:3]):
-            buttons.append({"type": "reply", "reply": {"id": q["id"], "title": format_question_for_button(q, i+1)}})
-        payload = build_reply_button_message(to=to, body=f"*{category['title']}*\n\nSelecciona tu pregunta:", buttons=buttons)
-    else:
-        rows = []
-        for i, q in enumerate(questions[:10]):
-            fq = format_question_for_list(q, i+1)
-            rows.append({"id": q["id"], "title": fq["title"], "description": fq["description"]})
-        sections = [{"title": category["title"], "rows": rows}]
-        payload = build_interactive_list_message(to=to, header=category["title"], body="Selecciona tu pregunta:", sections=sections)
-
-    await send_message(payload)
-    user_sessions.setdefault(to, {})
-    user_sessions[to].update({"state": "questions_menu", "category": category_id, "last_interaction": datetime.now().isoformat()})
-
-async def send_answer(to: str, question_id: str):
-    # Primero intenta encontrar una pregunta de FAQ
-    answer = None
-    question_text = None
-    for category in KNOWLEDGE_BASE.values():
-        for q in category.get("questions", []):
-            if q["id"] == question_id:
-                answer = q["answer"]
-                question_text = q["text"]
-                break
-        if answer:
-            break
-
-    # Si no es FAQ, podría ser un producto del catálogo
-    if not answer:
-        prod = find_product_by_id(question_id)
-        if prod:
-            await send_product_detail(to, question_id)
-            return
-
-    if not answer:
-        error_text = "Lo siento, no pude encontrar la respuesta a esa opción."
-        humanized = await generate_humanized_response(
-            "búsqueda de respuesta",
-            f"pregunta {question_id}",
-            error_text,
-            get_first_name(to)
-        )
-       
-        await send_enhanced_typing_indicator(to, len(humanized))
-        await send_message(build_text_message(to, humanized))
-        await send_main_menu(to)
-    else:
-        # Humaniza la respuesta usando Gemini
-        humanized_answer = await generate_humanized_response(
-            f"pregunta sobre {question_text}",
-            question_text,
-            answer,
-            get_first_name(to)
-        )
-       
-        name = get_first_name(to)
-        header = f"📋 *Pregunta*{f' ({name})' if name else ''}:\n"
-        txt = f"{header}{question_text}\n\n💡 *Respuesta:*\n{humanized_answer}"
-       
-        await send_enhanced_typing_indicator(to, len(txt))
-        await send_message(build_text_message(to, txt))
-        await send_thinking_pause(to, 0.9)
-        await send_more_help_options(to)
-
-async def send_more_help_options(to: str):
-    name = get_first_name(to)
-    base_text = f"¿Algo más{', ' + name if name else ''}?"
-   
-    # Humaniza la pregunta de ayuda adicional
-    humanized = await generate_humanized_response(
-        "finalización de consulta",
-        "preguntar si necesita más ayuda",
-        base_text,
-        name
-    )
-   
-    buttons = [
-        {"type": "reply", "reply": {"id": "HELP_YES", "title": "Sí, por favor"}},
-        {"type": "reply", "reply": {"id": "HELP_NO", "title": "No, gracias"}}
-    ]
-    await send_message(build_reply_button_message(to=to, body=humanized, buttons=buttons))
-    user_sessions.setdefault(to, {})
-    user_sessions[to].update({"state": "more_help", "last_interaction": datetime.now().isoformat()})
-
-async def send_rating_request(to: str):
-    name = get_first_name(to)
-    base_text = f"¡Gracias{', ' + name if name else ''} por usar nuestro asistente!\n\nPor favor, califica la atención recibida:"
-   
-    # Humaniza la solicitud de rating
-    humanized = await generate_humanized_response(
-        "solicitud de calificación",
-        "pedir calificación del servicio",
-        base_text,
-        name
-    )
-   
-    buttons = [
-        {"type": "reply", "reply": {"id": "RATE_EXCELLENT", "title": "⭐⭐⭐ Excelente"}},
-        {"type": "reply", "reply": {"id": "RATE_GOOD", "title": "⭐⭐ Bueno"}},
-        {"type": "reply", "reply": {"id": "RATE_POOR", "title": "⭐ Necesita mejorar"}}
-    ]
-    await send_message(build_reply_button_message(to=to, body=humanized, buttons=buttons))
-    user_sessions.setdefault(to, {})
-    user_sessions[to].update({"state": "rating", "last_interaction": datetime.now().isoformat()})
-
-async def handle_rating(to: str, rating_id: str):
-    rating_map = {"RATE_EXCELLENT": "Excelente ⭐⭐⭐", "RATE_GOOD": "Bueno ⭐⭐", "RATE_POOR": "Necesita mejorar ⭐"}
-    rating = rating_map.get(rating_id, "Desconocida")
-    user_ratings.append({"user": to, "rating": rating, "timestamp": datetime.now().isoformat()})
-   
-    # >>> SUPABASE: guardar rating (normalizado sin emojis)
-    try:
-        norm = "Excelente" if rating.startswith("Excelente") else "Bueno" if rating.startswith("Bueno") else "Necesita mejorar" if rating.startswith("Necesita") else rating
-        phone_norm = normalize_phone(to)
-        await supabase_insert_rating(phone_norm, get_first_name(to), norm)
-    except Exception as e:
-        logger.error(f"No se pudo guardar rating en Supabase: {e}")
-   
-    name = get_first_name(to)
-    base_text = f"¡Muchas gracias{', ' + name if name else ''} por tu calificación: *{rating}*!\n\nTu opinión nos ayuda a mejorar cada día."
-   
-    # Humaniza el agradecimiento
-    humanized = await generate_humanized_response(
-        "agradecimiento por calificación",
-        f"usuario calificó como {rating}",
-        base_text,
-        name
-    )
-   
-    await send_enhanced_typing_indicator(to, len(humanized))
-    await send_message(build_text_message(to, humanized))
-    await send_thinking_pause(to, 1.2)
-    await send_conversation_end(to)
-
-async def send_conversation_end(to: str):
-    name = get_first_name(to)
-    base_text = (
-        f"🔚 *Esta conversación ha terminado*{f', {name}' if name else ''}\n\n"
-        "Si necesitas algo más, escríbenos cuando quieras. ¡Gracias por elegir Nurse Life Shop!\n\n"
-        "_Nurse Life Shop — cuidamos de quienes cuidan_"
-    )
-   
-    # Humaniza el mensaje de despedida
-    humanized = await generate_humanized_response(
-        "despedida y cierre",
-        "terminar conversación",
-        base_text,
-        name
-    )
-   
-    await send_enhanced_typing_indicator(to, len(humanized))
-    await send_message(build_text_message(to, humanized))
-    user_sessions.setdefault(to, {})
-    user_sessions[to].update({"state": "finished", "last_interaction": datetime.now().isoformat()})
-    logger.info(f"Conversation ended for user {to}")
-
-# -------------------- WIZARD DE PEDIDOS (mantenido igual con mejoras) --------------------
+# -------------------- Pedido por TEXTO (sin botones) --------------------
 ORDER_CANCEL_WORDS = {"cancel", "cancelar", "salir", "stop"}
+
 
 def _ensure_order_session(phone: str) -> Dict[str, Any]:
     session = user_sessions.setdefault(phone, {})
@@ -879,8 +314,8 @@ def _ensure_order_session(phone: str) -> Dict[str, Any]:
     if not order:
         order = {
             "status": "in_progress",
-            "step": "mode",
-            "mode": None,
+            "step": "mode",           # mode -> address? -> items -> payment -> confirm
+            "mode": None,              # DELIVERY | PICKUP
             "address": None,
             "items": None,
             "payment": None,
@@ -891,32 +326,31 @@ def _ensure_order_session(phone: str) -> Dict[str, Any]:
 
 async def start_order_wizard(to: str):
     _ensure_order_session(to)
-    body = "¿Cómo prefieres tu compra?"
-    buttons = [
-        {"type": "reply", "reply": {"id": "ORDER_DELIVERY", "title": "🚚 Envío"}},
-        {"type": "reply", "reply": {"id": "ORDER_PICKUP", "title": "🏬 Retiro en tienda"}}
-    ]
-    await send_message(build_reply_button_message(to=to, body=body, buttons=buttons))
+    msg = (
+        "Vamos a armar tu pedido.\n"
+        "¿Prefieres *envío a domicilio* o *retiro en tienda*? (escribe: envio / retiro)"
+    )
+    await send_message(build_text_message(to, msg))
 
 async def _ask_for_address(to: str):
-    text = "Perfecto 📝\nPor favor, indícame la *dirección completa* para el envío (calle/av, referencia, ciudad)."
-    await send_enhanced_typing_indicator(to, len(text))
-    await send_message(build_text_message(to, text))
+    await send_message(build_text_message(
+        to,
+        "Perfecto. Por favor, indícame la *dirección completa* para el envío (calle/av, referencia, ciudad)."
+    ))
 
 async def _ask_for_items(to: str):
-    example = "Ej: 1 par *Difarfala 503* (talla 38), 1 *Uniforme Meropenem* (M), 1 *Gorro Tropical*"
-    text = f"¡Genial! 🛒\nCuéntame *qué productos* deseas (modelo, talla/color si aplica). {example}"
-    await send_enhanced_typing_indicator(to, len(text))
-    await send_message(build_text_message(to, text))
+    example = "Ejemplo: 1 par Difarfala 503 (talla 38), 1 Uniforme Meropenem (M), 1 Gorro Tropical"
+    await send_message(build_text_message(
+        to,
+        f"¡Genial! Cuéntame *qué productos* deseas (modelo, talla/color si aplica). {example}"
+    ))
 
 async def _ask_for_payment(to: str):
-    body = "¿Cómo deseas pagar?"
-    buttons = [
-        {"type": "reply", "reply": {"id": "ORDER_PAY_EFECTIVO", "title": "💵 Efectivo"}},
-        {"type": "reply", "reply": {"id": "ORDER_PAY_TARJETA", "title": "💳 Tarjeta/Transferencia"}},
-        {"type": "reply", "reply": {"id": "ORDER_PAY_PM", "title": "📲 Pago móvil"}}
-    ]
-    await send_message(build_reply_button_message(to=to, body=body, buttons=buttons))
+    await send_message(build_text_message(
+        to,
+        "¿Cómo deseas pagar? Puedes escribir: efectivo / tarjeta / transferencia / pago móvil."
+    ))
+
 
 def _order_summary_text(phone: str) -> str:
     order = user_sessions.get(phone, {}).get("order", {})
@@ -934,12 +368,10 @@ def _order_summary_text(phone: str) -> str:
 
 async def _ask_for_confirmation(to: str):
     summary = _order_summary_text(to)
-    body = f"Por favor, confirma tu pedido:\n\n{summary}"
-    buttons = [
-        {"type": "reply", "reply": {"id": "ORDER_CONFIRM", "title": "✅ Confirmar"}},
-        {"type": "reply", "reply": {"id": "ORDER_CANCEL", "title": "❌ Cancelar"}}
-    ]
-    await send_message(build_reply_button_message(to=to, body=body, buttons=buttons))
+    body = (
+        f"Por favor, confirma tu pedido (escribe *confirmo* para aceptar o *cancelar* para anular):\n\n{summary}"
+    )
+    await send_message(build_text_message(to, body))
 
 async def save_and_finish_order(to: str):
     order = user_sessions.get(to, {}).get("order", {})
@@ -949,20 +381,13 @@ async def save_and_finish_order(to: str):
     order["status"] = "confirmed"
     ORDERS.append(order.copy())
 
-    base_text = f"¡Listo! Tu pedido *{order_no}* fue recibido.\n{_order_summary_text(to)}\n\nTe contactaremos para coordinar envío o retiro. ¡Gracias por elegir Nurse Life Shop!"
-   
-    # Humaniza la confirmación del pedido
-    humanized = await generate_humanized_response(
-        "confirmación de pedido",
-        f"pedido confirmado {order_no}",
-        base_text,
-        get_first_name(to)
-    )
-   
-    await send_enhanced_typing_indicator(to, len(humanized))
-    await send_message(build_text_message(to, humanized))
+    await send_message(build_text_message(
+        to,
+        f"🎉 ¡Listo! Tu pedido *{order_no}* fue recibido.\n{_order_summary_text(to)}\n\n"
+        "Te contactaremos para coordinar envío o retiro. ¡Gracias por elegir Nurse Life Shop! 🩺"
+    ))
 
-    # >>> EMAIL
+    # >>> EMAIL a operaciones
     email_subject = f"Nuevo pedido #{order_no} - Nurse Life Shop"
     email_text = (
         f"📦 Nuevo pedido confirmado #{order_no}\n"
@@ -972,71 +397,37 @@ async def save_and_finish_order(to: str):
     )
     await send_ops_email(email_subject, email_text)
 
-    # >>> SUPABASE
-    try:
-        await supabase_insert_order({
-            "order_no": order_no,
-            "phone": normalize_phone(to),
-            "name": get_first_name(to),
-            "mode": order.get("mode"),
-            "address": order.get("address"),
-            "items": order.get("items"),
-            "payment": order.get("payment"),
-            "note": order.get("note")
-        })
-    except Exception as e:
-        logger.error(f"No se pudo guardar pedido en Supabase: {e}")
-
+    # Limpia sesión de pedido
     user_sessions.get(to, {}).pop("order", None)
-    await send_thinking_pause(to, 0.6)
-    await send_more_help_options(to)
 
 async def cancel_order(to: str):
     user_sessions.get(to, {}).pop("order", None)
-    base_text = "Tu pedido fue cancelado. Si deseas, podemos empezar uno nuevo en cualquier momento."
-   
-    humanized = await generate_humanized_response(
-        "cancelación de pedido",
-        "cancelar pedido",
-        base_text,
-        get_first_name(to)
-    )
-   
-    await send_enhanced_typing_indicator(to, len(humanized))
-    await send_message(build_text_message(to, humanized))
-    await send_thinking_pause(to, 0.4)
-    await send_more_help_options(to)
+    await send_message(build_text_message(to, "Tu pedido fue cancelado. Si deseas, podemos empezar uno nuevo en cualquier momento."))
 
-async def handle_order_button_reply(phone: str, bid: str):
-    order = _ensure_order_session(phone)
-    bid = (bid or "").upper().strip()
+# --- Parsers de entrada libre ---
+def _parse_mode(text: str) -> Optional[str]:
+    t = (text or "").lower()
+    if any(w in t for w in ["envio", "envío", "delivery", "enviar", "domicilio", "reparto"]):
+        return "DELIVERY"
+    if any(w in t for w in ["retiro", "retirar", "pickup", "tienda", "local"]):
+        return "PICKUP"
+    return None
 
-    if bid == "ORDER_DELIVERY":
-        order["mode"] = "DELIVERY"
-        order["step"] = "address"
-        await _ask_for_address(phone)
-        return
+_def_pay_map = {
+    "efectivo": "Efectivo",
+    "tarjeta": "Tarjeta/Transferencia",
+    "transferencia": "Tarjeta/Transferencia",
+    "pago movil": "Pago móvil",
+    "pagomovil": "Pago móvil",
+    "pago móvil": "Pago móvil",
+}
 
-    if bid == "ORDER_PICKUP":
-        order["mode"] = "PICKUP"
-        order["step"] = "items"
-        await _ask_for_items(phone)
-        return
-
-    if bid in {"ORDER_PAY_EFECTIVO", "ORDER_PAY_TARJETA", "ORDER_PAY_PM"}:
-        payment = {"ORDER_PAY_EFECTIVO": "Efectivo", "ORDER_PAY_TARJETA": "Tarjeta/Transferencia", "ORDER_PAY_PM": "Pago móvil"}[bid]
-        order["payment"] = payment
-        order["step"] = "confirm"
-        await _ask_for_confirmation(phone)
-        return
-
-    if bid == "ORDER_CONFIRM":
-        await save_and_finish_order(phone)
-        return
-
-    if bid == "ORDER_CANCEL":
-        await cancel_order(phone)
-        return
+def _parse_payment(text: str) -> Optional[str]:
+    t = (text or "").lower()
+    for k, v in _def_pay_map.items():
+        if k in t:
+            return v
+    return None
 
 async def handle_order_text_input(phone: str, text: str):
     if not text:
@@ -1047,6 +438,19 @@ async def handle_order_text_input(phone: str, text: str):
 
     order = _ensure_order_session(phone)
     step = order.get("step")
+
+    if step == "mode":
+        chosen = _parse_mode(text)
+        if not chosen:
+            await send_message(build_text_message(phone, "No te entendí. ¿Envio o retiro?"))
+            return
+        order["mode"] = chosen
+        order["step"] = "address" if chosen == "DELIVERY" else "items"
+        if order["step"] == "address":
+            await _ask_for_address(phone)
+        else:
+            await _ask_for_items(phone)
+        return
 
     if step == "address":
         order["address"] = text.strip()
@@ -1060,140 +464,106 @@ async def handle_order_text_input(phone: str, text: str):
         await _ask_for_payment(phone)
         return
 
-    if step == "confirm":
-        note = text.strip()
-        if note:
-            order["note"] = note
+    if step == "payment":
+        pay = _parse_payment(text)
+        if not pay:
+            await send_message(build_text_message(phone, "No reconocí el método. Escribe: efectivo / tarjeta / transferencia / pago móvil."))
+            return
+        order["payment"] = pay
+        order["step"] = "confirm"
         await _ask_for_confirmation(phone)
         return
 
-# ==================== Procesamiento de mensajes MEJORADO =====================
+    if step == "confirm":
+        t = (text or "").lower().strip()
+        if t.startswith("confirm"):
+            await save_and_finish_order(phone)
+            return
+        if t in ORDER_CANCEL_WORDS:
+            await cancel_order(phone)
+            return
+        # si escribe otra cosa, lo tomamos como nota
+        order["note"] = text.strip()
+        await _ask_for_confirmation(phone)
+        return
+
+# ==================== Procesamiento de mensajes =====================
+
 def is_greeting(text: str) -> bool:
     greetings = ["hola", "hello", "hi", "buenas", "buenos dias", "buenas tardes",
                  "buenas noches", "saludos", "que tal", "hey", "inicio", "empezar",
                  "comenzar", "start"]
     return text.lower().strip() in greetings
 
-def is_negative_response(text: str) -> bool:
-    negative_responses = ["no", "no gracias", "no, gracias", "nada más", "nada mas",
-                         "ya no", "suficiente", "está bien", "esta bien", "listo",
-                         "perfecto", "ok", "vale"]
-    return text.lower().strip() in negative_responses
 
 def is_order_intent(text: str) -> bool:
     if not text:
         return False
     t = text.lower().strip()
-    return any(k in t.split() for k in ["pedido", "orden", "ordenar", "ordenarme", "comprar", "pedir"])
+    # palabras sueltas para activar flujo de pedido
+    keys = ["pedido", "orden", "ordenar", "ordenarme", "comprar", "pedir"]
+    return any(k in t for k in keys)
 
 async def process_text_message(from_number: str, text: str, message_id: str):
     logger.info(f"Processing text message from {from_number}: {text}")
-    parsed_first = parse_and_set_name_from_text(from_number, text)
+    parse_and_set_name_from_text(from_number, text)
 
-    # si el usuario ya está en el wizard de pedidos, dirigir aquí
+    # 1) Wizard de pedidos activo tiene prioridad
     if user_sessions.get(from_number, {}).get("order", {}).get("status") == "in_progress":
         await handle_order_text_input(from_number, text)
         return
 
-    # intención de pedido por texto libre
+    # 2) Intención de pedido por heurística rápida
     if is_order_intent(text):
         await start_order_wizard(from_number)
         return
 
+    # 3) Saludos => NL welcome
     if is_greeting(text):
         await send_welcome_sequence(from_number)
         return
 
-    user_state = user_sessions.get(from_number, {}).get("state", "new")
-    if user_state in ["new", "finished"] or from_number not in user_sessions:
-        await send_welcome_sequence(from_number)
-        return
+    # 4) LLM NLU cuando no hay flujo claro
+    try:
+        intent, answer = nlu_answer(text)
+        logger.info(f"NLU intent={intent}")
 
-    if user_state == "more_help" and is_negative_response(text):
-        await send_rating_request(from_number)
-        return
+        if intent == "ORDER":
+            if answer:
+                await send_message(build_text_message(from_number, answer))
+            await start_order_wizard(from_number)
+            return
 
-    if parsed_first and user_state not in ["main_menu", "questions_menu", "catalog_menu"]:
-        response_text = f"¡Encantado, {parsed_first}! He guardado tu nombre. Te muestro el menú principal:"
-       
-        # Humaniza la respuesta de bienvenida con nombre
-        humanized = await generate_humanized_response(
-            "presentación con nombre",
-            f"usuario se presenta como {parsed_first}",
-            response_text,
-            parsed_first
-        )
-       
-        await send_enhanced_typing_indicator(from_number, len(humanized))
-        await send_message(build_text_message(from_number, humanized))
-        await send_thinking_pause(from_number, 0.5)
-        await send_main_menu(from_number)
-        return
+        elif intent == "FAQ":
+            if answer:
+                await send_message(build_text_message(from_number, answer))
+                return
 
-    # Respuesta de redirección humanizada
-    base_redirect = ("Para ayudarte mejor, utiliza los botones del menú. "
-                    "Te muestro nuevamente las opciones disponibles:")
-   
-    humanized_redirect = await generate_humanized_response(
-        "redirección al menú",
-        "usuario escribió texto libre",
-        base_redirect,
-        get_first_name(from_number)
+        elif intent == "CHITCHAT":
+            await send_message(build_text_message(from_number, answer or "¡Hola! ¿En qué más te ayudo?"))
+            return
+
+        # OTHER o sin respuesta clara
+        if answer:
+            await send_message(build_text_message(from_number, answer))
+            return
+
+    except Exception as e:
+        logger.error(f"NLU error: {e}")
+
+    # 5) Fallback NL-only
+    fallback = (
+        "No estoy seguro de haber entendido. ¿Podrías darme más detalle? "
+        "Ej: ‘precio del uniforme Meropenem talla M’ o ‘quiero comprar 1 par Difarfala 503 talla 38’."
     )
-   
-    await send_enhanced_typing_indicator(from_number, len(humanized_redirect))
-    await send_message(build_text_message(from_number, humanized_redirect))
-    await send_thinking_pause(from_number, 0.7)
-    await send_main_menu(from_number)
+    await send_message(build_text_message(from_number, fallback))
 
+# (NL_ONLY ignora mensajes interactivos)
 async def process_interactive_message(from_number: str, interactive_data: Dict):
-    mtype = interactive_data.get("type")
+    await send_message(build_text_message(from_number, "Puedes escribir tu consulta en texto. 😊"))
 
-    if mtype == "list_reply":
-        sel = (interactive_data.get("list_reply") or {}).get("id")
-        logger.info(f"List reply from {from_number}: {sel}")
+# -------------------- WhatsApp Webhook / Firma --------------------
 
-        # categoría de catálogo
-        if sel == "CATALOGO":
-            await send_catalog_list(from_number)
-            return
-
-        # si selecciona otra categoría conocida
-        if sel in KNOWLEDGE_BASE:
-            await send_category_questions(from_number, sel)
-            return
-
-        # si el ID corresponde a un producto
-        if find_product_by_id(sel):
-            await send_product_detail(from_number, sel)
-            return
-
-        # si es un FAQ id
-        await send_answer(from_number, sel)
-
-    elif mtype == "button_reply":
-        bid = (interactive_data.get("button_reply") or {}).get("id")
-        logger.info(f"Button reply from {from_number}: {bid}")
-
-        # botones del wizard de pedidos
-        if isinstance(bid, str) and (bid.startswith("ORDER_")):
-            await handle_order_button_reply(from_number, bid)
-            return
-
-        if bid == "HELP_YES":
-            await send_main_menu(from_number)
-        elif bid == "HELP_NO":
-            await send_rating_request(from_number)
-        elif isinstance(bid, str) and bid.startswith("RATE_"):
-            await handle_rating(from_number, bid)
-        else:
-            # puede ser un FAQ o un producto
-            if find_product_by_id(bid):
-                await send_product_detail(from_number, bid)
-            else:
-                await send_answer(from_number, bid)
-
-# -------------------- Webhook / Firma (mantenido igual) --------------------
 def verify_webhook_signature(payload: bytes, signature: str) -> bool:
     if (not APP_SECRET) or APP_SECRET.startswith("your_") or (not signature):
         logger.warning("Skipping webhook signature verification (APP_SECRET vacío/placeholder o header ausente).")
@@ -1212,7 +582,7 @@ def verify_webhook_signature(payload: bytes, signature: str) -> bool:
         logger.error(f"Error verificando firma de webhook: {e}")
         return False
 
-# -------------------- Endpoints (mantenidos igual) --------------------
+# -------------------- Endpoints --------------------
 @app.get("/webhook")
 async def verify_webhook(request: Request):
     hub_mode = request.query_params.get("hub.mode")
@@ -1276,7 +646,6 @@ async def process_message(message: Dict):
         message_id = message.get("id")
         mtype = message.get("type")
 
-        # Si este mensaje trae nombre (poco común), guárdalo
         maybe_name = ((message.get("profile") or {}).get("name") or "").strip()
         if from_number and maybe_name:
             set_user_name(from_number, maybe_name)
@@ -1288,28 +657,18 @@ async def process_message(message: Dict):
             await process_text_message(from_number, text_body, message_id)
 
         elif mtype == "interactive":
-            interactive_data = (message.get("interactive") or {})
-            await process_interactive_message(from_number, interactive_data)
+            # En NL_ONLY simplemente respondemos que escriba en texto
+            await process_interactive_message(from_number, (message.get("interactive") or {}))
 
         elif mtype in ["image", "document", "audio", "video", "sticker"]:
-            media_response = "He recibido tu archivo. Para ayudarte mejor, usa el menú de opciones:"
-           
-            # Humaniza respuesta a archivos
-            humanized = await generate_humanized_response(
-                "recepción de archivo multimedia",
-                f"usuario envió {mtype}",
-                media_response,
-                get_first_name(from_number)
+            media_response = (
+                "He recibido tu archivo. Para ayudarte mejor, cuéntame en texto qué necesitas (precio, disponibilidad, envíos, pagos o hacer un pedido)."
             )
-           
-            await send_enhanced_typing_indicator(from_number, len(humanized))
-            await send_message(build_text_message(from_number, humanized))
-            await send_thinking_pause(from_number, 0.5)
-            await send_main_menu(from_number)
+            await send_message(build_text_message(from_number, media_response))
 
         else:
             logger.info(f"Unsupported message type: {mtype}")
-            await send_main_menu(from_number)
+            await send_message(build_text_message(from_number, "Puedes escribir tu consulta en texto. 😊"))
 
     except Exception as e:
         logger.error(f"Error processing message: {e}")
@@ -1317,8 +676,9 @@ async def process_message(message: Dict):
 # -------------------- Admin: recargar KB --------------------
 @app.post("/admin/reload-kb")
 async def reload_kb():
-    global KNOWLEDGE_BASE
+    global KNOWLEDGE_BASE, _KB_CACHE
     KNOWLEDGE_BASE = load_knowledge_base(KNOWLEDGE_BASE_PATH)
+    _KB_CACHE = None  # reset cache
     return {"status": "ok", "categories": len(KNOWLEDGE_BASE), "total_questions": get_total_questions(KNOWLEDGE_BASE)}
 
 # -------------------- Health & Stats --------------------
@@ -1327,12 +687,11 @@ async def health_check():
     return {
         "status": "healthy",
         "service": "Nurse Life Shop WhatsApp Chatbot",
-        "version": "2.0.0-gemini-enhanced",
+        "version": "1.1.0-nurse-nl-only",
         "active_sessions": len(user_sessions),
         "total_ratings": len(user_ratings),
         "categories": len(KNOWLEDGE_BASE),
-        "total_questions": get_total_questions(KNOWLEDGE_BASE),
-        "gemini_enabled": bool(GEMINI_API_KEY and not GEMINI_API_KEY.startswith("your_"))
+        "total_questions": get_total_questions(KNOWLEDGE_BASE)
     }
 
 @app.get("/stats")
@@ -1346,8 +705,7 @@ async def get_stats():
         "total_ratings": len(user_ratings),
         "rating_breakdown": rating_counts,
         "knowledge_base_categories": len(KNOWLEDGE_BASE),
-        "total_questions": get_total_questions(KNOWLEDGE_BASE),
-        "gemini_status": "enabled" if GEMINI_API_KEY and not GEMINI_API_KEY.startswith("your_") else "disabled"
+        "total_questions": get_total_questions(KNOWLEDGE_BASE)
     }
 
 @app.post("/send-message")
@@ -1388,28 +746,19 @@ async def clear_all_sessions():
     user_sessions.clear()
     return {"status": "success", "message": f"Cleared {count} sessions"}
 
-# -------------------- Test Endpoint para Gemini --------------------
-@app.post("/test-gemini")
-async def test_gemini_api():
-    """Endpoint para probar la integración con Gemini"""
-    try:
-        test_response = await generate_humanized_response(
-            "prueba de conexión",
-            "¿cómo estás?",
-            "Estoy bien, gracias por preguntar.",
-            "Usuario Test"
-        )
-        return {
-            "status": "success",
-            "gemini_enabled": bool(GEMINI_API_KEY and not GEMINI_API_KEY.startswith("your_")),
-            "test_response": test_response
-        }
-    except Exception as e:
-        return {
-            "status": "error",
-            "gemini_enabled": False,
-            "error": str(e)
-        }
+# -------------------- KB Loaders --------------------
+def load_knowledge_base(path: str) -> Dict[str, Any]:
+    with open(path, "r", encoding="utf-8") as f:
+        kb = json.load(f)
+    _validate_kb(kb)
+    logger.info(f"Knowledge base cargada: {len(kb)} categorías")
+    return kb
+
+def get_total_questions(kb: Dict[str, Any]) -> int:
+    total = 0
+    for cat in kb.values():
+        total += len(cat.get("questions", []))
+    return total
 
 # -------------------- Startup --------------------
 @app.on_event("startup")
@@ -1420,7 +769,6 @@ async def startup_event():
     except Exception as e:
         logger.error(f"No se pudo cargar el knowledge_base.json: {e}")
         KNOWLEDGE_BASE = {}
-   
     required_vars = {
         "WHATSAPP_TOKEN": WHATSAPP_TOKEN,
         "PHONE_NUMBER_ID": PHONE_NUMBER_ID,
@@ -1429,34 +777,23 @@ async def startup_event():
     missing = [k for k, v in required_vars.items() if not v]
     if missing:
         logger.error(f"Missing required env vars: {', '.join(missing)}")
-   
-    # Gemini API check
-    if not GEMINI_API_KEY or GEMINI_API_KEY.startswith("your_"):
-        logger.warning("GEMINI_API_KEY no configurada. Las respuestas no serán humanizadas.")
-    else:
-        logger.info("Gemini AI habilitado para respuestas humanizadas")
-   
-    logger.info(f"Bot iniciado con mejoras de Gemini AI. KB categorías={len(KNOWLEDGE_BASE)} preguntas={get_total_questions(KNOWLEDGE_BASE)} productos={len(get_all_products())}")
-
-    # Supabase env checks
-    if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
-        logger.error("Supabase no configurado: define SUPABASE_URL y SUPABASE_SERVICE_ROLE_KEY.")
-    else:
-        logger.info(f"Supabase listo. URL={SUPABASE_URL} KEY_LEN={len(SUPABASE_SERVICE_ROLE_KEY)}")
+    logger.info(
+        f"Bot iniciado (NL_ONLY={NL_ONLY}). KB categorías={len(KNOWLEDGE_BASE)} "
+        f"preguntas={get_total_questions(KNOWLEDGE_BASE)}"
+    )
 
 # -------------------- Main --------------------
 if __name__ == "__main__":
     import uvicorn
-    print("Starting Enhanced Nurse Life Shop WhatsApp Chatbot with Gemini AI...")
+    print("Starting Nurse Life Shop WhatsApp Chatbot (NL-only)...")
     print("Env check:")
-    print(f" WHATSAPP_TOKEN: {'✓' if WHATSAPP_TOKEN and 'your_' not in WHATSAPP_TOKEN.lower() else '✗'}")
-    print(f" PHONE_NUMBER_ID: {'✓' if PHONE_NUMBER_ID and 'your_' not in PHONE_NUMBER_ID.lower() else '✗'}")
-    print(f" VERIFY_TOKEN: {'✓' if VERIFY_TOKEN and 'your_' not in VERIFY_TOKEN.lower() else '✗'}")
-    print(f" APP_SECRET: {'✓' if APP_SECRET and 'your_' not in APP_SECRET.lower() else '✗ (optional)'}")
-    print(f" GEMINI_API_KEY: {'✓' if GEMINI_API_KEY and 'your_' not in GEMINI_API_KEY.lower() else '✗'}")
-    print(f" KNOWLEDGE_BASE_PATH: {KNOWLEDGE_BASE_PATH}")
-    print(f" SMTP_USER set: {'✓' if SMTP_USER else '✗'}")
-    print(f" SMTP_PASS set: {'✓' if SMTP_PASS else '✗'}")
-    print(f" OPS_EMAIL_FROM: {OPS_EMAIL_FROM}")
-    print(f" OPS_EMAIL_TO: {OPS_EMAIL_TO}")
+    print(f"  WHATSAPP_TOKEN: {'✓' if WHATSAPP_TOKEN and 'your_' not in WHATSAPP_TOKEN.lower() else '✗'}")
+    print(f"  PHONE_NUMBER_ID: {'✓' if PHONE_NUMBER_ID and 'your_' not in PHONE_NUMBER_ID.lower() else '✗'}")
+    print(f"  VERIFY_TOKEN: {'✓' if VERIFY_TOKEN and 'your_' not in VERIFY_TOKEN.lower() else '✗'}")
+    print(f"  APP_SECRET: {'✓' if APP_SECRET and 'your_' not in APP_SECRET.lower() else '✗ (optional)'}")
+    print(f"  KNOWLEDGE_BASE_PATH: {KNOWLEDGE_BASE_PATH}")
+    print(f"  SMTP_USER set: {'✓' if SMTP_USER else '✗'}")
+    print(f"  SMTP_PASS set: {'✓' if SMTP_PASS else '✗'}")
+    print(f"  OPS_EMAIL_FROM: {OPS_EMAIL_FROM}")
+    print(f"  OPS_EMAIL_TO: {OPS_EMAIL_TO}")
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True, log_level="info")
