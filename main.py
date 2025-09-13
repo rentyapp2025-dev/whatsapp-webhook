@@ -1,799 +1,552 @@
 import os
-import json
-import time
-import asyncio
-import logging
 import hmac
 import hashlib
 import re
-from typing import Dict, List, Optional, Any, Tuple
-from datetime import datetime
+from enum import Enum
+from typing import Optional, Any, Dict
 
-# NEW: load .env in local/dev
-try:
-    from dotenv import load_dotenv
-    load_dotenv()
-except Exception:
-    pass
-
-from rapidfuzz import process, fuzz
-
-# --- Router de lenguaje natural ---
-from llm_client import chat_completion
-
-from fastapi import FastAPI, Request, HTTPException, BackgroundTasks
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, Request, Response, HTTPException, Query
+from fastapi.responses import PlainTextResponse
 import httpx
 
-# -------------------- Logging --------------------
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger("nurse-life-bot")
-
-# -------------------- Env --------------------
-WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN", "your_whatsapp_token_here")
-PHONE_NUMBER_ID = os.getenv("PHONE_NUMBER_ID", "your_phone_number_id_here")
-VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "your_verify_token_here")
-APP_SECRET = os.getenv("APP_SECRET", "your_app_secret_here")
-
-# Ruta del JSON con la base de conocimiento
-KNOWLEDGE_BASE_PATH = os.getenv("KNOWLEDGE_BASE_PATH", "nurse.json")
-
-GRAPH_API_URL = f"https://graph.facebook.com/v18.0/{PHONE_NUMBER_ID}/messages"
-MEDIA_UPLOAD_URL = f"https://graph.facebook.com/v18.0/{PHONE_NUMBER_ID}/media"
-HEADERS = {"Authorization": f"Bearer {WHATSAPP_TOKEN}", "Content-Type": "application/json"}
-
-# Modo exclusivamente lenguaje natural
-NL_ONLY = (os.getenv("NL_ONLY", "true").lower() == "true")
-
-# >>> EMAIL (Mailjet SMTP) <<<
-import smtplib, ssl
-from email.utils import formataddr, make_msgid
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
-
-SMTP_HOST = os.getenv("SMTP_HOST", "in-v3.mailjet.com")
-SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
-SMTP_USER = os.getenv("SMTP_USER", "")  # Mailjet API Key
-SMTP_PASS = os.getenv("SMTP_PASS", "")  # Mailjet API Secret
-OPS_EMAIL_TO = os.getenv("OPS_EMAIL_TO", "ops@nurselifeshop.local")   # uno o varios separados por coma
-OPS_EMAIL_FROM = os.getenv("OPS_EMAIL_FROM", "bot@nurselifeshop.local")
-REPLY_TO = os.getenv("REPLY_TO")                                       # opcional
-ORDERS_BCC = os.getenv("ORDERS_BCC")                                   # opcional, coma-separado
-
-# --- Perfil de negocio para el LLM ---
-BUSINESS_NAME = os.getenv("BUSINESS_NAME", "Nurse Life Shop")
-BUSINESS_TONE = os.getenv("BUSINESS_TONE", "amable, cercano y claro")
-
-ROUTER_INSTRUCTION = (
-    "Clasifica la intención del usuario en una sola palabra: "
-    "FAQ | ORDER | CHITCHAT | OTHER.\n"
-    "Responde SIEMPRE con este JSON plano (sin explicación):\n"
-    "{\"intent\":\"...\",\"answer\":\"...\"}"
+# Importa utilidades de BD desde tu cliente REST (supabase_client.py)
+from supabase_client import (
+    ensure_user, get_user_name,
+    set_session, get_session,
+    insert_listing, get_listing,
+    upsert_consent, set_consent_flag, get_consent,
+    create_rental_request,
 )
 
-def nlu_answer(user_text: str) -> Tuple[str, str]:
-    """
-    Devuelve (intent, answer)
-    """
-    ctx_snippets = retrieve_context(user_text, k=5)
-    context_block = "\n\n".join(ctx_snippets) if ctx_snippets else "SIN_CONTEXTO"
+VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "")
+WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN", "")
+PHONE_NUMBER_ID = os.getenv("PHONE_NUMBER_ID", "")
+APP_SECRET = os.getenv("APP_SECRET", "").encode("utf-8")
+GRAPH_API_VERSION = os.getenv("GRAPH_API_VERSION", "v20.0")
+GRAPH_BASE = f"https://graph.facebook.com/{GRAPH_API_VERSION}"
 
-    messages = [
-        {"role": "system", "content": build_system_prompt()},
-        {"role": "user", "content": (
-            f"{ROUTER_INSTRUCTION}\n\n"
-            f"[CONTEXTO DEL NEGOCIO]\n{context_block}\n\n"
-            f"[PREGUNTA]\n{user_text}\n"
-            f"[NOTAS]\n- Si 'ORDER', pregunta en lenguaje natural por datos de compra (producto, talla/color, cantidad, dirección si aplica y método de pago).\n"
-            f"- Si 'FAQ', usa SOLO el contexto si aplica; si no hay datos, dilo breve y pide más detalle.\n"
-            f"- Si 'CHITCHAT', responde amable y breve.\n"
-        )}
-    ]
-    raw = chat_completion(messages, temperature=0.3, max_tokens=400)
-
-    # Parseo robusto del JSON devuelto
-    try:
-        m = re.search(r"\{.*\}", raw, flags=re.S)
-        obj = json.loads(m.group(0)) if m else {"intent":"OTHER","answer":raw}
-        intent = (obj.get("intent") or "OTHER").upper().strip()
-        answer = (obj.get("answer") or "").strip()
-        return intent, answer
-    except Exception:
-        return "OTHER", raw.strip()
-
-def build_system_prompt() -> str:
-    return (
-        f"Eres un asistente de WhatsApp para {BUSINESS_NAME}. "
-        f"Respondes SIEMPRE en español con un tono {BUSINESS_TONE}. "
-        "Usa el contexto del negocio si existe para responder preguntas sobre productos, precios, delivery, pagos y catálogo. "
-        "Si no hay datos en el contexto, dilo breve y pide más detalle. "
-        "Si detectas intención de ORDEN/COMPRA, guía por TEXTO LIBRE (sin botones) para pedir los datos necesarios y confirmar el pedido. "
-        "No uses botones ni menús; todo debe fluir por texto libre."
-    )
-
-# -------------------- Utils --------------------
-def _split_csv(s: Optional[str]) -> List[str]:
-    return [x.strip() for x in s.split(",")] if s else []
-
-async def send_ops_email(subject: str, text: str) -> bool:
-    """Envía correo operacional usando SMTP de Mailjet. Texto plano."""
-    try:
-        if not all([SMTP_USER, SMTP_PASS, OPS_EMAIL_FROM, OPS_EMAIL_TO]):
-            logging.error("SMTP/ENV incompletos para Mailjet (revisa SMTP_USER, SMTP_PASS, OPS_EMAIL_FROM, OPS_EMAIL_TO).")
-            return False
-
-        tos = _split_csv(OPS_EMAIL_TO)
-        bccs = _split_csv(ORDERS_BCC)
-
-        msg = MIMEMultipart("alternative")
-        msg["Subject"] = subject
-        msg["From"] = formataddr(("Nurse Life Bot", OPS_EMAIL_FROM))
-        msg["To"] = ", ".join(tos)
-        if REPLY_TO:
-            msg.add_header("Reply-To", REPLY_TO)
-        if bccs:
-            msg["Bcc"] = ", ".join(bccs)
-        msg.add_header("Message-ID", make_msgid(domain=OPS_EMAIL_FROM.split("@")[-1]))
-        msg.add_header("X-Mailer", "NurseLifeWA/1.0")
-        msg.add_header("X-Mailjet-Campaign", "whatsapp-ops")
-
-        msg.attach(MIMEText(text, "plain", "utf-8"))
-
-        context = ssl.create_default_context()
-        with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
-            server.starttls(context=context)
-            server.login(SMTP_USER, SMTP_PASS)
-            server.sendmail(OPS_EMAIL_FROM, tos + bccs, msg.as_string())
-
-        logging.info(f"Correo operacional enviado a: {tos} (bcc: {bccs})")
-        return True
-    except Exception as e:
-        logging.error(f"Error enviando email (Mailjet): {e}")
-        return False
-
-# -------------------- App & Estado --------------------
-app = FastAPI(title="Nurse Life Shop WhatsApp Chatbot")
-
-user_sessions: Dict[str, Dict] = {}
-user_ratings: List[Dict] = []
-KNOWLEDGE_BASE: Dict[str, Any] = {}  # se cargará desde JSON
-
-# >>> NUEVO: almacenamiento en memoria de pedidos
-ORDERS: List[Dict[str, Any]] = []
-
-# ==================== Helpers de NOMBRE ====================
-def extract_first_name(full_name: str) -> str:
-    if not full_name:
-        return ""
-    name = re.sub(r'[^\wÁÉÍÓÚáéíóúÑñ\s\'.-]', '', full_name, flags=re.UNICODE).strip()
-    parts = [p for p in name.split() if p and p.lower() not in {"de", "del", "la", "el"}]
-    if not parts:
-        return name
-    first = parts[0]
-    return first[:1].upper() + first[1:]
-
-def set_user_name(phone: str, full_name: str):
-    if not phone or not full_name:
-        return
-    session = user_sessions.setdefault(phone, {})
-    session["full_name"] = full_name.strip()
-    session["first_name"] = extract_first_name(full_name)
-    session["last_interaction"] = datetime.now().isoformat()
-    logger.info(f"Saved name for {phone}: {session['first_name']} ({session['full_name']})")
-
-def parse_and_set_name_from_text(phone: str, text: str) -> Optional[str]:
-    if not text:
-        return None
-    patterns = [
-        r"(?:^|\b)(?:me llamo|mi nombre es)\s+([A-Za-zÁÉÍÓÚáéíóúÑñ\'.\- ]{2,})",
-        r"(?:^|\b)soy\s+([A-Za-zÁÉÍÓÚáéíóúÑñ\'.\- ]{2,})"
-    ]
-    for pat in patterns:
-        m = re.search(pat, text, flags=re.IGNORECASE | re.UNICODE)
-        if m:
-            candidate = m.group(1).strip().rstrip(".!,;:)")
-            if len(candidate.split()) > 5:
-                continue
-            set_user_name(phone, candidate)
-            return user_sessions.get(phone, {}).get("first_name")
-    return None
-
-def get_first_name(phone: str) -> str:
-    return user_sessions.get(phone, {}).get("first_name", "")
-
-# >>> Normalización de teléfonos (quita '+')
-def normalize_phone(p: Optional[str]) -> str:
-    return re.sub(r'^\+', '', (p or '').strip())
-
-# ==================== KB & Mini-RAG ====================
-
-def _validate_kb(kb: Dict[str, Any]):
-    """Admite categorías con 'questions' o con 'products' (catálogo)."""
-    if not isinstance(kb, dict):
-        raise ValueError("El JSON debe ser un objeto (dict) de categorías.")
-    for cid, cat in kb.items():
-        if not isinstance(cat, dict):
-            raise ValueError(f"La categoría {cid} no es un objeto.")
-        if "id" not in cat or "title" not in cat:
-            raise ValueError(f"La categoría {cid} debe incluir 'id' y 'title'.")
-
-        has_questions = isinstance(cat.get("questions"), list)
-        has_products  = isinstance(cat.get("products"), list)
-
-        if not has_questions and not has_products:
-            raise ValueError(f"La categoría {cid} debe tener 'questions' o 'products'.")
-
-        if has_questions:
-            for q in cat["questions"]:
-                for qk in ("id", "text", "answer"):
-                    if qk not in q:
-                        raise ValueError(f"La categoría {cid} posee una pregunta sin '{qk}'.")
-        if has_products:
-            for p in cat["products"]:
-                for pk in ("id", "nombre", "categoria", "precio"):
-                    if pk not in p:
-                        raise ValueError(f"La categoría {cid} posee un producto sin '{pk}'.")
-
-
-def kb_iter_texts() -> List[Dict]:
-    out = []
-    for cid, cat in KNOWLEDGE_BASE.items():
-        for q in cat.get("questions", []) or []:
-            full = f"PREGUNTA: {q['text']}\nRESPUESTA: {q['answer']}"
-            out.append({"text": full, "source": f"faq:{cid}:{q['id']}"})
-        for p in cat.get("products", []) or []:
-            full = f"PRODUCTO: {p['nombre']} | CATEGORÍA: {p['categoria']} | PRECIO: {p['precio']}"
-            out.append({"text": full, "source": f"prod:{cid}:{p['id']}"})
-    return out
-
-_KB_CACHE = None
-
-def get_kb_corpus():
-    global _KB_CACHE
-    if _KB_CACHE is None:
-        _KB_CACHE = kb_iter_texts()
-    return _KB_CACHE
-
-def retrieve_context(user_text: str, k: int = 5) -> List[str]:
-    corpus = get_kb_corpus()
-    choices = [c["text"] for c in corpus]
-    results = process.extract(user_text, choices, scorer=fuzz.token_set_ratio, limit=k)
-    top_texts = []
-    for match_text, score, idx in results:
-        if score >= 55:
-            top_texts.append(match_text)
-    return top_texts
-
-# -------------------- Builders de WhatsApp --------------------
-
-def build_text_message(to: str, text: str) -> Dict:
-    return {"messaging_product": "whatsapp", "to": to, "type": "text", "text": {"body": text}}
-
-async def send_message(payload: Dict) -> bool:
-    try:
-        async with httpx.AsyncClient() as client:
-            r = await client.post(GRAPH_API_URL, headers=HEADERS, json=payload, timeout=30.0)
-            r.raise_for_status()
-            logger.info(f"Message sent to {payload.get('to')} ({payload.get('type')})")
-            return True
-    except httpx.HTTPStatusError as e:
-        logger.error(f"HTTP {e.response.status_code} sending message: {e.response.text}")
-        return False
-    except Exception as e:
-        logger.error(f"Error sending message: {e}")
-        return False
-
-async def send_typing_indicator_and_wait(to: str, seconds: float = 1.0):
-    try:
-        await asyncio.sleep(0.3)
-        await asyncio.sleep(seconds)
-    except Exception as e:
-        logger.error(f"Typing indicator error: {e}")
-
-# -------------------- NL Welcome --------------------
-async def send_welcome_sequence(to: str):
-    name = get_first_name(to)
-    saludo = f"¡Hola, {name}! 👋" if name else "¡Hola! 👋"
-    text = (
-        f"{saludo} Soy el asistente de *{BUSINESS_NAME}*. \n"
-        "Cuéntame en tus palabras qué necesitas: precios, disponibilidad, envíos, pagos o hacer un pedido."
-    )
-    await send_typing_indicator_and_wait(to, 0.8)
-    await send_message(build_text_message(to, text))
-
-# -------------------- Pedido por TEXTO (sin botones) --------------------
-ORDER_CANCEL_WORDS = {"cancel", "cancelar", "salir", "stop"}
-
-
-def _ensure_order_session(phone: str) -> Dict[str, Any]:
-    session = user_sessions.setdefault(phone, {})
-    order = session.get("order")
-    if not order:
-        order = {
-            "status": "in_progress",
-            "step": "mode",           # mode -> address? -> items -> payment -> confirm
-            "mode": None,              # DELIVERY | PICKUP
-            "address": None,
-            "items": None,
-            "payment": None,
-            "created_at": datetime.now().isoformat()
-        }
-        session["order"] = order
-    return order
-
-async def start_order_wizard(to: str):
-    _ensure_order_session(to)
-    msg = (
-        "Vamos a armar tu pedido.\n"
-        "¿Prefieres *envío a domicilio* o *retiro en tienda*? (escribe: envio / retiro)"
-    )
-    await send_message(build_text_message(to, msg))
-
-async def _ask_for_address(to: str):
-    await send_message(build_text_message(
-        to,
-        "Perfecto. Por favor, indícame la *dirección completa* para el envío (calle/av, referencia, ciudad)."
-    ))
-
-async def _ask_for_items(to: str):
-    example = "Ejemplo: 1 par Difarfala 503 (talla 38), 1 Uniforme Meropenem (M), 1 Gorro Tropical"
-    await send_message(build_text_message(
-        to,
-        f"¡Genial! Cuéntame *qué productos* deseas (modelo, talla/color si aplica). {example}"
-    ))
-
-async def _ask_for_payment(to: str):
-    await send_message(build_text_message(
-        to,
-        "¿Cómo deseas pagar? Puedes escribir: efectivo / tarjeta / transferencia / pago móvil."
-    ))
-
-
-def _order_summary_text(phone: str) -> str:
-    order = user_sessions.get(phone, {}).get("order", {})
-    name = get_first_name(phone)
-    parts = []
-    parts.append(f"👤 Cliente: {name or phone}")
-    parts.append(f"🧾 Modo: {order.get('mode') or '-'}")
-    if order.get("mode") == "DELIVERY":
-        parts.append(f"📍 Dirección: {order.get('address') or '-'}")
-    parts.append(f"🛒 Pedido: {order.get('items') or '-'}")
-    parts.append(f"💳 Pago: {order.get('payment') or '-'}")
-    if order.get("note"):
-        parts.append(f"📝 Nota: {order.get('note')}")
-    return "\n".join(parts)
-
-async def _ask_for_confirmation(to: str):
-    summary = _order_summary_text(to)
-    body = (
-        f"Por favor, confirma tu pedido (escribe *confirmo* para aceptar o *cancelar* para anular):\n\n{summary}"
-    )
-    await send_message(build_text_message(to, body))
-
-async def save_and_finish_order(to: str):
-    order = user_sessions.get(to, {}).get("order", {})
-    order_no = f"NLS-{int(time.time())}"
-    order["order_no"] = order_no
-    order["user"] = to
-    order["status"] = "confirmed"
-    ORDERS.append(order.copy())
-
-    await send_message(build_text_message(
-        to,
-        f"🎉 ¡Listo! Tu pedido *{order_no}* fue recibido.\n{_order_summary_text(to)}\n\n"
-        "Te contactaremos para coordinar envío o retiro. ¡Gracias por elegir Nurse Life Shop! 🩺"
-    ))
-
-    # >>> EMAIL a operaciones
-    email_subject = f"Nuevo pedido #{order_no} - Nurse Life Shop"
-    email_text = (
-        f"📦 Nuevo pedido confirmado #{order_no}\n"
-        f"{_order_summary_text(to)}\n"
-        f"📱 Cliente WA: {to}\n"
-        f"🕒 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
-    )
-    await send_ops_email(email_subject, email_text)
-
-    # Limpia sesión de pedido
-    user_sessions.get(to, {}).pop("order", None)
-
-async def cancel_order(to: str):
-    user_sessions.get(to, {}).pop("order", None)
-    await send_message(build_text_message(to, "Tu pedido fue cancelado. Si deseas, podemos empezar uno nuevo en cualquier momento."))
-
-# --- Parsers de entrada libre ---
-def _parse_mode(text: str) -> Optional[str]:
-    t = (text or "").lower()
-    if any(w in t for w in ["envio", "envío", "delivery", "enviar", "domicilio", "reparto"]):
-        return "DELIVERY"
-    if any(w in t for w in ["retiro", "retirar", "pickup", "tienda", "local"]):
-        return "PICKUP"
-    return None
-
-_def_pay_map = {
-    "efectivo": "Efectivo",
-    "tarjeta": "Tarjeta/Transferencia",
-    "transferencia": "Tarjeta/Transferencia",
-    "pago movil": "Pago móvil",
-    "pagomovil": "Pago móvil",
-    "pago móvil": "Pago móvil",
+# === Credenciales para PostgREST (solo usadas en verificación simple)
+SUPABASE_URL = os.getenv("SUPABASE_URL", "").rstrip("/")
+SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
+SUPA_BASE = f"{SUPABASE_URL}/rest/v1"
+SUPA_HEADERS = {
+    "apikey": SUPABASE_KEY,
+    "Authorization": f"Bearer {SUPABASE_KEY}",
 }
+SUPA_HEADERS_JSON = {**SUPA_HEADERS, "Content-Type": "application/json"}
+SUPA_HEADERS_RETURN = {**SUPA_HEADERS_JSON, "Prefer": "return=representation"}
 
-def _parse_payment(text: str) -> Optional[str]:
-    t = (text or "").lower()
-    for k, v in _def_pay_map.items():
-        if k in t:
-            return v
-    return None
+app = FastAPI(title="WhatsApp Cloud API Webhook (Render/FastAPI)")
 
-async def handle_order_text_input(phone: str, text: str):
-    if not text:
-        return
-    if text.lower().strip() in ORDER_CANCEL_WORDS:
-        await cancel_order(phone)
-        return
+# ==================== ENUM/STATE ====================
+class Step(str, Enum):
+    IDLE = "idle"
+    PUBLISH_TITLE = "publish_title"
+    PUBLISH_PRICE = "publish_price"
+    PUBLISH_LOCATION = "publish_location"
+    VERIFY_LOOKUP_WAIT_NUMBER = "verify_lookup_wait_number"
 
-    order = _ensure_order_session(phone)
-    step = order.get("step")
+# Helpers de estado para evitar comparaciones Enum vs str
+def step_val(st: Dict[str, Any] | None) -> str:
+    v = (st or {}).get("step")
+    if isinstance(v, Step):
+        return v.value
+    return v or Step.IDLE.value
 
-    if step == "mode":
-        chosen = _parse_mode(text)
-        if not chosen:
-            await send_message(build_text_message(phone, "No te entendí. ¿Envio o retiro?"))
-            return
-        order["mode"] = chosen
-        order["step"] = "address" if chosen == "DELIVERY" else "items"
-        if order["step"] == "address":
-            await _ask_for_address(phone)
-        else:
-            await _ask_for_items(phone)
-        return
-
-    if step == "address":
-        order["address"] = text.strip()
-        order["step"] = "items"
-        await _ask_for_items(phone)
-        return
-
-    if step == "items":
-        order["items"] = text.strip()
-        order["step"] = "payment"
-        await _ask_for_payment(phone)
-        return
-
-    if step == "payment":
-        pay = _parse_payment(text)
-        if not pay:
-            await send_message(build_text_message(phone, "No reconocí el método. Escribe: efectivo / tarjeta / transferencia / pago móvil."))
-            return
-        order["payment"] = pay
-        order["step"] = "confirm"
-        await _ask_for_confirmation(phone)
-        return
-
-    if step == "confirm":
-        t = (text or "").lower().strip()
-        if t.startswith("confirm"):
-            await save_and_finish_order(phone)
-            return
-        if t in ORDER_CANCEL_WORDS:
-            await cancel_order(phone)
-            return
-        # si escribe otra cosa, lo tomamos como nota
-        order["note"] = text.strip()
-        await _ask_for_confirmation(phone)
-        return
-
-# ==================== Procesamiento de mensajes =====================
-
-def is_greeting(text: str) -> bool:
-    greetings = ["hola", "hello", "hi", "buenas", "buenos dias", "buenas tardes",
-                 "buenas noches", "saludos", "que tal", "hey", "inicio", "empezar",
-                 "comenzar", "start"]
-    return text.lower().strip() in greetings
-
-
-def is_order_intent(text: str) -> bool:
-    if not text:
-        return False
-    t = text.lower().strip()
-    # palabras sueltas para activar flujo de pedido
-    keys = ["pedido", "orden", "ordenar", "ordenarme", "comprar", "pedir"]
-    return any(k in t for k in keys)
-
-async def process_text_message(from_number: str, text: str, message_id: str):
-    logger.info(f"Processing text message from {from_number}: {text}")
-    parse_and_set_name_from_text(from_number, text)
-
-    # 1) Wizard de pedidos activo tiene prioridad
-    if user_sessions.get(from_number, {}).get("order", {}).get("status") == "in_progress":
-        await handle_order_text_input(from_number, text)
-        return
-
-    # 2) Intención de pedido por heurística rápida
-    if is_order_intent(text):
-        await start_order_wizard(from_number)
-        return
-
-    # 3) Saludos => NL welcome
-    if is_greeting(text):
-        await send_welcome_sequence(from_number)
-        return
-
-    # 4) LLM NLU cuando no hay flujo claro
-    try:
-        intent, answer = nlu_answer(text)
-        logger.info(f"NLU intent={intent}")
-
-        if intent == "ORDER":
-            if answer:
-                await send_message(build_text_message(from_number, answer))
-            await start_order_wizard(from_number)
-            return
-
-        elif intent == "FAQ":
-            if answer:
-                await send_message(build_text_message(from_number, answer))
-                return
-
-        elif intent == "CHITCHAT":
-            await send_message(build_text_message(from_number, answer or "¡Hola! ¿En qué más te ayudo?"))
-            return
-
-        # OTHER o sin respuesta clara
-        if answer:
-            await send_message(build_text_message(from_number, answer))
-            return
-
-    except Exception as e:
-        logger.error(f"NLU error: {e}")
-
-    # 5) Fallback NL-only
-    fallback = (
-        "No estoy seguro de haber entendido. ¿Podrías darme más detalle? "
-        "Ej: ‘precio del uniforme Meropenem talla M’ o ‘quiero comprar 1 par Difarfala 503 talla 38’."
-    )
-    await send_message(build_text_message(from_number, fallback))
-
-# (NL_ONLY ignora mensajes interactivos)
-async def process_interactive_message(from_number: str, interactive_data: Dict):
-    await send_message(build_text_message(from_number, "Puedes escribir tu consulta en texto. 😊"))
-
-# -------------------- WhatsApp Webhook / Firma --------------------
-
-def verify_webhook_signature(payload: bytes, signature: str) -> bool:
-    if (not APP_SECRET) or APP_SECRET.startswith("your_") or (not signature):
-        logger.warning("Skipping webhook signature verification (APP_SECRET vacío/placeholder o header ausente).")
+# ==================== utilidades WhatsApp ====================
+def verify_signature(signature: Optional[str], body: bytes) -> bool:
+    # En prod: exige firma; para pruebas permite si no hay APP_SECRET
+    if not APP_SECRET:
         return True
-    try:
-        if not signature.strip().startswith("sha256="):
-            logger.error("Firma de webhook con formato inválido (sin prefijo sha256=).")
-            return False
-        expected_hex = hmac.new(APP_SECRET.encode("utf-8"), payload, hashlib.sha256).hexdigest()
-        expected_header = f"sha256={expected_hex}"
-        ok = hmac.compare_digest(expected_header, signature.strip())
-        if not ok:
-            logger.error("Webhook signature mismatch (no coincide con APP_SECRET).")
-        return ok
-    except Exception as e:
-        logger.error(f"Error verificando firma de webhook: {e}")
+    if not signature or not signature.startswith("sha256="):
         return False
+    their = signature.split("sha256=")[-1].strip()
+    mac = hmac.new(APP_SECRET, msg=body, digestmod=hashlib.sha256)
+    mine = mac.hexdigest()
+    return hmac.compare_digest(mine, their)
 
-# -------------------- Endpoints --------------------
-@app.get("/webhook")
-async def verify_webhook(request: Request):
-    hub_mode = request.query_params.get("hub.mode")
-    hub_verify_token = request.query_params.get("hub.verify_token")
-    hub_challenge = request.query_params.get("hub.challenge")
-
-    if hub_mode == "subscribe" and hub_verify_token == VERIFY_TOKEN:
-        logger.info("Webhook verified successfully")
+async def _post_messages(payload: Dict[str, Any]) -> Dict[str, Any]:
+    url = f"{GRAPH_BASE}/{PHONE_NUMBER_ID}/messages"
+    headers = {
+        "Authorization": f"Bearer {WHATSAPP_TOKEN}",
+        "Content-Type": "application/json"
+    }
+    async with httpx.AsyncClient(timeout=20) as client:
+        r = await client.post(url, headers=headers, json=payload)
         try:
-            return JSONResponse(content=int(hub_challenge))
-        except Exception:
-            return JSONResponse(content=hub_challenge)
+            r.raise_for_status()
+        except httpx.HTTPStatusError:
+            # Si el menú no aparece, mira los logs: los 400 aquí suelen ser por título demasiado largo en filas
+            print("Graph error:", r.status_code, r.text)
+            raise
+        return r.json()
 
-    logger.error("Webhook verification failed")
-    raise HTTPException(status_code=403, detail="Forbidden")
+# ---------- helpers de envío ----------
+async def send_text(to_msisdn: str, text: str) -> Dict[str, Any]:
+    payload = {
+        "messaging_product": "whatsapp",
+        "to": to_msisdn,
+        "type": "text",
+        "text": {"body": text}
+    }
+    return await _post_messages(payload)
+
+async def send_reply_buttons(
+    to_msisdn: str,
+    header_text: str,
+    body_text: str,
+    footer_text: str = "",
+    buttons: Optional[list] = None
+) -> Dict[str, Any]:
+    # buttons: [{"id":"rent_yes","title":"Alquilar"}, ...]  (máx 3)
+    if not buttons:
+        buttons = [
+            {"id": "rent_yes", "title": "Alquilar"},
+            {"id": "see_details", "title": "Ver detalles"},
+            {"id": "cancel", "title": "Cancelar"}
+        ]
+    btns = [{"type": "reply", "reply": b} for b in buttons][:3]
+
+    interactive = {
+        "type": "button",
+        "header": {"type": "text", "text": header_text},
+        "body": {"text": body_text},
+        "action": {"buttons": btns}
+    }
+    if footer_text:
+        interactive["footer"] = {"text": footer_text}
+
+    payload = {
+        "messaging_product": "whatsapp",
+        "to": to_msisdn,
+        "type": "interactive",
+        "interactive": interactive
+    }
+    return await _post_messages(payload)
+
+async def send_list(
+    to_msisdn: str,
+    header_text: str,
+    body_text: str,
+    button_text: str,
+    rows: list,
+    footer_text: str = "",
+    section_title: str = "Opciones"
+) -> Dict[str, Any]:
+    # rows: [{"id":"publish_new","title":"Crear publicación","description":"..."}, ...]
+    interactive = {
+        "type": "list",
+        "header": {"type": "text", "text": header_text},
+        "body": {"text": body_text},
+        "action": {
+            "button": button_text,  # ≤ 20 chars
+            "sections": [
+                {"title": section_title, "rows": rows[:10]}  # 1..10 filas
+            ]
+        }
+    }
+    if footer_text:
+        interactive["footer"] = {"text": footer_text}
+
+    payload = {
+        "messaging_product": "whatsapp",
+        "to": to_msisdn,
+        "type": "interactive",
+        "interactive": interactive
+    }
+    return await _post_messages(payload)
+
+# ---------- MENÚ PRINCIPAL (LIST) ----------
+async def send_main_menu(to_msisdn: str):
+    # IMPORTANTE: títulos <= ~24 caracteres para evitar 400
+    rows = [
+        {"id": "menu_publish",       "title": "Publicar artículo",   "description": "Crea una publicación"},
+        {"id": "menu_rent",          "title": "Alquilar por ID",     "description": "Inicia una solicitud"},
+        {"id": "menu_verify_me",     "title": "Verificar identidad", "description": "Aumenta la confianza"},
+        {"id": "menu_verify_lookup", "title": "Buscar verificado",   "description": "Consulta por teléfono"},
+        {"id": "menu_help",          "title": "Ayuda",               "description": "Cómo usar Renty"},
+    ]
+    return await send_list(
+        to_msisdn,
+        header_text="Renty",
+        body_text="¿Qué te gustaría hacer?",
+        button_text="Abrir menú",
+        rows=rows,
+        footer_text="Escribe MENU en cualquier momento",
+        section_title="Acciones",
+    )
+
+# ---------- verificación (simple usando reputation como flag) ----------
+async def set_user_verified_flag(msisdn: str, value: bool) -> bool:
+    """Marca verificado usando users.reputation (>=1 => verificado). Si usas users.verified boolean, ajusta este PATCH."""
+    payload = {"reputation": 1 if value else 0}
+    async with httpx.AsyncClient(timeout=15) as c:
+        r = await c.patch(
+            f"{SUPA_BASE}/users",
+            headers=SUPA_HEADERS_RETURN,
+            params={"wa_id": f"eq.{msisdn}", "select": "*"},
+            json=payload,
+        )
+        r.raise_for_status()
+        return True
+
+async def is_user_verified(msisdn: str) -> Optional[bool]:
+    async with httpx.AsyncClient(timeout=10) as c:
+        r = await c.get(
+            f"{SUPA_BASE}/users",
+            headers=SUPA_HEADERS,
+            params={"select": "reputation", "wa_id": f"eq.{msisdn}", "limit": 1},
+        )
+        r.raise_for_status()
+        rows = r.json()
+        if not rows:
+            return None
+        return (rows[0].get("reputation") or 0) >= 1
+
+# ---------- consentimiento + contactos ----------
+async def send_consent_buttons(to_msisdn: str, role: str, item_id: str):
+    body = (
+        f"¿Autorizas que compartamos tu contacto con la otra parte para el artículo #{item_id}?"
+        f"\nRol: {role.capitalize()}"
+    )
+    return await send_reply_buttons(
+        to_msisdn,
+        header_text="Consentimiento",
+        body_text=body,
+        footer_text="Renty • Privacidad",
+        buttons=[
+            {"id": f"consent_yes_{item_id}", "title": "Sí, autorizo"},
+            {"id": f"consent_no_{item_id}",  "title": "No"}
+        ]
+    )
+
+def build_vcard(display_name: str, phone_e164: str) -> dict:
+    vcard_text = (
+        "BEGIN:VCARD\n"
+        "VERSION:3.0\n"
+        f"N:{display_name};;;;\n"
+        f"FN:{display_name}\n"
+        f"TEL;type=CELL;type=VOICE;waid={phone_e164}:{phone_e164}\n"
+        "END:VCARD"
+    )
+    return {
+        "contacts": [
+            {
+                "name": {
+                    "formatted_name": display_name,
+                    "first_name": display_name
+                },
+                "phones": [
+                    {"phone": phone_e164, "type": "CELL", "wa_id": phone_e164}
+                ],
+                "vcard": vcard_text
+            }
+        ]
+    }
+
+async def send_contact(to_msisdn: str, display_name: str, phone_e164: str):
+    payload = {
+        "messaging_product": "whatsapp",
+        "to": to_msisdn,
+        "type": "contacts",
+        **build_vcard(display_name, phone_e164)
+    }
+    return await _post_messages(payload)
+
+async def introduce_parties(item_id: str, actor_msisdn: Optional[str] = None):
+    c = await get_consent(item_id)
+    if not c:
+        return
+    buyer = c["buyer_wa"]
+    seller = c["seller_wa"]
+    buyer_name = await get_user_name(buyer)
+    seller_name = await get_user_name(seller)
+
+    # envía contactos cruzados
+    await send_contact(buyer, seller_name, seller)
+    await send_contact(seller, buyer_name, buyer)
+
+    # mensaje de presentación
+    await send_text(
+        buyer,
+        f"Les presento a {seller_name} (vendedor) para coordinar el alquiler del artículo #{item_id}. ¡Éxitos! ✨"
+    )
+    await send_text(
+        seller,
+        f"{buyer_name} está interesado en el artículo #{item_id}. Ya tienen sus contactos para coordinar."
+    )
+
+    # tras terminar el flujo, ofrece menú al actor (si viene de un botón)
+    if actor_msisdn:
+        await send_main_menu(actor_msisdn)
+
+# ==================== helpers ====================
+PHONE_RX = re.compile(r"\+?\d{7,15}")
+
+def normalize_msisdn(s: str) -> str:
+    # Convierte a solo dígitos (como viene en from: de WhatsApp)
+    return re.sub(r"\D", "", s or "")
+
+# ==================== endpoints ====================
+@app.get("/webhook")
+async def verify_webhook(
+    hub_mode: str | None = Query(None, alias="hub.mode"),
+    hub_challenge: str | None = Query(None, alias="hub.challenge"),
+    hub_verify_token: str | None = Query(None, alias="hub.verify_token"),
+):
+    if hub_mode == "subscribe" and hub_verify_token == VERIFY_TOKEN:
+        return PlainTextResponse(content=hub_challenge or "", status_code=200)
+    raise HTTPException(status_code=403, detail="Verification token mismatch")
 
 @app.post("/webhook")
-async def handle_webhook(request: Request, background_tasks: BackgroundTasks):
-    try:
-        body = await request.body()
-        signature = request.headers.get("X-Hub-Signature-256", "")
+async def receive_webhook(request: Request):
+    body_bytes = await request.body()
+    signature = request.headers.get("X-Hub-Signature-256")
 
-        if not verify_webhook_signature(body, signature):
-            logger.error("Invalid webhook signature")
-            raise HTTPException(status_code=403, detail="Invalid signature")
+    if not verify_signature(signature, body_bytes):
+        raise HTTPException(status_code=403, detail="Invalid signature")
 
-        data = json.loads(body.decode())
+    data = await request.json()
 
-        if data.get("object") == "whatsapp_business_account":
-            for entry in data.get("entry", []):
-                for change in entry.get("changes", []):
-                    value = change.get("value", {})
+    if data.get("object") != "whatsapp_business_account":
+        return Response(status_code=200)
 
-                    # Capturar nombres desde contacts
-                    for contact in value.get("contacts", []) or []:
-                        wa_id = contact.get("wa_id")
-                        profile_name = ((contact.get("profile") or {}).get("name") or "").strip()
-                        if wa_id and profile_name:
-                            set_user_name(wa_id, profile_name)
+    for entry in data.get("entry", []):
+        for change in entry.get("changes", []):
+            value = change.get("value", {})
+            messages = value.get("messages")
+            if not messages:
+                continue
 
-                    if "messages" in value:
-                        for message in value["messages"]:
-                            await process_message(message)
+            for msg in messages:
+                from_msisdn = msg.get("from")
+                # asegura registro mínimo de usuario
+                await ensure_user(from_msisdn)
+                msg_type = msg.get("type")
 
-                    if "statuses" in value:
-                        for status in value["statuses"]:
-                            logger.info(f"Message status update: {status}")
+                # ========== respuestas interactivas ==========
+                if msg_type == "interactive":
+                    interactive = msg.get("interactive", {})
+                    itype = interactive.get("type")
 
-        return JSONResponse(content={"status": "success"})
+                    # ----- botones -----
+                    if itype == "button_reply":
+                        btn = interactive.get("button_reply", {}) or {}
+                        btn_id = btn.get("id")
+                        btn_title = btn.get("title", "")
 
-    except json.JSONDecodeError:
-        logger.error("Invalid JSON in webhook")
-        raise HTTPException(status_code=400, detail="Invalid JSON")
-    except Exception as e:
-        logger.error(f"Error processing webhook: {e}")
-        raise HTTPException(status_code=500, detail="Internal server error")
+                        # consentimiento: consent_yes_<ID> / consent_no_<ID>
+                        if btn_id and btn_id.startswith("consent_"):
+                            parts = btn_id.split("_")
+                            if len(parts) == 3:
+                                answer, item_id = parts[1], parts[2]
+                                cons = await set_consent_flag(item_id, from_msisdn, ok=(answer == "yes"))
+                                if not cons:
+                                    await send_text(from_msisdn, "No encontré la solicitud. Usa: ALQUILAR #ID.")
+                                    continue
 
-async def process_message(message: Dict):
-    try:
-        from_number = message.get("from")
-        message_id = message.get("id")
-        mtype = message.get("type")
+                                # si ambos autorizaron, presentar contactos y luego menú
+                                if cons.get("buyer_ok") and cons.get("seller_ok"):
+                                    await send_text(from_msisdn, "¡Perfecto! Conectando a ambas partes…")
+                                    await introduce_parties(item_id, actor_msisdn=from_msisdn)
+                                else:
+                                    # avisa a la otra parte
+                                    other = cons["seller_wa"] if from_msisdn == cons["buyer_wa"] else cons["buyer_wa"]
+                                    if answer == "yes":
+                                        await send_text(from_msisdn, "Gracias. Esperamos la autorización de la otra parte.")
+                                        await send_text(other, f"La otra parte ya autorizó. Falta tu confirmación para #{item_id}.")
+                                    else:
+                                        await send_text(from_msisdn, "Entendido. No compartiremos tus datos.")
+                                        await send_text(other, "La otra parte no autorizó compartir contacto. Conversación cerrada.")
+                                        await send_main_menu(from_msisdn)
+                            continue
 
-        maybe_name = ((message.get("profile") or {}).get("name") or "").strip()
-        if from_number and maybe_name:
-            set_user_name(from_number, maybe_name)
+                        # otros botones de ejemplo (si llegas a usarlos)
+                        if btn_id == "rent_yes":
+                            await send_text(from_msisdn, "¡Genial! ¿Qué fechas te sirven para el alquiler? (formato: YYYY-MM-DD a YYYY-MM-DD)")
+                            continue
+                        if btn_id == "see_details":
+                            await send_text(from_msisdn, "Detalles del artículo:\n• Estado: excelente\n• Precio: consultar publicación\n• Depósito: según acuerdo")
+                            continue
+                        if btn_id == "cancel":
+                            await send_text(from_msisdn, "Cancelado ✅.")
+                            await send_main_menu(from_msisdn)
+                            continue
 
-        logger.info(f"Processing message {message_id} from {from_number}, type: {mtype}")
+                        # Fallback para botones desconocidos
+                        await send_text(from_msisdn, f"Seleccionaste: {btn_title}")
+                        continue  # siguiente mensaje
 
-        if mtype == "text":
-            text_body = (message.get("text") or {}).get("body", "")
-            await process_text_message(from_number, text_body, message_id)
+                    # ----- lista -----
+                    if itype == "list_reply":
+                        row = interactive.get("list_reply", {}) or {}
+                        row_id = row.get("id")
+                        row_title = row.get("title", "")
 
-        elif mtype == "interactive":
-            # En NL_ONLY simplemente respondemos que escriba en texto
-            await process_interactive_message(from_number, (message.get("interactive") or {}))
+                        if row_id == "menu_publish":
+                            await set_session(from_msisdn, Step.PUBLISH_TITLE, {"title": "", "price": "", "location": ""})
+                            await send_text(from_msisdn, "Perfecto. Dime el *título* del artículo.")
+                            continue
 
-        elif mtype in ["image", "document", "audio", "video", "sticker"]:
-            media_response = (
-                "He recibido tu archivo. Para ayudarte mejor, cuéntame en texto qué necesitas (precio, disponibilidad, envíos, pagos o hacer un pedido)."
-            )
-            await send_message(build_text_message(from_number, media_response))
+                        if row_id == "menu_rent":
+                            await send_text(from_msisdn, "Para alquilar, envía: ALQUILAR #ID (ej: ALQUILAR #123)")
+                            continue
 
-        else:
-            logger.info(f"Unsupported message type: {mtype}")
-            await send_message(build_text_message(from_number, "Puedes escribir tu consulta en texto. 😊"))
+                        if row_id == "menu_verify_me":
+                            await set_user_verified_flag(from_msisdn, True)
+                            await send_text(from_msisdn, "Tu cuenta quedó *verificada* ✅. ¡Gracias!")
+                            await send_main_menu(from_msisdn)
+                            continue
 
-    except Exception as e:
-        logger.error(f"Error processing message: {e}")
+                        if row_id == "menu_verify_lookup":
+                            await set_session(from_msisdn, Step.VERIFY_LOOKUP_WAIT_NUMBER, {})
+                            await send_text(from_msisdn, "Envíame el *número de WhatsApp* del usuario (E.164, ej: +584123456789) para consultar si está verificado.")
+                            continue
 
-# -------------------- Admin: recargar KB --------------------
-@app.post("/admin/reload-kb")
-async def reload_kb():
-    global KNOWLEDGE_BASE, _KB_CACHE
-    KNOWLEDGE_BASE = load_knowledge_base(KNOWLEDGE_BASE_PATH)
-    _KB_CACHE = None  # reset cache
-    return {"status": "ok", "categories": len(KNOWLEDGE_BASE), "total_questions": get_total_questions(KNOWLEDGE_BASE)}
+                        if row_id == "menu_help":
+                            await send_text(from_msisdn,
+                                "Ayuda rápida:\n"
+                                "• PUBLICAR: crea un artículo\n"
+                                "• ALQUILAR #ID: inicia solicitud\n"
+                                "• Verificación: mejora la confianza\n"
+                                "• Escribe MENU para ver opciones"
+                            )
+                            continue
 
-# -------------------- Health & Stats --------------------
+                        # Fallback
+                        await send_text(from_msisdn, f"Opción elegida: {row_title}")
+                        continue
+
+                # ========== mensajes de texto ==========
+                # Extrae texto robustamente: usa body si es text, o caption si vino con imagen/documento
+                text = ""
+                if msg_type == "text":
+                    text = (msg.get("text") or {}).get("body", "") or ""
+                else:
+                    text = (msg.get("caption") or "")  # algunos tipos traen caption
+                text = text.strip()
+                upper = text.upper()
+
+                # Comando explícito para mostrar menú
+                if upper in {"MENU", "MENÚ"}:
+                    await send_main_menu(from_msisdn)
+                    continue
+
+                if text:
+                    st = await get_session(from_msisdn)
+                    s = step_val(st)
+
+                    # ---- flujo de consulta de verificación ----
+                    if s == Step.VERIFY_LOOKUP_WAIT_NUMBER.value:
+                        if not PHONE_RX.fullmatch(text):
+                            await send_text(from_msisdn, "Por favor envía un número válido (7-15 dígitos, puede empezar con +).")
+                            continue
+                        lookup = normalize_msisdn(text)
+                        status = await is_user_verified(lookup)
+                        if status is None:
+                            await send_text(from_msisdn, "Ese número aún no está registrado en Renty.")
+                        elif status:
+                            await send_text(from_msisdn, "✅ Usuario *verificado*.")
+                        else:
+                            await send_text(from_msisdn, "❌ Usuario *no verificado*.")
+                        await set_session(from_msisdn, Step.IDLE, {})
+                        await send_main_menu(from_msisdn)
+                        continue
+
+                    # ---- flujo ALQUILAR #ID (acepta ALQUILAR en cualquier parte) ----
+                    if "ALQUILAR" in upper:
+                        m = re.search(r"ALQUILAR\s*#?(\d+)", upper)
+                        item_id = (m.group(1) if m else "").strip()
+                        listing = await get_listing(item_id) if item_id else None
+                        if not listing:
+                            await send_text(from_msisdn, "No encuentro ese artículo. Asegúrate de usar: ALQUILAR #ID")
+                            if s == Step.IDLE.value:
+                                await send_main_menu(from_msisdn)
+                            continue
+
+                        seller = listing["owner_wa"]
+                        buyer = from_msisdn
+                        await upsert_consent(item_id, buyer, seller)
+
+                        await send_consent_buttons(buyer, "comprador", item_id)
+                        await send_consent_buttons(seller, "vendedor", item_id)
+                        await send_text(buyer, "Te pedimos autorización para compartir tu contacto con el vendedor.")
+                        await send_text(seller, f"Tienes una solicitud de alquiler para #{item_id}. ¿Autorizas compartir tu contacto?")
+                        continue
+
+                    # ---- captar fechas para crear solicitud de rental (opcional) ----
+                    # Formato esperado: "DEL 2025-09-10 AL 2025-09-12" o "2025-09-10 a 2025-09-12"
+                    if re.search(r"\d{4}-\d{2}-\d{2}.*\d{4}-\d{2}-\d{2}", text):
+                        # Necesitamos saber a qué artículo se refiere. Soportamos: "ALQUILAR #123 del 2025-09-10 al 2025-09-12"
+                        m_id = re.search(r"#(\d+)", text)
+                        if not m_id:
+                            await send_text(from_msisdn, "Para crear la solicitud necesito el ID del artículo. Ej: ALQUILAR #123 del 2025-09-10 al 2025-09-12")
+                            if s == Step.IDLE.value:
+                                await send_main_menu(from_msisdn)
+                            continue
+                        item_id = m_id.group(1)
+                        listing = await get_listing(item_id)
+                        if not listing:
+                            await send_text(from_msisdn, "No encuentro ese artículo. Revisa el ID.")
+                            if s == Step.IDLE.value:
+                                await send_main_menu(from_msisdn)
+                            continue
+                        m_dates = re.findall(r"(\d{4}-\d{2}-\d{2})", text)
+                        if len(m_dates) >= 2:
+                            start_iso, end_iso = m_dates[0], m_dates[1]
+                            result = await create_rental_request(int(item_id), from_msisdn, start_iso, end_iso)
+                            if result.get("ok"):
+                                await send_text(from_msisdn, f"Solicitud registrada para #{item_id} del {start_iso} al {end_iso}. Estado: requested ✅")
+                            else:
+                                if result.get("error") == "FECHAS_NO_DISPONIBLES":
+                                    await send_text(from_msisdn, "Lo siento, esas fechas no están disponibles para ese artículo.")
+                                else:
+                                    await send_text(from_msisdn, "Hubo un problema al registrar tu solicitud. Intenta de nuevo más tarde.")
+                            continue
+
+                    # ---- flujo PUBLICAR (acepta PUBLICAR en cualquier parte) ----
+                    if "PUBLICAR" in upper:
+                        await set_session(from_msisdn, Step.PUBLISH_TITLE, {"title": "", "price": "", "location": ""})
+                        await send_text(from_msisdn, "¡Genial! Dime el *título* del artículo.")
+                        continue
+
+                    # ---- pasos de publicación ----
+                    if s == Step.PUBLISH_TITLE.value:
+                        st["draft"]["title"] = text
+                        await set_session(from_msisdn, Step.PUBLISH_PRICE, st["draft"])
+                        await send_text(from_msisdn, "Anota el *precio por día* (ej: 10 USD).")
+                        continue
+
+                    if s == Step.PUBLISH_PRICE.value:
+                        st["draft"]["price"] = text
+                        await set_session(from_msisdn, Step.PUBLISH_LOCATION, st["draft"])
+                        await send_text(from_msisdn, "¿En qué *ciudad* está el artículo?")
+                        continue
+
+                    if s == Step.PUBLISH_LOCATION.value:
+                        st["draft"]["location"] = text
+                        d = st["draft"]
+                        item_id = await insert_listing(from_msisdn, d["title"], d["price"], d["location"])
+                        await set_session(from_msisdn, Step.IDLE, {})
+                        await send_text(
+                            from_msisdn,
+                            f"¡Listo! Publicación creada con ID #{item_id}:\n"
+                            f"• {d['title']}\n• Precio/día: {d['price']}\n• Ciudad: {d['location']}\n"
+                            f"Estado: activa ✅"
+                        )
+                        # Al terminar un flujo, mostramos menú
+                        await send_main_menu(from_msisdn)
+                        continue
+
+                    # ---- fallback: mostrar menú si está idle ----
+                    if s == Step.IDLE.value:
+                        await send_main_menu(from_msisdn)
+                    else:
+                        await send_text(from_msisdn, "Entendido. Continúa con el flujo actual o escribe MENU para ver opciones.")
+                    continue
+
+    return Response(status_code=200)
+
 @app.get("/")
-async def health_check():
-    return {
-        "status": "healthy",
-        "service": "Nurse Life Shop WhatsApp Chatbot",
-        "version": "1.1.0-nurse-nl-only",
-        "active_sessions": len(user_sessions),
-        "total_ratings": len(user_ratings),
-        "categories": len(KNOWLEDGE_BASE),
-        "total_questions": get_total_questions(KNOWLEDGE_BASE)
-    }
-
-@app.get("/stats")
-async def get_stats():
-    rating_counts = {}
-    for rating_data in user_ratings:
-        rating = rating_data["rating"]
-        rating_counts[rating] = rating_counts[rating] + 1 if rating in rating_counts else 1
-    return {
-        "active_sessions": len(user_sessions),
-        "total_ratings": len(user_ratings),
-        "rating_breakdown": rating_counts,
-        "knowledge_base_categories": len(KNOWLEDGE_BASE),
-        "total_questions": get_total_questions(KNOWLEDGE_BASE)
-    }
-
-@app.post("/send-message")
-async def send_manual_message(request: Request):
-    try:
-        data = await request.json()
-        to = data.get("to")
-        message = data.get("message")
-        message_type = data.get("type", "text")
-
-        if not to or not message:
-            raise HTTPException(status_code=400, detail="Missing 'to' or 'message' fields")
-
-        if message_type == "text":
-            payload = build_text_message(to, message)
-        else:
-            raise HTTPException(status_code=400, detail="Only text messages supported in manual send")
-
-        ok = await send_message(payload)
-        if ok:
-            return {"status": "success", "message": "Message sent"}
-        else:
-            raise HTTPException(status_code=500, detail="Failed to send message")
-    except json.JSONDecodeError:
-        raise HTTPException(status_code=400, detail="Invalid JSON")
-
-@app.delete("/sessions/{phone_number}")
-async def clear_user_session(phone_number: str):
-    if phone_number in user_sessions:
-        del user_sessions[phone_number]
-        return {"status": "success", "message": f"Session cleared for {phone_number}"}
-    else:
-        raise HTTPException(status_code=404, detail="Session not found")
-
-@app.delete("/sessions")
-async def clear_all_sessions():
-    count = len(user_sessions)
-    user_sessions.clear()
-    return {"status": "success", "message": f"Cleared {count} sessions"}
-
-# -------------------- KB Loaders --------------------
-def load_knowledge_base(path: str) -> Dict[str, Any]:
-    with open(path, "r", encoding="utf-8") as f:
-        kb = json.load(f)
-    _validate_kb(kb)
-    logger.info(f"Knowledge base cargada: {len(kb)} categorías")
-    return kb
-
-def get_total_questions(kb: Dict[str, Any]) -> int:
-    total = 0
-    for cat in kb.values():
-        total += len(cat.get("questions", []))
-    return total
-
-# -------------------- Startup --------------------
-@app.on_event("startup")
-async def startup_event():
-    global KNOWLEDGE_BASE
-    try:
-        KNOWLEDGE_BASE = load_knowledge_base(KNOWLEDGE_BASE_PATH)
-    except Exception as e:
-        logger.error(f"No se pudo cargar el knowledge_base.json: {e}")
-        KNOWLEDGE_BASE = {}
-    required_vars = {
-        "WHATSAPP_TOKEN": WHATSAPP_TOKEN,
-        "PHONE_NUMBER_ID": PHONE_NUMBER_ID,
-        "VERIFY_TOKEN": VERIFY_TOKEN
-    }
-    missing = [k for k, v in required_vars.items() if not v]
-    if missing:
-        logger.error(f"Missing required env vars: {', '.join(missing)}")
-    logger.info(
-        f"Bot iniciado (NL_ONLY={NL_ONLY}). KB categorías={len(KNOWLEDGE_BASE)} "
-        f"preguntas={get_total_questions(KNOWLEDGE_BASE)}"
-    )
-
-# -------------------- Main --------------------
-if __name__ == "__main__":
-    import uvicorn
-    print("Starting Nurse Life Shop WhatsApp Chatbot (NL-only)...")
-    print("Env check:")
-    print(f"  WHATSAPP_TOKEN: {'✓' if WHATSAPP_TOKEN and 'your_' not in WHATSAPP_TOKEN.lower() else '✗'}")
-    print(f"  PHONE_NUMBER_ID: {'✓' if PHONE_NUMBER_ID and 'your_' not in PHONE_NUMBER_ID.lower() else '✗'}")
-    print(f"  VERIFY_TOKEN: {'✓' if VERIFY_TOKEN and 'your_' not in VERIFY_TOKEN.lower() else '✗'}")
-    print(f"  APP_SECRET: {'✓' if APP_SECRET and 'your_' not in APP_SECRET.lower() else '✗ (optional)'}")
-    print(f"  KNOWLEDGE_BASE_PATH: {KNOWLEDGE_BASE_PATH}")
-    print(f"  SMTP_USER set: {'✓' if SMTP_USER else '✗'}")
-    print(f"  SMTP_PASS set: {'✓' if SMTP_PASS else '✗'}")
-    print(f"  OPS_EMAIL_FROM: {OPS_EMAIL_FROM}")
-    print(f"  OPS_EMAIL_TO: {OPS_EMAIL_TO}")
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True, log_level="info")
+async def health():
+    return {"status": "ok"}
