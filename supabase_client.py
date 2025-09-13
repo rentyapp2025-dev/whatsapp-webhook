@@ -5,6 +5,7 @@ import re
 from datetime import datetime
 from typing import Optional, Dict, Any
 
+# === Config ===
 SUPABASE_URL = os.environ["SUPABASE_URL"].rstrip("/")
 SUPABASE_KEY = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
 
@@ -19,9 +20,15 @@ HEADERS_RETURN = {**HEADERS, "Prefer": "return=representation"}
 # Para upsert por clave única (por ej. sessions.wa_id)
 HEADERS_UPSERT = {**HEADERS_RETURN, "Prefer": "resolution=merge-duplicates"}
 
-# ===================== utilidades =====================
+# =========================================================
+# Utilidades
+# =========================================================
 
 def _parse_price(text: str) -> float:
+    """
+    Extrae el primer número del texto y lo devuelve como float.
+    Útil si decides guardar un 'price_num' adicional en el futuro.
+    """
     if not text:
         return 0.0
     m = re.search(r"(\d+(?:[.,]\d+)?)", text)
@@ -35,7 +42,9 @@ def _date_to_utc_iso(s: str) -> str:
     # Si ya viene con hora, asumimos que es ISO válido; si no trae tz, Postgres hará conversión según config
     return s
 
-# ===================== tus funciones (sin cambios) =====================
+# =========================================================
+# Ratings / Orders (sin cambios funcionales)
+# =========================================================
 
 async def insert_rating(phone: str, name: str, rating: str):
     async with httpx.AsyncClient(timeout=20.0) as client:
@@ -67,9 +76,15 @@ async def get_rating_counts():
         r.raise_for_status()
         return r.json()[0]
 
-# ===================== NUEVO: Users =====================
+# =========================================================
+# Users
+# =========================================================
 
 async def ensure_user(msisdn: str) -> Dict[str, Any]:
+    """
+    Garantiza que exista un usuario con wa_id = msisdn.
+    Si no existe, lo crea con name igual al msisdn.
+    """
     async with httpx.AsyncClient(timeout=20.0) as client:
         # Busca por wa_id
         r = await client.get(
@@ -104,7 +119,9 @@ async def get_user_name(msisdn: str) -> str:
             return rows[0]["name"]
         return msisdn
 
-# ===================== NUEVO: Sessions (state machine) =====================
+# =========================================================
+# Sessions (state machine)
+# =========================================================
 
 async def set_session(msisdn: str, step: str, draft: dict | None = None):
     payload = {
@@ -137,60 +154,79 @@ async def get_session(msisdn: str) -> Dict[str, Any]:
             return {"step": row.get("step", "idle"), "draft": row.get("draft", {})}
         return {"step": "idle", "draft": {}}
 
-# ===================== NUEVO: Listings =====================
+# =========================================================
+# Listings (owner_wa + price TEXT)
+# =========================================================
 
 async def insert_listing(owner_msisdn: str, title: str, price_text: str, location: str) -> str:
-    # Resuelve owner_id
-    owner = await ensure_user(owner_msisdn)
-    owner_id = owner["id"]
-    price = _parse_price(price_text)
+    """
+    Inserta una publicación.
+    Esquema esperado en 'listings':
+      - owner_wa TEXT
+      - title TEXT
+      - price TEXT (p.ej. "10 USD/día")
+      - location TEXT
+      - status TEXT
+    """
     async with httpx.AsyncClient(timeout=20.0) as client:
         r = await client.post(
             f"{BASE}/listings",
             headers=HEADERS_RETURN,
             params={"select": "*"},
             json={
-                "owner_id": owner_id,
+                "owner_wa": owner_msisdn,  # <— clave: número E.164 sin '+'
                 "title": title,
-                "price_per_day": price,
+                "price": price_text,
                 "location": location,
                 "status": "active",
             },
         )
+        if r.status_code >= 400:
+            print("insert_listing ERROR:", r.status_code, r.text)
         r.raise_for_status()
         return str(r.json()[0]["id"])
 
 async def get_listing(item_id: str) -> Optional[Dict[str, Any]]:
+    """
+    Devuelve la fila de listings y añade:
+      - owner_name (consultado en users por owner_wa)
+    """
     async with httpx.AsyncClient(timeout=20.0) as client:
-        # Embebe datos del owner con la relación FK owner_id -> users.id
         r = await client.get(
             f"{BASE}/listings",
             headers=HEADERS,
-            params={
-                "select": "*,owner:owner_id(wa_id,name)",
-                "id": f"eq.{item_id}",
-                "limit": 1,
-            },
+            params={"select": "*", "id": f"eq.{item_id}", "limit": 1},
         )
         r.raise_for_status()
         rows = r.json()
         if not rows:
             return None
         listing = rows[0]
-        owner = listing.get("owner") or {}
-        listing["owner_wa"] = owner.get("wa_id")
-        listing["owner_name"] = owner.get("name") or owner.get("wa_id")
+        try:
+            listing["owner_name"] = await get_user_name(listing["owner_wa"])
+        except Exception:
+            listing["owner_name"] = listing.get("owner_wa")
         return listing
 
-# ===================== NUEVO: Consents =====================
+# =========================================================
+# Consents (usa item_id)
+# =========================================================
 
-async def upsert_consent(listing_id: str, buyer_msisdn: str, seller_msisdn: str):
-    """Haz GET y luego POST/PATCH según exista; así no dependes de un índice único en listing_id."""
+async def upsert_consent(item_id: str, buyer_msisdn: str, seller_msisdn: str):
+    """
+    Haz GET y luego POST/PATCH según exista; así no dependes de un índice único en item_id.
+    Tabla 'consents' espera:
+      - item_id INT (FK a listings.id)
+      - buyer_wa TEXT
+      - seller_wa TEXT
+      - buyer_ok BOOL (nullable)
+      - seller_ok BOOL (nullable)
+    """
     async with httpx.AsyncClient(timeout=20.0) as client:
         g = await client.get(
             f"{BASE}/consents",
             headers=HEADERS,
-            params={"select": "*", "listing_id": f"eq.{listing_id}", "limit": 1},
+            params={"select": "*", "item_id": f"eq.{item_id}", "limit": 1},
         )
         g.raise_for_status()
         rows = g.json()
@@ -209,28 +245,28 @@ async def upsert_consent(listing_id: str, buyer_msisdn: str, seller_msisdn: str)
                 f"{BASE}/consents",
                 headers=HEADERS_RETURN,
                 params={"select": "*"},
-                json={"listing_id": int(listing_id), "buyer_wa": buyer_msisdn, "seller_wa": seller_msisdn},
+                json={"item_id": int(item_id), "buyer_wa": buyer_msisdn, "seller_wa": seller_msisdn},
             )
             c.raise_for_status()
             return c.json()[0]
 
-async def get_consent(listing_id: str) -> Optional[Dict[str, Any]]:
+async def get_consent(item_id: str) -> Optional[Dict[str, Any]]:
     async with httpx.AsyncClient(timeout=20.0) as client:
         r = await client.get(
             f"{BASE}/consents",
             headers=HEADERS,
-            params={"select": "*", "listing_id": f"eq.{listing_id}", "limit": 1},
+            params={"select": "*", "item_id": f"eq.{item_id}", "limit": 1},
         )
         r.raise_for_status()
         rows = r.json()
         return rows[0] if rows else None
 
-async def set_consent_flag(listing_id: str, msisdn: str, ok: bool) -> Optional[Dict[str, Any]]:
+async def set_consent_flag(item_id: str, msisdn: str, ok: bool) -> Optional[Dict[str, Any]]:
     async with httpx.AsyncClient(timeout=20.0) as client:
         g = await client.get(
             f"{BASE}/consents",
             headers=HEADERS,
-            params={"select": "*", "listing_id": f"eq.{listing_id}", "limit": 1},
+            params={"select": "*", "item_id": f"eq.{item_id}", "limit": 1},
         )
         g.raise_for_status()
         rows = g.json()
@@ -248,31 +284,42 @@ async def set_consent_flag(listing_id: str, msisdn: str, ok: bool) -> Optional[D
         upd.raise_for_status()
         return upd.json()[0]
 
-# ===================== NUEVO: Rentals =====================
+# =========================================================
+# Rentals (simple: buyer_wa/seller_wa + fechas)
+# =========================================================
 
 async def create_rental_request(listing_id: int, renter_msisdn: str, start_iso: str, end_iso: str) -> Dict[str, Any]:
-    renter = await ensure_user(renter_msisdn)
-    start_s = _date_to_utc_iso(start_iso)
-    end_s = _date_to_utc_iso(end_iso)
-    period_literal = f"[{start_s},{end_s})"  # Postgres parsea tstzrange en texto
+    """
+    Crea una solicitud en 'rentals' con:
+      - item_id INT
+      - buyer_wa TEXT (quien alquila)
+      - seller_wa TEXT (dueño del listing)
+      - start_date TEXT/DATE (YYYY-MM-DD)
+      - end_date TEXT/DATE (YYYY-MM-DD)
+      - status TEXT ('requested')
+    """
+    listing = await get_listing(str(listing_id))
+    if not listing:
+        return {"ok": False, "error": "LISTING_NOT_FOUND"}
 
     async with httpx.AsyncClient(timeout=20.0) as client:
-        try:
-            r = await client.post(
-                f"{BASE}/rentals",
-                headers=HEADERS_RETURN,
-                params={"select": "*"},
-                json={
-                    "listing_id": int(listing_id),
-                    "renter_id": renter["id"],
-                    "period": period_literal,
-                    "status": "requested",
-                },
-            )
-            r.raise_for_status()
-            return {"ok": True, "rental": r.json()[0]}
-        except httpx.HTTPStatusError as e:
-            txt = e.response.text
-            if "no_overlap_per_listing" in txt or "overlap" in txt:
+        r = await client.post(
+            f"{BASE}/rentals",
+            headers=HEADERS_RETURN,
+            params={"select": "*"},
+            json={
+                "item_id": int(listing_id),
+                "buyer_wa": renter_msisdn,
+                "seller_wa": listing["owner_wa"],
+                "start_date": start_iso,  # "YYYY-MM-DD"
+                "end_date": end_iso,      # "YYYY-MM-DD"
+                "status": "requested",
+            },
+        )
+        if r.status_code >= 400:
+            txt = r.text
+            print("create_rental_request ERROR:", r.status_code, txt)
+            if "overlap" in txt or "no_overlap" in txt:
                 return {"ok": False, "error": "FECHAS_NO_DISPONIBLES"}
-            return {"ok": False, "error": "DB_ERROR", "detail": txt}
+        r.raise_for_status()
+        return {"ok": True, "row": r.json()[0]}
