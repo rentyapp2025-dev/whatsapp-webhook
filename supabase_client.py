@@ -17,8 +17,11 @@ HEADERS = {
 }
 # Para que PostgREST devuelva la fila insertada/actualizada
 HEADERS_RETURN = {**HEADERS, "Prefer": "return=representation"}
-# Para upsert por clave única (por ej. sessions.wa_id)
-HEADERS_UPSERT = {**HEADERS_RETURN, "Prefer": "resolution=merge-duplicates"}
+# Para upsert por clave única (por ej. sessions.wa_id) — combina ambas preferencias
+HEADERS_UPSERT = {
+    **HEADERS,
+    "Prefer": "return=representation,resolution=merge-duplicates",
+}
 
 # =========================================================
 # Utilidades
@@ -216,7 +219,7 @@ async def upsert_consent(item_id: str, buyer_msisdn: str, seller_msisdn: str):
     async with httpx.AsyncClient(timeout=20.0) as client:
         r = await client.post(
             f"{BASE}/consents",
-            headers=HEADERS_UPSERT,  # Prefer: resolution=merge-duplicates
+            headers=HEADERS_UPSERT,  # Prefer: return=representation,resolution=merge-duplicates
             params={"on_conflict": "item_id", "select": "*"},
             json={
                 "item_id": int(item_id),
