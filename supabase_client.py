@@ -216,7 +216,7 @@ async def get_listing(item_id: str) -> Optional[Dict[str, Any]]:
         return listing
 
 # =========================================================
-# Consents (usa item_id)
+# Consents (1 fila por item_id; requiere UNIQUE en consents.item_id)
 # =========================================================
 
 async def upsert_consent(item_id: str, buyer_msisdn: str, seller_msisdn: str):
@@ -300,6 +300,30 @@ async def set_consent_flag(item_id: str, msisdn: str, ok: bool) -> Optional[Dict
         )
         upd.raise_for_status()
         return upd.json()[0]
+
+# Idempotencia: marcar que ya se presentaron los contactos para este item
+async def mark_introduced_once(item_id: str) -> bool:
+    """
+    Devuelve True si marcó 'introduced_at' (aún no estaba marcada).
+    Devuelve False si ya estaba marcada previamente.
+    Requiere columna introduced_at timestamptz NULL en consents.
+    """
+    ts = datetime.utcnow().isoformat()
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        # Solo actualizar si introduced_at IS NULL
+        upd = await client.patch(
+            f"{BASE}/consents",
+            headers=HEADERS_RETURN,
+            params={
+                "item_id": f"eq.{item_id}",
+                "introduced_at": "is.null",
+                "select": "id,introduced_at",
+            },
+            json={"introduced_at": ts},
+        )
+        upd.raise_for_status()
+        rows = upd.json() or []
+        return len(rows) > 0
 
 # =========================================================
 # Rentals (simple: buyer_wa/seller_wa + fechas)
