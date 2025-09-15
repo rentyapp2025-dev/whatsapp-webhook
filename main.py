@@ -511,20 +511,30 @@ async def receive_webhook(request: Request):
                                 await send_main_menu(from_msisdn)
                             continue
 
-                        # ===== NUEVO: si está rentado ahora, avisar y no continuar =====
+                        # ===== Opción A: bloquear auto-alquiler =====
+                        if from_msisdn == (listing.get("owner_wa") or ""):
+                            await send_text(
+                                from_msisdn,
+                                "No puedes alquilar tu propio artículo 🙈. Prueba con otro ID."
+                            )
+                            if s == Step.IDLE.value:
+                                await send_main_menu(from_msisdn)
+                            continue
+                        # ===== FIN bloqueo =====
+
+                        # Si está rentado ahora, avisar y no continuar
                         busy = await get_current_rental_days_left(item_id)
                         if busy:
                             end_str = busy["end_date"]
                             human = _human_days(busy["days_left"])
                             await send_text(
                                 from_msisdn,
-                                f"Lo siento, el artículo #{item_id} está *en renta* hasta el {end_str}. "
+                                f"Lo siento, el artículo #{item_id} está actualmente en renta hasta el {end_str}. "
                                 f"Quedan {human} para que esté disponible."
                             )
                             if s == Step.IDLE.value:
                                 await send_main_menu(from_msisdn)
                             continue
-                        # ===== FIN NUEVO =====
 
                         seller = listing["owner_wa"]
                         buyer = from_msisdn
@@ -554,26 +564,20 @@ async def receive_webhook(request: Request):
                                 await send_main_menu(from_msisdn)
                             continue
 
-                        # ===== NUEVO: bloquear si el ítem está rentado hoy y el inicio propuesto ocurre antes del fin =====
+                        # ===== Opción A: bloquear auto-alquiler también en flujo con fechas =====
+                        if from_msisdn == (listing.get("owner_wa") or ""):
+                            await send_text(
+                                from_msisdn,
+                                "No puedes alquilar tu propio artículo 🙈. Indica otro ID."
+                            )
+                            if s == Step.IDLE.value:
+                                await send_main_menu(from_msisdn)
+                            continue
+                        # ===== FIN bloqueo =====
+
                         m_dates = re.findall(r"(\d{4}-\d{2}-\d{2})", text)
                         if len(m_dates) >= 2:
                             start_iso, end_iso = m_dates[0], m_dates[1]
-                            busy = await get_current_rental_days_left(item_id)
-                            if busy:
-                                start_d = _parse_date_any(start_iso)
-                                end_busy = _parse_date_any(busy["end_date"])
-                                if start_d and end_busy and start_d < end_busy:
-                                    human = _human_days(busy["days_left"])
-                                    await send_text(
-                                        from_msisdn,
-                                        f"El artículo #{item_id} está *en renta* hasta el {busy['end_date']}. "
-                                        f"Quedan {human} para que esté disponible."
-                                    )
-                                    if s == Step.IDLE.value:
-                                        await send_main_menu(from_msisdn)
-                                    continue
-                            # ===== FIN NUEVO =====
-
                             result = await create_rental_request(int(item_id), from_msisdn, start_iso, end_iso)
                             if result.get("ok"):
                                 await send_text(from_msisdn, f"Solicitud registrada para #{item_id} del {start_iso} al {end_iso}. Estado: requested ✅")
