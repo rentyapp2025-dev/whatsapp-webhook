@@ -17,6 +17,8 @@ from supabase_client import (
     insert_listing, get_listing,
     upsert_consent, set_consent_flag, get_consent,
     create_rental_request,
+    # NUEVO: idempotencia de presentación
+    mark_introduced_once,
 )
 
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "")
@@ -265,19 +267,25 @@ async def introduce_parties(item_id: str, actor_msisdn: Optional[str] = None):
     buyer_name = await get_user_name(buyer)
     seller_name = await get_user_name(seller)
 
-    # envía contactos cruzados
-    await send_contact(buyer, seller_name, seller)
-    await send_contact(seller, buyer_name, buyer)
+    # envía contactos cruzados (protegido ante errores para evitar reintentos de Meta)
+    try:
+        await send_contact(buyer, seller_name, seller)
+        await send_contact(seller, buyer_name, buyer)
+    except httpx.HTTPStatusError as e:
+        print("Error enviando contactos:", e.response.status_code, e.response.text)
 
     # mensaje de presentación
-    await send_text(
-        buyer,
-        f"Les presento a {seller_name} (vendedor) para coordinar el alquiler del artículo #{item_id}. ¡Éxitos! ✨"
-    )
-    await send_text(
-        seller,
-        f"{buyer_name} está interesado en el artículo #{item_id}. Ya tienen sus contactos para coordinar."
-    )
+    try:
+        await send_text(
+            buyer,
+            f"Les presento a {seller_name} (vendedor) para coordinar el alquiler del artículo #{item_id}. ¡Éxitos! ✨"
+        )
+        await send_text(
+            seller,
+            f"{buyer_name} está interesado en el artículo #{item_id}. Ya tienen sus contactos para coordinar."
+        )
+    except httpx.HTTPStatusError as e:
+        print("Error enviando presentación:", e.response.status_code, e.response.text)
 
     # tras terminar el flujo, ofrece menú al actor (si viene de un botón)
     if actor_msisdn:
@@ -443,11 +451,17 @@ async def receive_webhook(request: Request):
                                     await send_text(from_msisdn, "No encontré la solicitud. Usa: ALQUILAR #ID.")
                                     continue
 
-                                # si ambos autorizaron, presentar contactos y luego intentar crear rental si ya hay fechas
+                                # si ambos autorizaron, presentar contactos (idempotente) y luego intentar crear rental si ya hay fechas
                                 if cons.get("buyer_ok") and cons.get("seller_ok"):
-                                    await send_text(from_msisdn, "¡Perfecto! Conectando a ambas partes…")
-                                    await introduce_parties(item_id, actor_msisdn=from_msisdn)
-                                    # NUEVO: intenta crear rental si el comprador ya envió fechas
+                                    # Solo presentamos 1 vez usando introduced_at
+                                    try:
+                                        if await mark_introduced_once(item_id):
+                                            await send_text(from_msisdn, "¡Perfecto! Conectando a ambas partes…")
+                                            await introduce_parties(item_id, actor_msisdn=from_msisdn)
+                                    except Exception as e:
+                                        # No rompemos el flujo si falla la marca, solo log
+                                        print("mark_introduced_once error:", str(e))
+                                    # Intentar crear rental si el comprador ya envió fechas
                                     await finalize_rental_if_ready(item_id)
                                 else:
                                     # avisa a la otra parte
