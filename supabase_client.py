@@ -245,54 +245,63 @@ async def get_consent(item_id: str) -> Optional[Dict[str, Any]]:
         return rows[0] if rows else None
 
 async def set_consent_flag(item_id: str, msisdn: str, ok: bool) -> Optional[Dict[str, Any]]:
-    """
-    Marca buyer_ok o seller_ok según quién presione el botón.
-    - Si existen duplicados (varias filas para el mismo item_id), actualiza TODAS las filas
-      de ese item_id para evitar estados inconsistentes.
-    - Devuelve una de las filas actualizadas (la primera).
-    """
+    import re
+
+    def _norm(x: Optional[str]) -> str:
+        return re.sub(r"\D", "", x or "")
+
+    actor = _norm(msisdn)
+
     async with httpx.AsyncClient(timeout=20.0) as client:
-        # 1) Leer todas las filas para ese item_id
+        # 1) Leer todas las filas del item
         g = await client.get(
             f"{BASE}/consents",
             headers=HEADERS,
-            params={"select": "*", "item_id": f"eq.{item_id}"},
+            params={"select": "id,buyer_wa,seller_wa,buyer_ok,seller_ok", "item_id": f"eq.{item_id}"},
         )
         g.raise_for_status()
         rows = g.json()
         if not rows:
             return None
 
-        # 2) Decidir qué campo actualizar (buyer_ok o seller_ok)
-        field: str
-        # ¿el msisdn coincide con alguno de los buyer_wa/seller_wa?
-        found_role = None
+        # 2) Determinar rol real del actor (comprador/vendedor) normalizando números
+        role: Optional[str] = None
         for r in rows:
-            if msisdn == r.get("buyer_wa"):
-                found_role = "buyer_ok"
+            if _norm(r.get("buyer_wa")) == actor:
+                role = "buyer_ok"
                 break
-            if msisdn == r.get("seller_wa"):
-                found_role = "seller_ok"
+            if _norm(r.get("seller_wa")) == actor:
+                role = "seller_ok"
                 break
-        if found_role:
-            field = found_role
-        else:
-            # Fallback (por si hay un desalineamiento de datos):
-            # si no coincide con seller_wa de la primera fila, asumimos comprador.
-            field = "buyer_ok" if msisdn != (rows[0].get("seller_wa") or "") else "seller_ok"
+        if role is None:
+            # Fallback conservador: si no encontramos match exacto, asumimos vendedor
+            role = "seller_ok"
 
-        # 3) PATCH en bloque por item_id (actualiza todas las filas duplicadas si las hubiera)
+        # 3) Actualizar TODAS las filas del item (evita que comprador/vendedor queden en filas distintas)
         upd = await client.patch(
             f"{BASE}/consents",
-            headers=HEADERS_RETURN,
-            params={"item_id": f"eq.{item_id}", "select": "*"},
-            json={field: bool(ok)},
+            headers=HEADERS_RETURN,  # Prefer: return=representation
+            params={"item_id": f"eq.{item_id}", "select": "id,buyer_wa,seller_wa,buyer_ok,seller_ok"},
+            json={role: bool(ok)},
         )
         upd.raise_for_status()
-        updated = upd.json() or rows
 
-        # 4) Devolver una fila (la primera) para evaluar si ambos consintieron
-        return updated[0]
+        # 4) Releer estado agregado y devolver un objeto representativo con ambos flags consolidados
+        g2 = await client.get(
+            f"{BASE}/consents",
+            headers=HEADERS,
+            params={"select": "id,buyer_wa,seller_wa,buyer_ok,seller_ok", "item_id": f"eq.{item_id}"},
+        )
+        g2.raise_for_status()
+        rows2 = g2.json() or []
+
+        buyer_ok_any = any(bool(r.get("buyer_ok")) for r in rows2)
+        seller_ok_any = any(bool(r.get("seller_ok")) for r in rows2)
+
+        rep = rows2[0] if rows2 else {"buyer_wa": None, "seller_wa": None}
+        rep["buyer_ok"] = buyer_ok_any
+        rep["seller_ok"] = seller_ok_any
+        return rep
 
 # =========================================================
 # Rentals (simple: buyer_wa/seller_wa + fechas)
