@@ -213,42 +213,22 @@ async def get_listing(item_id: str) -> Optional[Dict[str, Any]]:
 # =========================================================
 
 async def upsert_consent(item_id: str, buyer_msisdn: str, seller_msisdn: str):
-    """
-    Haz GET y luego POST/PATCH según exista; así no dependes de un índice único en item_id.
-    Tabla 'consents' espera:
-      - item_id INT (FK a listings.id)
-      - buyer_wa TEXT
-      - seller_wa TEXT
-      - buyer_ok BOOL (nullable)
-      - seller_ok BOOL (nullable)
-    """
     async with httpx.AsyncClient(timeout=20.0) as client:
-        g = await client.get(
+        r = await client.post(
             f"{BASE}/consents",
-            headers=HEADERS,
-            params={"select": "*", "item_id": f"eq.{item_id}", "limit": 1},
+            headers=HEADERS_UPSERT,  # Prefer: resolution=merge-duplicates
+            params={"on_conflict": "item_id", "select": "*"},
+            json={
+                "item_id": int(item_id),
+                "buyer_wa": buyer_msisdn,
+                "seller_wa": seller_msisdn,
+                # opcional: si quieres forzar valores iniciales en vez de defaults de DB:
+                # "buyer_ok": False,
+                # "seller_ok": False,
+            },
         )
-        g.raise_for_status()
-        rows = g.json()
-        if rows:
-            cid = rows[0]["id"]
-            p = await client.patch(
-                f"{BASE}/consents",
-                headers=HEADERS_RETURN,
-                params={"id": f"eq.{cid}", "select": "*"},
-                json={"buyer_wa": buyer_msisdn, "seller_wa": seller_msisdn},
-            )
-            p.raise_for_status()
-            return p.json()[0]
-        else:
-            c = await client.post(
-                f"{BASE}/consents",
-                headers=HEADERS_RETURN,
-                params={"select": "*"},
-                json={"item_id": int(item_id), "buyer_wa": buyer_msisdn, "seller_wa": seller_msisdn},
-            )
-            c.raise_for_status()
-            return c.json()[0]
+        r.raise_for_status()
+        return r.json()[0]
 
 async def get_consent(item_id: str) -> Optional[Dict[str, Any]]:
     async with httpx.AsyncClient(timeout=20.0) as client:
