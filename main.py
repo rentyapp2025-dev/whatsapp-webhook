@@ -46,6 +46,8 @@ class Step(str, Enum):
     PUBLISH_PRICE = "publish_price"
     PUBLISH_LOCATION = "publish_location"
     VERIFY_LOOKUP_WAIT_NUMBER = "verify_lookup_wait_number"
+    # NUEVO: esperar fechas para el alquiler de un item concreto
+    RENTAL_WAIT_DATES = "rental_wait_dates"
 
 # Helpers de estado para evitar comparaciones Enum vs str
 def step_val(st: Dict[str, Any] | None) -> str:
@@ -288,7 +290,7 @@ def normalize_msisdn(s: str) -> str:
     # Convierte a solo dígitos (como viene en from: de WhatsApp)
     return re.sub(r"\D", "", s or "")
 
-# ===== NUEVO: utilidades de disponibilidad =====
+# ===== NUEVO: utilidades de disponibilidad y fechas =====
 def _parse_date_any(s: str) -> Optional[date]:
     if not s:
         return None
@@ -305,6 +307,16 @@ def _human_days(n: int) -> str:
     if n <= 0:
         return "menos de 1 día"
     return "1 día" if n == 1 else f"{n} días"
+
+def _extract_dates(text: str) -> Optional[tuple[str, str]]:
+    """
+    Devuelve (YYYY-MM-DD, YYYY-MM-DD) si encuentra al menos dos fechas.
+    Acepta "2025-09-10 a 2025-09-12", "del 2025-09-10 al 2025-09-12", etc.
+    """
+    m_dates = re.findall(r"(\d{4}-\d{2}-\d{2})", text)
+    if len(m_dates) >= 2:
+        return m_dates[0], m_dates[1]
+    return None
 
 async def get_current_rental_days_left(item_id: str) -> Optional[Dict[str, Any]]:
     """
@@ -332,7 +344,46 @@ async def get_current_rental_days_left(item_id: str) -> Optional[Dict[str, Any]]
         if sd <= today < ed:
             return {"end_date": ed.isoformat(), "days_left": (ed - today).days}
     return None
-# ===== fin utilidades de disponibilidad =====
+# ===== fin utilidades =====
+
+# ===== NUEVO: finalización automática del rental si ya tenemos todo =====
+async def finalize_rental_if_ready(item_id: str) -> None:
+    """
+    Si buyer y seller ya autorizaron y el comprador ya envió fechas
+    (guardadas en su sesión RENTAL_WAIT_DATES), crea el rental.
+    """
+    cons = await get_consent(item_id)
+    if not cons:
+        return
+    if not (cons.get("buyer_ok") and cons.get("seller_ok")):
+        return
+
+    buyer = cons["buyer_wa"]
+    seller = cons["seller_wa"]
+    # Revisa la sesión del comprador para ver si ya envió fechas
+    st = await get_session(buyer)
+    if step_val(st) != Step.RENTAL_WAIT_DATES.value:
+        # Puede que ya hayamos limpiado la sesión o nunca se pidieron fechas
+        return
+    d = st.get("draft") or {}
+    start_iso = d.get("start_iso")
+    end_iso = d.get("end_iso")
+    if not (start_iso and end_iso):
+        # Si aún no hay fechas, pídeselas de nuevo de forma amable
+        await send_text(buyer, f"Perfecto, ya están verificados tú y el vendedor para #{item_id}. Envía las fechas (YYYY-MM-DD a YYYY-MM-DD) para registrar la solicitud.")
+        return
+
+    # Crear la solicitud
+    res = await create_rental_request(int(item_id), buyer, start_iso, end_iso)
+    if res.get("ok"):
+        await send_text(buyer, f"Solicitud registrada para #{item_id} del {start_iso} al {end_iso}. Estado: requested ✅")
+        await send_text(seller, f"Recibiste una solicitud de alquiler para #{item_id} del {start_iso} al {end_iso}.")
+        await set_session(buyer, Step.IDLE, {})
+    else:
+        if res.get("error") == "FECHAS_NO_DISPONIBLES":
+            await send_text(buyer, "Lo siento, esas fechas no están disponibles para ese artículo.")
+        else:
+            await send_text(buyer, "Hubo un problema al registrar tu solicitud. Intenta de nuevo más tarde.")
 
 # ==================== endpoints ====================
 @app.get("/webhook")
@@ -392,10 +443,12 @@ async def receive_webhook(request: Request):
                                     await send_text(from_msisdn, "No encontré la solicitud. Usa: ALQUILAR #ID.")
                                     continue
 
-                                # si ambos autorizaron, presentar contactos y luego menú
+                                # si ambos autorizaron, presentar contactos y luego intentar crear rental si ya hay fechas
                                 if cons.get("buyer_ok") and cons.get("seller_ok"):
                                     await send_text(from_msisdn, "¡Perfecto! Conectando a ambas partes…")
                                     await introduce_parties(item_id, actor_msisdn=from_msisdn)
+                                    # NUEVO: intenta crear rental si el comprador ya envió fechas
+                                    await finalize_rental_if_ready(item_id)
                                 else:
                                     # avisa a la otra parte
                                     other = cons["seller_wa"] if from_msisdn == cons["buyer_wa"] else cons["buyer_wa"]
@@ -500,6 +553,45 @@ async def receive_webhook(request: Request):
                         await send_main_menu(from_msisdn)
                         continue
 
+                    # ---- NUEVO: paso específico para captar fechas del alquiler ----
+                    if s == Step.RENTAL_WAIT_DATES.value:
+                        draft = st.get("draft") or {}
+                        item_id = str(draft.get("item_id") or "").strip()
+                        if not item_id:
+                            # si por alguna razón se perdió el item_id, pide de nuevo el flujo
+                            await send_text(from_msisdn, "No encuentro el artículo. Envía: ALQUILAR #ID (ej: ALQUILAR #123).")
+                            await set_session(from_msisdn, Step.IDLE, {})
+                            await send_main_menu(from_msisdn)
+                            continue
+
+                        dates = _extract_dates(text)
+                        if not dates:
+                            await send_text(from_msisdn, "Formato de fechas no reconocido. Ejemplo: 2025-09-10 a 2025-09-12")
+                            continue
+
+                        start_iso, end_iso = dates
+                        # Guarda fechas en sesión
+                        await set_session(from_msisdn, Step.RENTAL_WAIT_DATES, {"item_id": int(item_id), "start_iso": start_iso, "end_iso": end_iso})
+
+                        cons = await get_consent(item_id)
+                        if cons and cons.get("buyer_ok") and cons.get("seller_ok"):
+                            # ya hay consentimiento: crea inmediatamente
+                            res = await create_rental_request(int(item_id), from_msisdn, start_iso, end_iso)
+                            if res.get("ok"):
+                                await send_text(from_msisdn, f"Solicitud registrada para #{item_id} del {start_iso} al {end_iso}. Estado: requested ✅")
+                                # Notifica al vendedor también
+                                await send_text(cons["seller_wa"], f"Recibiste una solicitud de alquiler para #{item_id} del {start_iso} al {end_iso}.")
+                                await set_session(from_msisdn, Step.IDLE, {})
+                            else:
+                                if res.get("error") == "FECHAS_NO_DISPONIBLES":
+                                    await send_text(from_msisdn, "Lo siento, esas fechas no están disponibles para ese artículo.")
+                                else:
+                                    await send_text(from_msisdn, "Hubo un problema al registrar tu solicitud. Intenta de nuevo más tarde.")
+                        else:
+                            # aún falta consentimiento: deja todo listo y avisa
+                            await send_text(from_msisdn, f"Perfecto. Guardé tus fechas {start_iso} → {end_iso} para #{item_id}. Registraré la solicitud cuando el vendedor autorice.")
+                        continue
+
                     # ---- flujo ALQUILAR #ID (acepta ALQUILAR en cualquier parte) ----
                     if "ALQUILAR" in upper:
                         m = re.search(r"ALQUILAR\s*#?(\d+)", upper)
@@ -511,18 +603,14 @@ async def receive_webhook(request: Request):
                                 await send_main_menu(from_msisdn)
                             continue
 
-                        # ===== Opción A: bloquear auto-alquiler =====
-                        if from_msisdn == (listing.get("owner_wa") or ""):
-                            await send_text(
-                                from_msisdn,
-                                "No puedes alquilar tu propio artículo 🙈. Prueba con otro ID."
-                            )
+                        # Bloquear auto-alquiler (comprador = dueño)
+                        if normalize_msisdn(listing["owner_wa"]) == normalize_msisdn(from_msisdn):
+                            await send_text(from_msisdn, "No puedes alquilar tu propio artículo. Por favor elige otro listado.")
                             if s == Step.IDLE.value:
                                 await send_main_menu(from_msisdn)
                             continue
-                        # ===== FIN bloqueo =====
 
-                        # Si está rentado ahora, avisar y no continuar
+                        # Si está actualmente ocupado, avisa y no sigas
                         busy = await get_current_rental_days_left(item_id)
                         if busy:
                             end_str = busy["end_date"]
@@ -540,18 +628,41 @@ async def receive_webhook(request: Request):
                         buyer = from_msisdn
                         await upsert_consent(item_id, buyer, seller)
 
+                        # Pedimos consentimiento a ambos
                         await send_consent_buttons(buyer, "comprador", item_id)
                         await send_consent_buttons(seller, "vendedor", item_id)
                         await send_text(buyer, "Te pedimos autorización para compartir tu contacto con el vendedor.")
                         await send_text(seller, f"Tienes una solicitud de alquiler para #{item_id}. ¿Autorizas compartir tu contacto?")
+
+                        # NUEVO: dejamos al comprador en estado de esperar fechas para este item
+                        await set_session(buyer, Step.RENTAL_WAIT_DATES, {"item_id": int(item_id)})
+                        await send_text(buyer, "Indica las *fechas* del alquiler (formato: YYYY-MM-DD a YYYY-MM-DD).")
                         continue
 
-                    # ---- captar fechas para crear solicitud de rental (opcional) ----
-                    # Formato esperado: "DEL 2025-09-10 AL 2025-09-12" o "2025-09-10 a 2025-09-12"
+                    # ---- captar fechas para crear solicitud de rental (fallback genérico) ----
+                    # Si el usuario manda "ALQUILAR #123 del 2025-09-10 al 2025-09-12" en una sola línea
                     if re.search(r"\d{4}-\d{2}-\d{2}.*\d{4}-\d{2}-\d{2}", text):
                         # Necesitamos saber a qué artículo se refiere. Soportamos: "ALQUILAR #123 del 2025-09-10 al 2025-09-12"
                         m_id = re.search(r"#(\d+)", text)
                         if not m_id:
+                            # Si además estaba en el paso RENTAL_WAIT_DATES, usa el item_id guardado
+                            if s == Step.RENTAL_WAIT_DATES.value:
+                                draft = st.get("draft") or {}
+                                item_id = str(draft.get("item_id") or "").strip()
+                                if item_id:
+                                    m_dates = _extract_dates(text)
+                                    if m_dates:
+                                        start_iso, end_iso = m_dates
+                                        res = await create_rental_request(int(item_id), from_msisdn, start_iso, end_iso)
+                                        if res.get("ok"):
+                                            await send_text(from_msisdn, f"Solicitud registrada para #{item_id} del {start_iso} al {end_iso}. Estado: requested ✅")
+                                            await set_session(from_msisdn, Step.IDLE, {})
+                                        else:
+                                            if res.get("error") == "FECHAS_NO_DISPONIBLES":
+                                                await send_text(from_msisdn, "Lo siento, esas fechas no están disponibles para ese artículo.")
+                                            else:
+                                                await send_text(from_msisdn, "Hubo un problema al registrar tu solicitud. Intenta de nuevo más tarde.")
+                                        continue
                             await send_text(from_msisdn, "Para crear la solicitud necesito el ID del artículo. Ej: ALQUILAR #123 del 2025-09-10 al 2025-09-12")
                             if s == Step.IDLE.value:
                                 await send_main_menu(from_msisdn)
@@ -563,21 +674,9 @@ async def receive_webhook(request: Request):
                             if s == Step.IDLE.value:
                                 await send_main_menu(from_msisdn)
                             continue
-
-                        # ===== Opción A: bloquear auto-alquiler también en flujo con fechas =====
-                        if from_msisdn == (listing.get("owner_wa") or ""):
-                            await send_text(
-                                from_msisdn,
-                                "No puedes alquilar tu propio artículo 🙈. Indica otro ID."
-                            )
-                            if s == Step.IDLE.value:
-                                await send_main_menu(from_msisdn)
-                            continue
-                        # ===== FIN bloqueo =====
-
-                        m_dates = re.findall(r"(\d{4}-\d{2}-\d{2})", text)
-                        if len(m_dates) >= 2:
-                            start_iso, end_iso = m_dates[0], m_dates[1]
+                        m_dates = _extract_dates(text)
+                        if m_dates:
+                            start_iso, end_iso = m_dates
                             result = await create_rental_request(int(item_id), from_msisdn, start_iso, end_iso)
                             if result.get("ok"):
                                 await send_text(from_msisdn, f"Solicitud registrada para #{item_id} del {start_iso} al {end_iso}. Estado: requested ✅")
