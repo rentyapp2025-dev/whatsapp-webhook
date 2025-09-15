@@ -245,27 +245,54 @@ async def get_consent(item_id: str) -> Optional[Dict[str, Any]]:
         return rows[0] if rows else None
 
 async def set_consent_flag(item_id: str, msisdn: str, ok: bool) -> Optional[Dict[str, Any]]:
+    """
+    Marca buyer_ok o seller_ok según quién presione el botón.
+    - Si existen duplicados (varias filas para el mismo item_id), actualiza TODAS las filas
+      de ese item_id para evitar estados inconsistentes.
+    - Devuelve una de las filas actualizadas (la primera).
+    """
     async with httpx.AsyncClient(timeout=20.0) as client:
+        # 1) Leer todas las filas para ese item_id
         g = await client.get(
             f"{BASE}/consents",
             headers=HEADERS,
-            params={"select": "*", "item_id": f"eq.{item_id}", "limit": 1},
+            params={"select": "*", "item_id": f"eq.{item_id}"},
         )
         g.raise_for_status()
         rows = g.json()
         if not rows:
             return None
-        row = rows[0]
-        is_buyer = (msisdn == row.get("buyer_wa"))
-        field = "buyer_ok" if is_buyer else "seller_ok"
+
+        # 2) Decidir qué campo actualizar (buyer_ok o seller_ok)
+        field: str
+        # ¿el msisdn coincide con alguno de los buyer_wa/seller_wa?
+        found_role = None
+        for r in rows:
+            if msisdn == r.get("buyer_wa"):
+                found_role = "buyer_ok"
+                break
+            if msisdn == r.get("seller_wa"):
+                found_role = "seller_ok"
+                break
+        if found_role:
+            field = found_role
+        else:
+            # Fallback (por si hay un desalineamiento de datos):
+            # si no coincide con seller_wa de la primera fila, asumimos comprador.
+            field = "buyer_ok" if msisdn != (rows[0].get("seller_wa") or "") else "seller_ok"
+
+        # 3) PATCH en bloque por item_id (actualiza todas las filas duplicadas si las hubiera)
         upd = await client.patch(
             f"{BASE}/consents",
             headers=HEADERS_RETURN,
-            params={"id": f"eq.{row['id']}", "select": "*"},
+            params={"item_id": f"eq.{item_id}", "select": "*"},
             json={field: bool(ok)},
         )
         upd.raise_for_status()
-        return upd.json()[0]
+        updated = upd.json() or rows
+
+        # 4) Devolver una fila (la primera) para evaluar si ambos consintieron
+        return updated[0]
 
 # =========================================================
 # Rentals (simple: buyer_wa/seller_wa + fechas)
