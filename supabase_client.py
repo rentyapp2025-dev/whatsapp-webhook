@@ -342,3 +342,101 @@ async def create_rental_request(listing_id: int, renter_msisdn: str, start_iso: 
                 return {"ok": False, "error": "FECHAS_NO_DISPONIBLES"}
         r.raise_for_status()
         return {"ok": True, "row": r.json()[0]}
+
+# --- añadir cerca de otros helpers ---
+def _norm_phone(s: str) -> str:
+    # solo dígitos
+    return re.sub(r"\D", "", s or "")
+
+# === Consents ===
+
+async def upsert_consent(item_id: str, buyer_msisdn: str, seller_msisdn: str):
+    """
+    Upsert por item_id (fila más reciente gana). Normaliza teléfonos.
+    """
+    buyer_n = _norm_phone(buyer_msisdn)
+    seller_n = _norm_phone(seller_msisdn)
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        r = await client.post(
+            f"{BASE}/consents",
+            headers=HEADERS_UPSERT,
+            params={"on_conflict": "item_id", "select": "*"},
+            json={
+                "item_id": int(item_id),
+                "buyer_wa": buyer_n,
+                "seller_wa": seller_n,
+            },
+        )
+        r.raise_for_status()
+        row = r.json()[0]
+        # Si la fila ya existía pero tenía teléfonos antiguos, los sincronizamos:
+        if (row.get("buyer_wa") != buyer_n) or (row.get("seller_wa") != seller_n):
+            p = await client.patch(
+                f"{BASE}/consents",
+                headers=HEADERS_RETURN,
+                params={"id": f"eq.{row['id']}", "select": "*"},
+                json={"buyer_wa": buyer_n, "seller_wa": seller_n},
+            )
+            p.raise_for_status()
+            return p.json()[0]
+        return row
+
+async def get_consent(item_id: str) -> Optional[Dict[str, Any]]:
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        r = await client.get(
+            f"{BASE}/consents",
+            headers=HEADERS,
+            params={
+                "select": "*",
+                "item_id": f"eq.{item_id}",
+                "order": "id.desc",
+                "limit": 1,
+            },
+        )
+        r.raise_for_status()
+        rows = r.json()
+        return rows[0] if rows else None
+
+async def set_consent_flag(item_id: str, msisdn: str, ok: bool) -> Optional[Dict[str, Any]]:
+    """
+    Marca buyer_ok o seller_ok en la fila más reciente de ese item_id.
+    Determina el rol comparando teléfonos normalizados.
+    """
+    me = _norm_phone(msisdn)
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        g = await client.get(
+            f"{BASE}/consents",
+            headers=HEADERS,
+            params={
+                "select": "*",
+                "item_id": f"eq.{item_id}",
+                "order": "id.desc",
+                "limit": 1,
+            },
+        )
+        g.raise_for_status()
+        rows = g.json()
+        if not rows:
+            return None
+
+        row = rows[0]
+        buyer_n = _norm_phone(row.get("buyer_wa"))
+        seller_n = _norm_phone(row.get("seller_wa"))
+
+        if me == buyer_n:
+            field = "buyer_ok"
+        elif me == seller_n:
+            field = "seller_ok"
+        else:
+            # No coincide con ninguno: no actualizamos para evitar pisar datos erróneos
+            # (puedes loggear esto si quieres)
+            return row
+
+        upd = await client.patch(
+            f"{BASE}/consents",
+            headers=HEADERS_RETURN,
+            params={"id": f"eq.{row['id']}", "select": "*"},
+            json={field: bool(ok)},
+        )
+        upd.raise_for_status()
+        return upd.json()[0]
