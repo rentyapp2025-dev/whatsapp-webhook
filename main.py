@@ -4,6 +4,7 @@ import hashlib
 import re
 from enum import Enum
 from typing import Optional, Any, Dict
+from datetime import datetime, date
 
 from fastapi import FastAPI, Request, Response, HTTPException, Query
 from fastapi.responses import PlainTextResponse
@@ -287,6 +288,52 @@ def normalize_msisdn(s: str) -> str:
     # Convierte a solo dígitos (como viene en from: de WhatsApp)
     return re.sub(r"\D", "", s or "")
 
+# ===== NUEVO: utilidades de disponibilidad =====
+def _parse_date_any(s: str) -> Optional[date]:
+    if not s:
+        return None
+    s = s.strip()
+    try:
+        # Soporta 'YYYY-MM-DD' y variantes ISO con hora/tz
+        if "T" in s:
+            return datetime.fromisoformat(s.replace("Z", "+00:00")).date()
+        return datetime.strptime(s[:10], "%Y-%m-%d").date()
+    except Exception:
+        return None
+
+def _human_days(n: int) -> str:
+    if n <= 0:
+        return "menos de 1 día"
+    return "1 día" if n == 1 else f"{n} días"
+
+async def get_current_rental_days_left(item_id: str) -> Optional[Dict[str, Any]]:
+    """
+    Devuelve {"end_date": "YYYY-MM-DD", "days_left": int} si hoy está dentro
+    de un alquiler activo del item. Ignora rentals cancelados/completados.
+    """
+    today = date.today()
+    async with httpx.AsyncClient(timeout=15) as c:
+        r = await c.get(
+            f"{SUPA_BASE}/rentals",
+            headers=SUPA_HEADERS,
+            params={"select": "*", "item_id": f"eq.{item_id}", "order": "end_date.asc"},
+        )
+        r.raise_for_status()
+        rows = r.json() or []
+
+    for row in rows:
+        status = (row.get("status") or "").lower()
+        if status in {"cancelled", "canceled", "completed", "complete", "rejected"}:
+            continue
+        sd = _parse_date_any(row.get("start_date"))
+        ed = _parse_date_any(row.get("end_date"))
+        if not sd or not ed:
+            continue
+        if sd <= today < ed:
+            return {"end_date": ed.isoformat(), "days_left": (ed - today).days}
+    return None
+# ===== fin utilidades de disponibilidad =====
+
 # ==================== endpoints ====================
 @app.get("/webhook")
 async def verify_webhook(
@@ -463,6 +510,21 @@ async def receive_webhook(request: Request):
                             if s == Step.IDLE.value:
                                 await send_main_menu(from_msisdn)
                             continue
+
+                        # ===== NUEVO: si está rentado ahora, avisar y no continuar =====
+                        busy = await get_current_rental_days_left(item_id)
+                        if busy:
+                            end_str = busy["end_date"]
+                            human = _human_days(busy["days_left"])
+                            await send_text(
+                                from_msisdn,
+                                f"Lo siento, el artículo #{item_id} está actualmente en renta hasta el {end_str}. "
+                                f"Quedan {human} para que esté disponible."
+                            )
+                            if s == Step.IDLE.value:
+                                await send_main_menu(from_msisdn)
+                            continue
+                        # ===== FIN NUEVO =====
 
                         seller = listing["owner_wa"]
                         buyer = from_msisdn
