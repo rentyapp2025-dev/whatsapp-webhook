@@ -37,6 +37,7 @@ def _parse_price(text: str) -> float:
     m = re.search(r"(\d+(?:[.,]\d+)?)", text)
     return float(m.group(1).replace(",", ".")) if m else 0.0
 
+
 def _date_to_utc_iso(s: str) -> str:
     """Acepta 'YYYY-MM-DD' o ISO; devuelve ISO con 'Z' cuando aplica."""
     s = s.strip()
@@ -44,6 +45,7 @@ def _date_to_utc_iso(s: str) -> str:
         return f"{s}T00:00:00Z"
     # Si ya viene con hora, asumimos que es ISO válido; si no trae tz, Postgres hará conversión según config
     return s
+
 
 def _norm_phone(s: Optional[str]) -> str:
     """Normaliza teléfonos a solo dígitos para comparaciones robustas."""
@@ -63,6 +65,7 @@ async def insert_rating(phone: str, name: str, rating: str):
         )
         r.raise_for_status()
 
+
 async def insert_order(order: dict):
     async with httpx.AsyncClient(timeout=20.0) as client:
         r = await client.post(
@@ -72,6 +75,7 @@ async def insert_order(order: dict):
             params={"select": "*"},
         )
         r.raise_for_status()
+
 
 async def get_rating_counts():
     async with httpx.AsyncClient(timeout=20.0) as client:
@@ -113,6 +117,7 @@ async def ensure_user(msisdn: str) -> Dict[str, Any]:
         r2.raise_for_status()
         return r2.json()[0]
 
+
 async def get_user_name(msisdn: str) -> str:
     async with httpx.AsyncClient(timeout=20.0) as client:
         r = await client.get(
@@ -146,6 +151,7 @@ async def set_session(msisdn: str, step: str, draft: dict | None = None):
             json=payload,
         )
         r.raise_for_status()
+
 
 async def get_session(msisdn: str) -> Dict[str, Any]:
     async with httpx.AsyncClient(timeout=20.0) as client:
@@ -192,6 +198,7 @@ async def insert_listing(owner_msisdn: str, title: str, price_text: str, locatio
             print("insert_listing ERROR:", r.status_code, r.text)
         r.raise_for_status()
         return str(r.json()[0]["id"])
+
 
 async def get_listing(item_id: str) -> Optional[Dict[str, Any]]:
     """
@@ -240,6 +247,7 @@ async def upsert_consent(item_id: str, buyer_msisdn: str, seller_msisdn: str):
         r.raise_for_status()
         return r.json()[0]
 
+
 async def get_consent(item_id: str) -> Optional[Dict[str, Any]]:
     async with httpx.AsyncClient(timeout=20.0) as client:
         r = await client.get(
@@ -255,6 +263,7 @@ async def get_consent(item_id: str) -> Optional[Dict[str, Any]]:
         r.raise_for_status()
         rows = r.json()
         return rows[0] if rows else None
+
 
 async def set_consent_flag(item_id: str, msisdn: str, ok: bool) -> Optional[Dict[str, Any]]:
     """
@@ -301,6 +310,7 @@ async def set_consent_flag(item_id: str, msisdn: str, ok: bool) -> Optional[Dict
         upd.raise_for_status()
         return upd.json()[0]
 
+
 # Idempotencia: marcar que ya se presentaron los contactos para este item
 async def mark_introduced_once(item_id: str) -> bool:
     """
@@ -335,25 +345,52 @@ async def create_rental_request(listing_id: int, renter_msisdn: str, start_iso: 
       - item_id INT
       - buyer_wa TEXT (quien alquila)
       - seller_wa TEXT (dueño del listing)
-      - start_date TEXT/DATE (YYYY-MM-DD)
-      - end_date TEXT/DATE (YYYY-MM-DD)
+      - start_date DATE (YYYY-MM-DD)
+      - end_date DATE (YYYY-MM-DD)
       - status TEXT ('requested')
     """
     listing = await get_listing(str(listing_id))
     if not listing:
         return {"ok": False, "error": "LISTING_NOT_FOUND"}
 
+    # Validación simple de rango
+    if not (isinstance(start_iso, str) and isinstance(end_iso, str)) or start_iso[:10] >= end_iso[:10]:
+        return {"ok": False, "error": "RANGO_INVALIDO"}
+
+    # Chequeo de solape (lado app) — evita crear si hay alquiler activo que se cruza
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as c:
+            q = {
+                "select": "id,item_id,start_date,end_date,status",
+                "item_id": f"eq.{listing_id}",
+                # overlap: end > start_req AND start < end_req
+                "end_date": f"gt.{start_iso[:10]}",
+                "start_date": f"lt.{end_iso[:10]}",
+            }
+            g = await c.get(f"{BASE}/rentals", headers=HEADERS, params=q)
+            g.raise_for_status()
+            overlaps = [r for r in (g.json() or []) if (r.get("status", " ").lower() not in {"cancelled", "canceled", "completed", "complete", "rejected"})]
+            if overlaps:
+                return {"ok": False, "error": "FECHAS_NO_DISPONIBLES"}
+    except Exception as e:
+        # En caso de error de red, seguimos pero registramos
+        print("overlap check warn:", str(e))
+
     async with httpx.AsyncClient(timeout=20.0) as client:
         r = await client.post(
             f"{BASE}/rentals",
-            headers=HEADERS_RETURN,
-            params={"select": "*"},
+            headers={**HEADERS_RETURN, "Prefer": "return=representation,resolution=merge-duplicates"},
+            params={
+                "select": "*",
+                # Idempotencia por combinación lógica (misma solicitud)
+                "on_conflict": "item_id,buyer_wa,start_date,end_date",
+            },
             json={
                 "item_id": int(listing_id),
                 "buyer_wa": renter_msisdn,
                 "seller_wa": listing["owner_wa"],
-                "start_date": start_iso,  # "YYYY-MM-DD"
-                "end_date": end_iso,      # "YYYY-MM-DD"
+                "start_date": start_iso[:10],  # asegura formato YYYY-MM-DD
+                "end_date": end_iso[:10],
                 "status": "requested",
             },
         )
