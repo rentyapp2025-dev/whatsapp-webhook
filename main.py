@@ -354,6 +354,29 @@ async def get_current_rental_days_left(item_id: str) -> Optional[Dict[str, Any]]
     return None
 # ===== fin utilidades =====
 
+# ===== NUEVO: helper para NO repetir el prompt de fechas =====
+async def prompt_for_dates_once(msisdn: str, item_id: Optional[int] = None) -> None:
+    """Envía el mensaje solicitando fechas **solo una vez** por sesión.
+    Guarda draft.asked=True para evitar duplicados.
+    """
+    st = await get_session(msisdn) or {}
+    draft = st.get("draft") or {}
+
+    # Si ya preguntamos, salir
+    if draft.get("asked"):
+        return
+
+    # Actualiza item_id si se proporciona ahora
+    if item_id is not None:
+        draft["item_id"] = int(item_id)
+
+    draft["asked"] = True
+    # Mantiene posibles start/end ya capturados
+    await set_session(msisdn, Step.RENTAL_WAIT_DATES, draft)
+
+    # Solo aquí enviamos el prompt
+    await send_text(msisdn, f"Indica las *fechas* del alquiler para #{draft.get('item_id','?')} (formato: YYYY-MM-DD a YYYY-MM-DD).")
+
 # ===== NUEVO: finalización automática del rental si ya tenemos todo =====
 async def finalize_rental_if_ready(item_id: str) -> None:
     """
@@ -472,7 +495,8 @@ async def receive_webhook(request: Request):
 
                         # otros botones de ejemplo (si llegas a usarlos)
                         if btn_id == "rent_yes":
-                            await send_text(from_msisdn, "¡Genial! ¿Qué fechas te sirven para el alquiler? (formato: YYYY-MM-DD a YYYY-MM-DD)")
+                            # AHORA: preguntar fechas SOLO UNA VEZ
+                            await prompt_for_dates_once(from_msisdn)
                             continue
                         if btn_id == "see_details":
                             await send_text(from_msisdn, "Detalles del artículo:\n• Estado: excelente\n• Precio: consultar publicación\n• Depósito: según acuerdo")
@@ -578,8 +602,8 @@ async def receive_webhook(request: Request):
                             continue
 
                         start_iso, end_iso = dates
-                        # Guarda fechas en sesión (manteniendo el paso)
-                        await set_session(from_msisdn, Step.RENTAL_WAIT_DATES, {"item_id": int(item_id), "start_iso": start_iso, "end_iso": end_iso})
+                        # Guarda fechas en sesión (manteniendo el paso y el flag asked)
+                        await set_session(from_msisdn, Step.RENTAL_WAIT_DATES, {"item_id": int(item_id), "start_iso": start_iso, "end_iso": end_iso, "asked": True})
 
                         # Ahora SÍ pedimos consentimiento a ambas partes (fechas primero, luego consentimiento)
                         listing = await get_listing(item_id)
@@ -644,8 +668,9 @@ async def receive_webhook(request: Request):
                             continue
 
                         # Primero pedimos fechas; NO enviamos consentimientos todavía
+                        # >>> Evitar duplicados usando helper centralizado
                         await set_session(from_msisdn, Step.RENTAL_WAIT_DATES, {"item_id": int(item_id)})
-                        await send_text(from_msisdn, f"Indica las *fechas* del alquiler para #{item_id} (formato: YYYY-MM-DD a YYYY-MM-DD).")
+                        await prompt_for_dates_once(from_msisdn, item_id=int(item_id))
                         continue
 
                     # ---- captar fechas para crear solicitud de rental (fallback genérico) ----
@@ -662,7 +687,7 @@ async def receive_webhook(request: Request):
                                     if m_dates:
                                         start_iso, end_iso = m_dates
                                         # Guarda fechas y luego pide consentimientos (incluye fechas al vendedor)
-                                        await set_session(from_msisdn, Step.RENTAL_WAIT_DATES, {"item_id": int(item_id), "start_iso": start_iso, "end_iso": end_iso})
+                                        await set_session(from_msisdn, Step.RENTAL_WAIT_DATES, {"item_id": int(item_id), "start_iso": start_iso, "end_iso": end_iso, "asked": True})
                                         listing = await get_listing(item_id)
                                         if listing and normalize_msisdn(listing["owner_wa"]) != normalize_msisdn(from_msisdn):
                                             cons_row = await upsert_consent(item_id, from_msisdn, listing["owner_wa"])
@@ -698,7 +723,7 @@ async def receive_webhook(request: Request):
                         if m_dates:
                             start_iso, end_iso = m_dates
                             # Guarda fechas y luego inicia consentimientos
-                            await set_session(from_msisdn, Step.RENTAL_WAIT_DATES, {"item_id": int(item_id), "start_iso": start_iso, "end_iso": end_iso})
+                            await set_session(from_msisdn, Step.RENTAL_WAIT_DATES, {"item_id": int(item_id), "start_iso": start_iso, "end_iso": end_iso, "asked": True})
                             cons_row = await upsert_consent(item_id, from_msisdn, listing["owner_wa"])
                             await send_consent_buttons(from_msisdn, "comprador", item_id)
                             await send_consent_buttons(listing["owner_wa"], "vendedor", item_id)
