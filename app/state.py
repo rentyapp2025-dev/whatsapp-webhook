@@ -11,6 +11,7 @@ class Step(str, Enum):
     PUBLISH_PAYMENTS = "publish_payments"
     RENTAL_WAIT_DATES = "rental_wait_dates"
     RENTAL_WAIT_PAYMENT = "rental_wait_payment"
+    RENTAL_EXTENSION_WAIT_DATES = "rental_extension_wait_dates"  # NUEVO
 
 def step_val(st: Dict[str, Any] | None) -> str:
     v = (st or {}).get("step")

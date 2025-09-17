@@ -250,6 +250,16 @@ async def get_active_rentals_for_item(item_id: str) -> List[Dict[str, Any]]:
         r.raise_for_status()
         return r.json()
 
+async def update_rental_status(rental_id: int, new_status: str) -> bool:
+    async with httpx.AsyncClient(timeout=10.0) as c:
+        r = await c.patch(
+            f"{BASE}/rentals",
+            headers=HEADERS,
+            params={"id": f"eq.{rental_id}"},
+            json={"status": new_status}
+        )
+        return 200 <= r.status_code < 300
+
 async def request_rental_cancellation(rental_id: int, requester_wa: str) -> Dict[str, Any]:
     async with httpx.AsyncClient(timeout=15.0) as c:
         r_get = await c.get(f"{BASE}/rentals", headers=HEADERS, params={"id": f"eq.{rental_id}", "select": "*"})
@@ -269,11 +279,61 @@ async def request_rental_cancellation(rental_id: int, requester_wa: str) -> Dict
 
         await c.patch(f"{BASE}/rentals", headers=HEADERS, params={"id": f"eq.{rental_id}"}, json=update_payload)
 
-        if (is_buyer and rental.get('seller_wants_cancel')) or (not is_buyer and rental.get('buyer_wants_cancel')):
+        # Relee para considerar el flag previo de la otra parte
+        r_now = await c.get(f"{BASE}/rentals", headers=HEADERS, params={"id": f"eq.{rental_id}", "select": "buyer_wants_cancel,seller_wants_cancel,buyer_wa,seller_wa"})
+        rental2 = (r_now.json() or [{}])[0]
+        if rental2.get('buyer_wants_cancel') and rental2.get('seller_wants_cancel'):
             await c.patch(f"{BASE}/rentals", headers=HEADERS, params={"id": f"eq.{rental_id}"}, json={"status": "cancelled"})
             return {"status": "CANCELLED", "parties": [rental['buyer_wa'], rental['seller_wa']]}
         else:
             return {"status": "WAITING_OTHER", "other_party": other_party_wa}
+
+async def request_rental_extension(rental_id: int, requester_wa: str, new_end_iso: str) -> Dict[str, Any]:
+    """
+    Maneja la lógica de extensión por mutuo acuerdo.
+    - Marca quién solicita la extensión y propone new_end_iso.
+    - Si la otra parte ya la quería o confirma, actualiza end_date y limpia flags.
+    Requiere columnas: buyer_wants_extension, seller_wants_extension, proposed_end_date.
+    """
+    async with httpx.AsyncClient(timeout=20.0) as c:
+        r_get = await c.get(f"{BASE}/rentals", headers=HEADERS, params={"id": f"eq.{rental_id}", "select": "*"})
+        rows = r_get.json()
+        if not rows:
+            return {"status": "NOT_FOUND"}
+
+        rental = rows[0]
+        req_is_buyer = _norm_phone(requester_wa) == _norm_phone(rental["buyer_wa"])
+        flag_field = "buyer_wants_extension" if req_is_buyer else "seller_wants_extension"
+        other_flag = "seller_wants_extension" if req_is_buyer else "buyer_wants_extension"
+        other_party = rental["seller_wa"] if req_is_buyer else rental["buyer_wa"]
+
+        # Establecer propuesta + flag del solicitante
+        await c.patch(
+            f"{BASE}/rentals", headers=HEADERS, params={"id": f"eq.{rental_id}"},
+            json={"proposed_end_date": new_end_iso[:10], flag_field: True, "status": "extension_pending"}
+        )
+
+        # Releer para ver si la otra parte ya había aceptado
+        r_now = await c.get(
+            f"{BASE}/rentals", headers=HEADERS,
+            params={"id": f"eq.{rental_id}", "select": f"{other_flag},buyer_wa,seller_wa,proposed_end_date"}
+        )
+        curr = (r_now.json() or [{}])[0]
+        if curr.get(other_flag) is True:
+            # Mutuo acuerdo: aplicar extensión
+            await c.patch(
+                f"{BASE}/rentals", headers=HEADERS, params={"id": f"eq.{rental_id}"},
+                json={
+                    "end_date": new_end_iso[:10],
+                    "proposed_end_date": None,
+                    "buyer_wants_extension": False,
+                    "seller_wants_extension": False,
+                    "status": "active"
+                }
+            )
+            return {"status": "EXTENDED", "parties": [rental["buyer_wa"], rental["seller_wa"]]}
+
+        return {"status": "EXTENSION_PENDING", "other_party": other_party}
 
 # Reviews
 async def add_review(rental_id: int, reviewer_wa: str, rating: int, comment: str) -> Dict[str, Any]:
