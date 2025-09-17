@@ -10,7 +10,6 @@ from fastapi.responses import PlainTextResponse
 import httpx
 
 # --- Importaciones del cliente de base de datos ---
-# Asegúrate de que tu archivo supabase_client.py contenga todas estas funciones.
 from supabase_client import (
     ensure_user, get_user_name,
     set_session, get_session,
@@ -18,7 +17,6 @@ from supabase_client import (
     upsert_consent, set_consent_flag, get_consent,
     create_rental_request,
     mark_introduced_once,
-    # --- NUEVAS FUNCIONES REQUERIDAS ---
     get_active_rentals_for_item,
     update_listing_status,
     add_review,
@@ -34,16 +32,7 @@ APP_SECRET = os.getenv("APP_SECRET", "").encode("utf-8")
 GRAPH_API_VERSION = os.getenv("GRAPH_API_VERSION", "v20.0")
 GRAPH_BASE = f"https://graph.facebook.com/{GRAPH_API_VERSION}"
 
-# === Credenciales para PostgREST (no es necesario si usas supabase_client)
-SUPABASE_URL = os.getenv("SUPABASE_URL", "").rstrip("/")
-SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
-SUPA_BASE = f"{SUPABASE_URL}/rest/v1"
-SUPA_HEADERS = {
-    "apikey": SUPABASE_KEY,
-    "Authorization": f"Bearer {SUPABASE_KEY}",
-}
-
-app = FastAPI(title="WhatsApp Cloud API Webhook (Render/FastAPI)")
+app = FastAPI(title="WhatsApp Cloud API Webhook for Renty")
 
 # ==================== MÁQUINA DE ESTADOS (STATE MACHINE) ====================
 class Step(str, Enum):
@@ -52,9 +41,8 @@ class Step(str, Enum):
     PUBLISH_PRICE = "publish_price"
     PUBLISH_ZONE = "publish_zone"
     PUBLISH_PAYMENTS = "publish_payments"
-    VERIFY_LOOKUP_WAIT_NUMBER = "verify_lookup_wait_number"
     RENTAL_WAIT_DATES = "rental_wait_dates"
-    RENTAL_WAIT_PAYMENT = "rental_wait_payment"  # <-- NUEVO STEP
+    RENTAL_WAIT_PAYMENT = "rental_wait_payment"
 
 def step_val(st: Dict[str, Any] | None) -> str:
     v = (st or {}).get("step")
@@ -69,14 +57,13 @@ def verify_signature(signature: Optional[str], body: bytes) -> bool:
     my_sig = mac.hexdigest()
     return hmac.compare_digest(my_sig, their_sig)
 
-async def _post_messages(payload: Dict[str, Any]) -> Dict[str, Any]:
+async def _post_messages(payload: Dict[str, Any]):
     url = f"{GRAPH_BASE}/{PHONE_NUMBER_ID}/messages"
     headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}", "Content-Type": "application/json"}
     async with httpx.AsyncClient(timeout=20) as client:
         try:
             r = await client.post(url, headers=headers, json=payload)
             r.raise_for_status()
-            return r.json()
         except httpx.HTTPStatusError as e:
             print(f"Error en Graph API: {e.response.status_code} - {e.response.text}")
             raise
@@ -130,29 +117,35 @@ def _extract_dates(text: str) -> Optional[tuple[str, str]]:
     return None
 
 async def finalize_and_introduce(item_id: str, actor_msisdn: str):
-    """Lógica centralizada para finalizar una solicitud y presentar a las partes."""
+    """
+    Lógica centralizada para finalizar una solicitud.
+    Se ejecuta cuando ambas partes han dado su consentimiento.
+    """
     cons = await get_consent(item_id)
     if not cons: return
 
-    # 1. Crear la solicitud de alquiler formalmente en la BD
     buyer_wa = cons["buyer_wa"]
     st = await get_session(buyer_wa)
     draft = st.get("draft", {})
+    
+    # 1. Crear la renta en la base de datos si tenemos todos los datos
     if 'start_iso' in draft and 'end_iso' in draft and 'selected_payment_method' in draft:
         await create_rental_request(
             int(item_id), buyer_wa, draft['start_iso'], draft['end_iso'], draft['selected_payment_method']
         )
+        # Limpiar la sesión del comprador ahora que el proceso terminó para él
+        await set_session(buyer_wa, Step.IDLE, {})
 
     # 2. Presentar a las partes
     if await mark_introduced_once(item_id):
-        # (Aquí iría tu lógica de `introduce_parties` si la necesitas)
         buyer_name = await get_user_name(cons["buyer_wa"])
         seller_name = await get_user_name(cons["seller_wa"])
         await send_text(cons["buyer_wa"], f"¡Acuerdo logrado! Ya puedes coordinar con {seller_name} (vendedor) el alquiler del artículo #{item_id}.")
         await send_text(cons["seller_wa"], f"¡Acuerdo logrado! {buyer_name} (comprador) te contactará para coordinar el alquiler del artículo #{item_id}.")
 
-    # 3. Limpiar sesión y enviar menú al usuario que actuó
-    await set_session(actor_msisdn, Step.IDLE, {})
+    # 3. Limpiar sesión y enviar menú al usuario que actuó al final
+    if actor_msisdn != buyer_wa: # Evitar doble menú si el comprador fue el último en aceptar
+        await set_session(actor_msisdn, Step.IDLE, {})
     await send_main_menu(actor_msisdn)
 
 
@@ -180,7 +173,6 @@ async def receive_webhook(request: Request):
 
             for msg in messages:
                 from_msisdn = msg["from"]
-                # --- CAMBIO: Capturar y guardar el nombre de perfil de WhatsApp ---
                 profile_name = (value.get("contacts", [{}])[0].get("profile", {}) or {}).get("name")
                 await ensure_user(from_msisdn, profile_name)
 
@@ -197,14 +189,16 @@ async def receive_webhook(request: Request):
                             answer, item_id = btn_id.split("_")[1], btn_id.split("_")[2]
                             cons = await set_consent_flag(item_id, from_msisdn, ok=(answer == "yes"))
                             if not cons:
-                                await send_text(from_msisdn, "No se encontró la solicitud de alquiler."); continue
+                                await send_text(from_msisdn, "No se encontró la solicitud."); continue
                             
+                            # Si ambas partes han aceptado, finaliza el proceso
                             if cons.get("buyer_ok") and cons.get("seller_ok"):
                                 await finalize_and_introduce(item_id, from_msisdn)
                             elif answer == "no":
                                 other = cons["seller_wa"] if from_msisdn == cons["buyer_wa"] else cons["buyer_wa"]
                                 await send_text(from_msisdn, "Entendido. Tu decisión fue registrada.")
                                 await send_text(other, "La otra parte ha rechazado la solicitud. La operación se canceló.")
+                                await set_session(from_msisdn, Step.IDLE, {}) # Limpiar sesión
                             else:
                                 await send_text(from_msisdn, "Gracias. Esperamos la respuesta de la otra parte.")
                         continue
@@ -216,7 +210,8 @@ async def receive_webhook(request: Request):
                         if s == Step.RENTAL_WAIT_PAYMENT:
                             draft = st["draft"]
                             draft["selected_payment_method"] = row_title
-                            await set_session(from_msisdn, Step.IDLE, draft) # Guardamos el borrador completo
+                            # Mantenemos la sesión activa con el draft completo, no la limpiamos.
+                            await set_session(from_msisdn, s, draft) 
                             
                             item_id, start_iso, end_iso = str(draft['item_id']), draft['start_iso'], draft['end_iso']
                             listing = await get_listing(item_id)
@@ -224,16 +219,19 @@ async def receive_webhook(request: Request):
                             
                             await upsert_consent(item_id, buyer, seller)
                             
-                            # --- CAMBIO: Mensaje de autorización al vendedor con toda la información ---
+                            # Notificación al VENDEDOR
                             msg_to_seller = (f"¡Nueva solicitud para tu artículo #{item_id}!\n\n"
                                              f"Fechas: del *{_to_ve(start_iso)}* al *{_to_ve(end_iso)}*\n"
                                              f"Método de pago: *{row_title}*\n\n"
                                              "¿Aceptas compartir tu contacto para coordinar?")
-                            buttons = [{"id": f"consent_yes_{item_id}", "title": "Sí, acepto"}, {"id": f"consent_no_{item_id}", "title": "No, gracias"}]
-                            await send_reply_buttons(seller, "Confirmación de Alquiler", msg_to_seller, buttons)
+                            seller_buttons = [{"id": f"consent_yes_{item_id}", "title": "Sí, acepto"}, {"id": f"consent_no_{item_id}", "title": "No, gracias"}]
+                            await send_reply_buttons(seller, "Confirmación de Alquiler", msg_to_seller, seller_buttons)
 
-                            await send_text(buyer, "¡Excelente! Hemos enviado tu solicitud al dueño. Te notificaremos su respuesta.")
-                            await set_session(from_msisdn, Step.IDLE, {})
+                            # Solicitud de consentimiento al COMPRADOR
+                            await send_text(buyer, "¡Excelente! Hemos enviado tu solicitud al dueño. Para continuar, solo falta tu autorización final para compartir tu contacto.")
+                            buyer_buttons = [{"id": f"consent_yes_{item_id}", "title": "Sí, autorizo"}, {"id": f"consent_no_{item_id}", "title": "No autorizo"}]
+                            await send_reply_buttons(buyer, "Autorización Final", "¿Autorizas compartir tu contacto con el vendedor?", buyer_buttons)
+                            
                             continue
 
                         # Manejo del Menú Principal
@@ -251,7 +249,7 @@ async def receive_webhook(request: Request):
                 if upper in {"MENU", "MENÚ", "INICIO"}:
                     await set_session(from_msisdn, Step.IDLE, {}); await send_main_menu(from_msisdn); continue
 
-                # --- NUEVOS COMANDOS DE TEXTO ---
+                # --- Comandos Directos ---
                 if upper.startswith("RESEÑA #"):
                     match = re.search(r"RESEÑA\s*#(\d+)\s*([1-5])\s*(.*)", text, re.IGNORECASE)
                     if not match: await send_text(from_msisdn, "Formato: RESEÑA #ID_RENTA CALIFICACIÓN COMENTARIO"); continue
@@ -290,7 +288,7 @@ async def receive_webhook(request: Request):
                         else: await send_text(from_msisdn, "No se encontró la renta o no se puede cancelar.")
                     else: await send_text(from_msisdn, "Proporciona un ID de renta válido."); continue
                 
-                # --- LÓGICA DE LA MÁQUINA DE ESTADOS ---
+                # --- Lógica de la Máquina de Estados ---
                 if s == Step.PUBLISH_TITLE:
                     await set_session(from_msisdn, Step.PUBLISH_PRICE, {"title": text})
                     await send_text(from_msisdn, "¡Bien! Ahora, indica el *precio por día* (ej: 10 USD).")
@@ -320,7 +318,6 @@ async def receive_webhook(request: Request):
                     if dates:
                         start_iso, end_iso = dates
                         await set_session(from_msisdn, Step.RENTAL_WAIT_PAYMENT, {"item_id": int(item_id), "start_iso": start_iso, "end_iso": end_iso})
-                        # --- CAMBIO: Mostrar métodos de pago para seleccionar ---
                         payment_options = listing.get("payment_methods") or ["A convenir"]
                         rows = [{"id": p.replace(" ", "_"), "title": p} for p in payment_options]
                         await send_list(from_msisdn, f"Alquiler de #{item_id}", "Selecciona tu método de pago:", "Ver Pagos", rows)
