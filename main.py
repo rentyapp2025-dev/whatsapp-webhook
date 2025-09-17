@@ -3,20 +3,21 @@ import hmac
 import hashlib
 import re
 from enum import Enum
-from typing import Optional, Any, Dict
+from typing import Optional, Any, Dict, List
 from datetime import datetime, date, timedelta
 from fastapi import FastAPI, Request, Response, HTTPException, Query
 from fastapi.responses import PlainTextResponse
 import httpx
 
 # Importa utilidades de BD desde tu cliente REST (supabase_client.py)
+# Asegúrate de actualizar insert_listing para aceptar: (owner_msisdn, title, price_text, zone, payment_methods)
 from supabase_client import (
     ensure_user, get_user_name,
     set_session, get_session,
     insert_listing, get_listing,
     upsert_consent, set_consent_flag, get_consent,
     create_rental_request,
-    # NUEVO: idempotencia de presentación
+    # Idempotencia de presentación de contactos
     mark_introduced_once,
 )
 
@@ -45,9 +46,10 @@ class Step(str, Enum):
     IDLE = "idle"
     PUBLISH_TITLE = "publish_title"
     PUBLISH_PRICE = "publish_price"
-    PUBLISH_LOCATION = "publish_location"
+    PUBLISH_ZONE = "publish_zone"              # pedir zona de Caracas
+    PUBLISH_PAYMENTS = "publish_payments"      # pedir métodos de pago
     VERIFY_LOOKUP_WAIT_NUMBER = "verify_lookup_wait_number"
-    # NUEVO: esperar fechas para el alquiler de un item concreto
+    # Esperar fechas para el alquiler de un item concreto
     RENTAL_WAIT_DATES = "rental_wait_dates"
 
 # Helpers de estado para evitar comparaciones Enum vs str
@@ -297,7 +299,7 @@ def normalize_msisdn(s: str) -> str:
     # Convierte a solo dígitos (como viene en from: de WhatsApp)
     return re.sub(r"\D", "", s or "")
 
-# ===== NUEVO: utilidades de disponibilidad y fechas =====
+# ===== utilidades de disponibilidad y fechas (VE e inclusivo) =====
 def _parse_date_any(s: str) -> Optional[date]:
     """
     Acepta:
@@ -313,8 +315,8 @@ def _parse_date_any(s: str) -> Optional[date]:
         # dd/mm/yyyy
         m = re.fullmatch(r"(\d{2})/(\d{2})/(\d{4})", s)
         if m:
-            d, mth, y = map(int, m.groups())
-            return date(y, mth, d)
+            d_, mth, y = map(int, m.groups())
+            return date(y, mth, d_)
         # ISO con hora/tz
         if "T" in s:
             return datetime.fromisoformat(s.replace("Z", "+00:00")).date()
@@ -393,7 +395,7 @@ async def get_current_rental_days_left(item_id: str) -> Optional[Dict[str, Any]]
     return None
 # ===== fin utilidades =====
 
-# ===== NUEVO: helper para NO repetir el prompt de fechas =====
+# ===== helper para NO repetir el prompt de fechas =====
 async def prompt_for_dates_once(msisdn: str, item_id: Optional[int] = None) -> None:
     """Envía el mensaje solicitando fechas **solo una vez** por sesión.
     Guarda draft.asked=True para evitar duplicados.
@@ -416,7 +418,7 @@ async def prompt_for_dates_once(msisdn: str, item_id: Optional[int] = None) -> N
     # Solo aquí enviamos el prompt (formato VE)
     await send_text(msisdn, f"Indica las *fechas* del alquiler para #{draft.get('item_id','?')} (formato: DD/MM/AAAA a DD/MM/AAAA).")
 
-# ===== NUEVO: finalización automática del rental si ya tenemos todo =====
+# ===== finalización automática del rental si ya tenemos todo =====
 async def finalize_rental_if_ready(item_id: str) -> None:
     """
     Si buyer y seller ya autorizaron y el comprador ya envió fechas
@@ -437,7 +439,6 @@ async def finalize_rental_if_ready(item_id: str) -> None:
     start_iso = d.get("start_iso")
     end_iso = d.get("end_iso")
     if not (start_iso and end_iso):
-        # Antes pedíamos fechas aquí; ahora NO (evitamos pedirlas "después").
         return
 
     # Crear la solicitud
@@ -535,7 +536,7 @@ async def receive_webhook(request: Request):
 
                         # otros botones de ejemplo (si llegas a usarlos)
                         if btn_id == "rent_yes":
-                            # AHORA: preguntar fechas SOLO UNA VEZ
+                            # Preguntar fechas SOLO UNA VEZ
                             await prompt_for_dates_once(from_msisdn)
                             continue
                         if btn_id == "see_details":
@@ -557,7 +558,7 @@ async def receive_webhook(request: Request):
                         row_title = row.get("title", "")
 
                         if row_id == "menu_publish":
-                            await set_session(from_msisdn, Step.PUBLISH_TITLE, {"title": "", "price": "", "location": ""})
+                            await set_session(from_msisdn, Step.PUBLISH_TITLE, {"title": "", "price": "", "zone": "", "payment_methods": []})
                             await send_text(from_msisdn, "Perfecto. Dime el *título* del artículo.")
                             continue
 
@@ -626,7 +627,7 @@ async def receive_webhook(request: Request):
                         await send_main_menu(from_msisdn)
                         continue
 
-                    # ---- NUEVO: paso específico para captar fechas del alquiler ----
+                    # ---- paso específico para captar fechas del alquiler ----
                     if s == Step.RENTAL_WAIT_DATES.value:
                         draft = st.get("draft") or {}
                         item_id = str(draft.get("item_id") or "").strip()
@@ -711,7 +712,6 @@ async def receive_webhook(request: Request):
                             continue
 
                         # Primero pedimos fechas; NO enviamos consentimientos todavía
-                        # >>> Evitar duplicados usando helper centralizado
                         await set_session(from_msisdn, Step.RENTAL_WAIT_DATES, {"item_id": int(item_id)})
                         await prompt_for_dates_once(from_msisdn, item_id=int(item_id))
                         continue
@@ -778,13 +778,12 @@ async def receive_webhook(request: Request):
                                 await send_text(from_msisdn, f"Perfecto. Guardé tus fechas {_to_ve(start_iso)} → {_to_ve(end_iso)} para #{item_id}. Registraré la solicitud cuando el vendedor autorice.")
                             continue
 
-                    # ---- flujo PUBLICAR (acepta PUBLICAR en cualquier parte) ----
+                    # ========= PUBLICAR =========
                     if "PUBLICAR" in upper:
-                        await set_session(from_msisdn, Step.PUBLISH_TITLE, {"title": "", "price": "", "location": ""})
+                        await set_session(from_msisdn, Step.PUBLISH_TITLE, {"title": "", "price": "", "zone": "", "payment_methods": []})
                         await send_text(from_msisdn, "¡Genial! Dime el *título* del artículo.")
                         continue
 
-                    # ---- pasos de publicación ----
                     if s == Step.PUBLISH_TITLE.value:
                         st["draft"]["title"] = text
                         await set_session(from_msisdn, Step.PUBLISH_PRICE, st["draft"])
@@ -793,22 +792,50 @@ async def receive_webhook(request: Request):
 
                     if s == Step.PUBLISH_PRICE.value:
                         st["draft"]["price"] = text
-                        await set_session(from_msisdn, Step.PUBLISH_LOCATION, st["draft"])
-                        await send_text(from_msisdn, "¿En qué *ciudad* está el artículo?")
+                        await set_session(from_msisdn, Step.PUBLISH_ZONE, st["draft"])
+                        await send_text(
+                            from_msisdn,
+                            "¿En qué *zona de Caracas* está el artículo?\n"
+                            "Ejemplos: Chacao, La Candelaria, El Paraíso, Catia, Petare…"
+                        )
                         continue
 
-                    if s == Step.PUBLISH_LOCATION.value:
-                        st["draft"]["location"] = text
+                    if s == Step.PUBLISH_ZONE.value:
+                        st["draft"]["zone"] = text
+                        await set_session(from_msisdn, Step.PUBLISH_PAYMENTS, st["draft"])
+                        await send_text(
+                            from_msisdn,
+                            "¿Qué *métodos de pago* aceptas? Escríbelos separados por coma.\n"
+                            "Ej: Pago Móvil, Zelle, Efectivo, Transferencia"
+                        )
+                        continue
+
+                    if s == Step.PUBLISH_PAYMENTS.value:
+                        # normaliza a lista de strings
+                        pmts: List[str] = [p.strip() for p in re.split(r"[,\n;]+", text) if p.strip()]
+                        st["draft"]["payment_methods"] = pmts[:10]
                         d = st["draft"]
-                        item_id = await insert_listing(from_msisdn, d["title"], d["price"], d["location"])
+
+                        # Inserta con zone + payment_methods (ver nota al inicio)
+                        item_id = await insert_listing(
+                            from_msisdn,
+                            d["title"],
+                            d["price"],
+                            d["zone"],
+                            d["payment_methods"],
+                        )
+
                         await set_session(from_msisdn, Step.IDLE, {})
+                        pagos = ", ".join(d["payment_methods"]) if d["payment_methods"] else "A convenir"
                         await send_text(
                             from_msisdn,
                             f"¡Listo! Publicación creada con ID #{item_id}:\n"
-                            f"• {d['title']}\n• Precio/día: {d['price']}\n• Ciudad: {d['location']}\n"
+                            f"• {d['title']}\n"
+                            f"• Precio/día: {d['price']}\n"
+                            f"• Zona: {d['zone']} (Caracas)\n"
+                            f"• Pagos: {pagos}\n"
                             f"Estado: activa ✅"
                         )
-                        # Al terminar un flujo, mostramos menú
                         await send_main_menu(from_msisdn)
                         continue
 

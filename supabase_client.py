@@ -3,7 +3,7 @@ import os
 import httpx
 import re
 from datetime import datetime
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 
 # === Config ===
 SUPABASE_URL = os.environ["SUPABASE_URL"].rstrip("/")
@@ -168,17 +168,24 @@ async def get_session(msisdn: str) -> Dict[str, Any]:
         return {"step": "idle", "draft": {}}
 
 # =========================================================
-# Listings (owner_wa + price TEXT)
+# Listings (zone + payment_methods)
 # =========================================================
 
-async def insert_listing(owner_msisdn: str, title: str, price_text: str, location: str) -> str:
+async def insert_listing(
+    owner_msisdn: str,
+    title: str,
+    price_text: str,
+    zone: str,
+    payment_methods: List[str],
+) -> str:
     """
     Inserta una publicación.
     Esquema esperado en 'listings':
       - owner_wa TEXT
       - title TEXT
       - price TEXT (p.ej. "10 USD/día")
-      - location TEXT
+      - zone TEXT  (zona dentro de Caracas)
+      - payment_methods TEXT[] (ej: {"Pago Móvil","Zelle"})
       - status TEXT
     """
     async with httpx.AsyncClient(timeout=20.0) as client:
@@ -187,10 +194,11 @@ async def insert_listing(owner_msisdn: str, title: str, price_text: str, locatio
             headers=HEADERS_RETURN,
             params={"select": "*"},
             json={
-                "owner_wa": owner_msisdn,  # número E.164 sin '+'
+                "owner_wa": owner_msisdn,            # número E.164 sin '+'
                 "title": title,
                 "price": price_text,
-                "location": location,
+                "zone": zone,
+                "payment_methods": payment_methods or [],
                 "status": "active",
             },
         )
