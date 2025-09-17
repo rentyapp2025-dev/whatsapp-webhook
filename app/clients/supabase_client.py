@@ -1,7 +1,7 @@
 import os
 import httpx
 import re
-from datetime import datetime, date
+from datetime import datetime
 from typing import Optional, Dict, Any, List
 
 # === Config ===
@@ -20,7 +20,9 @@ HEADERS_UPSERT = {**HEADERS, "Prefer": "return=representation,resolution=merge-d
 def _norm_phone(s: Optional[str]) -> str:
     return re.sub(r"\D", "", s or "")
 
+# =========================
 # Users
+# =========================
 async def ensure_user(msisdn: str, name: Optional[str] = None):
     async with httpx.AsyncClient(timeout=15.0) as client:
         r_get = await client.get(
@@ -59,7 +61,9 @@ async def get_user_name(msisdn: str) -> str:
         rows = r.json()
         return rows[0]["name"] if rows and rows[0].get("name") else msisdn
 
+# =========================
 # Sessions
+# =========================
 async def set_session(msisdn: str, step: str, draft: dict | None = None):
     payload = {
         "wa_id": msisdn,
@@ -89,7 +93,9 @@ async def get_session(msisdn: str) -> Dict[str, Any]:
             return {"step": rows[0].get("step", "idle"), "draft": rows[0].get("draft", {})}
         return {"step": "idle", "draft": {}}
 
+# =========================
 # Listings
+# =========================
 async def insert_listing(owner_msisdn: str, title: str, price_text: str, zone: str, payment_methods: List[str]) -> str:
     async with httpx.AsyncClient(timeout=15.0) as client:
         payload = {
@@ -132,7 +138,9 @@ async def update_listing_status(item_id: str, owner_wa: str, new_status: str) ->
         )
         return 200 <= r.status_code < 300
 
+# =========================
 # Consents
+# =========================
 async def upsert_consent(item_id: str, buyer_msisdn: str, seller_msisdn: str):
     buyer_n = _norm_phone(buyer_msisdn)
     seller_n = _norm_phone(seller_msisdn)
@@ -221,8 +229,14 @@ async def mark_introduced_once(item_id: str) -> bool:
         rows = upd.json() or []
         return len(rows) > 0
 
+# =========================
 # Rentals
+# =========================
 async def create_rental_request(listing_id: int, renter_msisdn: str, start_iso: str, end_iso: str, payment_method: str) -> Dict[str, Any]:
+    """
+    Se llama cuando YA hay consentimiento de ambas partes.
+    Por eso creamos la renta directamente como ACTIVE para evitar que quede en 'requested'.
+    """
     listing = await get_listing(str(listing_id))
     if not listing:
         return {"ok": False, "error": "LISTING_NOT_FOUND"}
@@ -234,7 +248,7 @@ async def create_rental_request(listing_id: int, renter_msisdn: str, start_iso: 
             "seller_wa": listing["owner_wa"],
             "start_date": start_iso[:10],
             "end_date": end_iso[:10],
-            "status": "requested",
+            "status": "active",  # <-- FIX principal
             "selected_payment_method": payment_method,
         }
         r = await client.post(f"{BASE}/rentals", headers=HEADERS_RETURN, json=payload)
@@ -279,8 +293,10 @@ async def request_rental_cancellation(rental_id: int, requester_wa: str) -> Dict
 
         await c.patch(f"{BASE}/rentals", headers=HEADERS, params={"id": f"eq.{rental_id}"}, json=update_payload)
 
-        # Relee para considerar el flag previo de la otra parte
-        r_now = await c.get(f"{BASE}/rentals", headers=HEADERS, params={"id": f"eq.{rental_id}", "select": "buyer_wants_cancel,seller_wants_cancel,buyer_wa,seller_wa"})
+        r_now = await c.get(
+            f"{BASE}/rentals", headers=HEADERS,
+            params={"id": f"eq.{rental_id}", "select": "buyer_wants_cancel,seller_wants_cancel,buyer_wa,seller_wa"}
+        )
         rental2 = (r_now.json() or [{}])[0]
         if rental2.get('buyer_wants_cancel') and rental2.get('seller_wants_cancel'):
             await c.patch(f"{BASE}/rentals", headers=HEADERS, params={"id": f"eq.{rental_id}"}, json={"status": "cancelled"})
@@ -290,10 +306,8 @@ async def request_rental_cancellation(rental_id: int, requester_wa: str) -> Dict
 
 async def request_rental_extension(rental_id: int, requester_wa: str, new_end_iso: str) -> Dict[str, Any]:
     """
-    Maneja la lógica de extensión por mutuo acuerdo.
-    - Marca quién solicita la extensión y propone new_end_iso.
-    - Si la otra parte ya la quería o confirma, actualiza end_date y limpia flags.
-    Requiere columnas: buyer_wants_extension, seller_wants_extension, proposed_end_date.
+    Extensión por mutuo acuerdo.
+    Requiere columnas: buyer_wants_extension, seller_wants_extension, proposed_end_date (date).
     """
     async with httpx.AsyncClient(timeout=20.0) as c:
         r_get = await c.get(f"{BASE}/rentals", headers=HEADERS, params={"id": f"eq.{rental_id}", "select": "*"})
@@ -335,7 +349,9 @@ async def request_rental_extension(rental_id: int, requester_wa: str, new_end_is
 
         return {"status": "EXTENSION_PENDING", "other_party": other_party}
 
+# =========================
 # Reviews
+# =========================
 async def add_review(rental_id: int, reviewer_wa: str, rating: int, comment: str) -> Dict[str, Any]:
     async with httpx.AsyncClient(timeout=15.0) as c:
         r_get = await c.get(

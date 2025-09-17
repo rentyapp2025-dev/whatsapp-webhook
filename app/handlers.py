@@ -1,5 +1,5 @@
 import re
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any
 
 from .state import Step, step_val, _extract_dates, _to_ve
 from .wa_api import send_text, send_reply_buttons, send_list, send_main_menu
@@ -45,7 +45,7 @@ async def finalize_and_introduce(item_id: str, actor_msisdn: str):
     st = await get_session(buyer_wa)
     draft = st.get("draft", {})
 
-    # 1) Crear la renta si tenemos todos los datos
+    # 1) Crear la renta cuando ya hay fechas y método de pago (se crea como ACTIVE)
     rental_id_str = ""
     if 'start_iso' in draft and 'end_iso' in draft and 'selected_payment_method' in draft:
         r = await create_rental_request(
@@ -53,10 +53,9 @@ async def finalize_and_introduce(item_id: str, actor_msisdn: str):
         )
         if r.get("ok"):
             rental_id_str = str(r["row"]["id"])
-        # Limpiar sesión del comprador
         await set_session(buyer_wa, Step.IDLE, {})
 
-    # 2) Presentar a las partes una sola vez
+    # 2) Presentación entre partes (una sola vez) + menú post-acuerdo
     if await mark_introduced_once(item_id):
         buyer_name = await get_user_name(buyer_wa)
         seller_name = await get_user_name(seller_wa)
@@ -64,7 +63,6 @@ async def finalize_and_introduce(item_id: str, actor_msisdn: str):
         await send_text(buyer_wa, f"{base_msg} Vendedor: {seller_name}")
         await send_text(seller_wa, f"{base_msg} Comprador: {buyer_name}")
 
-        # Menú profesional post-acuerdo
         if rental_id_str:
             await _send_post_agreement_menus(buyer_wa, seller_wa, str(item_id), rental_id_str)
 
@@ -79,7 +77,6 @@ async def handle_interactive(msg: Dict[str, Any], st: Dict[str, Any], from_msisd
     interactive = msg["interactive"]
     itype = interactive["type"]
 
-    # Botones de consentimiento (flujo inicial)
     if itype == "button_reply":
         btn_id = interactive["button_reply"]["id"]
 
@@ -97,7 +94,7 @@ async def handle_interactive(msg: Dict[str, Any], st: Dict[str, Any], from_msisd
                 other = cons["seller_wa"] if from_msisdn == cons["buyer_wa"] else cons["buyer_wa"]
                 await send_text(from_msisdn, "Entendido. Tu decisión fue registrada.")
                 await send_text(other, "La otra parte ha rechazado la solicitud. La operación se canceló.")
-                await set_session(from_msisdn, Step.IDLE, {})  # limpiar
+                await set_session(from_msisdn, Step.IDLE, {})
             else:
                 await send_text(from_msisdn, "Gracias. Esperamos la respuesta de la otra parte.")
             return
@@ -128,7 +125,6 @@ async def handle_interactive(msg: Dict[str, Any], st: Dict[str, Any], from_msisd
 
         if btn_id.startswith("rental_extend_"):
             rental_id = btn_id.split("_")[-1]
-            # Pasamos a pedir nuevas fechas (solo cambiaremos fin, pero aceptamos rango)
             await set_session(from_msisdn, Step.RENTAL_EXTENSION_WAIT_DATES, {"rental_id": int(rental_id)})
             await send_text(from_msisdn, "Indica las *nuevas fechas* (puedes enviar solo la nueva fecha fin) en formato: DD/MM/AAAA o 'DD/MM/AAAA a DD/MM/AAAA'.")
             return
@@ -251,7 +247,7 @@ async def handle_text(msg: Dict[str, Any], st: Dict[str, Any], from_msisdn: str)
             await send_text(from_msisdn, "Proporciona un ID de renta válido.")
         return
 
-    # Máquina de estados
+    # Máquina de estados: publicación
     if s == Step.PUBLISH_TITLE:
         await set_session(from_msisdn, Step.PUBLISH_PRICE, {"title": text})
         await send_text(from_msisdn, "¡Bien! Ahora, indica el *precio por día* (ej: 10 USD).")
@@ -279,6 +275,7 @@ async def handle_text(msg: Dict[str, Any], st: Dict[str, Any], from_msisdn: str)
         await send_main_menu(from_msisdn)
         return
 
+    # Solicitud de alquiler
     if upper.startswith("ALQUILAR"):
         m = re.search(r"#(\d+)", text)
         if not m:
@@ -319,7 +316,7 @@ async def handle_text(msg: Dict[str, Any], st: Dict[str, Any], from_msisdn: str)
         await send_list(from_msisdn, f"Alquiler de #{item_id}", "¡Fechas guardadas! Ahora, selecciona tu método de pago.", "Ver Pagos", rows)
         return
 
-    # NUEVO: Extensión de renta (solo pedimos nueva fecha fin; si el usuario manda rango, se usa el fin)
+    # Extensión de renta
     if s == Step.RENTAL_EXTENSION_WAIT_DATES:
         rental_id = st["draft"].get("rental_id")
         if not rental_id:
@@ -328,21 +325,17 @@ async def handle_text(msg: Dict[str, Any], st: Dict[str, Any], from_msisdn: str)
             await send_main_menu(from_msisdn)
             return
 
-        # Aceptamos una fecha o rango. Si es rango, tomamos el fin.
         dates = _extract_dates(text)
         if not dates:
             # Intentar capturar una sola fecha DD/MM/AAAA
             m1 = re.search(r"\b(\d{2}/\d{2}/\d{4})\b", text)
             if m1:
-                end_iso = "/".join(m1.group(1).split("/")[::-1])  # dd/mm/yyyy -> yyyy/mm/dd (pero lo convertimos abajo en supabase si hace falta)
-                # Mejor convertir correctamente a ISO
                 d, mth, y = map(int, m1.group(1).split("/"))
                 end_iso = f"{y:04d}-{mth:02d}-{d:02d}"
             else:
                 await send_text(from_msisdn, "Formato de fecha no válido. Usa DD/MM/AAAA o un rango 'DD/MM/AAAA a DD/MM/AAAA'.")
                 return
         else:
-            # Usar la segunda como nueva fecha fin
             _, end_iso = dates
 
         result = await request_rental_extension(int(rental_id), from_msisdn, end_iso)
@@ -350,7 +343,7 @@ async def handle_text(msg: Dict[str, Any], st: Dict[str, Any], from_msisdn: str)
         if status == "EXTENSION_PENDING":
             other = result.get("other_party")
             await send_text(from_msisdn, f"Solicitud de extensión registrada hasta *{_to_ve(end_iso)}*. La otra parte debe confirmarla.")
-            await send_text(other, f"El otro usuario solicita extender la renta #{rental_id} hasta *{_to_ve(end_iso)}*. Para aceptar, responde: EXTENDER RENTA #{rental_id} { _to_ve(end_iso) }")
+            await send_text(other, f"El otro usuario solicita extender la renta #{rental_id} hasta *{_to_ve(end_iso)}*. Para aceptar, responde: EXTENDER RENTA #{rental_id} {_to_ve(end_iso)}")
         elif status == "EXTENDED":
             for party in result.get("parties", []):
                 await send_text(party, f"¡Listo! La renta #{rental_id} fue extendida hasta *{_to_ve(end_iso)}* por mutuo acuerdo.")
