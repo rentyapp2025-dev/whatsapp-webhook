@@ -4,8 +4,7 @@ import hashlib
 import re
 from enum import Enum
 from typing import Optional, Any, Dict
-from datetime import datetime, date
-
+from datetime import datetime, date, timedelta
 from fastapi import FastAPI, Request, Response, HTTPException, Query
 from fastapi.responses import PlainTextResponse
 import httpx
@@ -300,16 +299,40 @@ def normalize_msisdn(s: str) -> str:
 
 # ===== NUEVO: utilidades de disponibilidad y fechas =====
 def _parse_date_any(s: str) -> Optional[date]:
+    """
+    Acepta:
+      - 'YYYY-MM-DD'
+      - 'DD/MM/YYYY' (formato Venezuela)
+      - variantes ISO con hora/tz
+    Devuelve date.
+    """
     if not s:
         return None
     s = s.strip()
     try:
-        # Soporta 'YYYY-MM-DD' y variantes ISO con hora/tz
+        # dd/mm/yyyy
+        m = re.fullmatch(r"(\d{2})/(\d{2})/(\d{4})", s)
+        if m:
+            d, mth, y = map(int, m.groups())
+            return date(y, mth, d)
+        # ISO con hora/tz
         if "T" in s:
             return datetime.fromisoformat(s.replace("Z", "+00:00")).date()
+        # yyyy-mm-dd
         return datetime.strptime(s[:10], "%Y-%m-%d").date()
     except Exception:
         return None
+
+def _to_iso(d: date) -> str:
+    return d.isoformat()
+
+def _to_ve(d: date | str) -> str:
+    """Formatea DD/MM/YYYY para mensajes al usuario."""
+    if isinstance(d, str):
+        dd = _parse_date_any(d)
+    else:
+        dd = d
+    return dd.strftime("%d/%m/%Y") if dd else str(d)
 
 def _human_days(n: int) -> str:
     if n <= 0:
@@ -318,18 +341,32 @@ def _human_days(n: int) -> str:
 
 def _extract_dates(text: str) -> Optional[tuple[str, str]]:
     """
-    Devuelve (YYYY-MM-DD, YYYY-MM-DD) si encuentra al menos dos fechas.
-    Acepta "2025-09-10 a 2025-09-12", "del 2025-09-10 al 2025-09-12", etc.
+    Extrae dos fechas del texto y devuelve (YYYY-MM-DD, YYYY-MM-DD).
+    Acepta 'DD/MM/YYYY a DD/MM/YYYY' y 'YYYY-MM-DD a YYYY-MM-DD'.
     """
-    m_dates = re.findall(r"(\d{4}-\d{2}-\d{2})", text)
-    if len(m_dates) >= 2:
-        return m_dates[0], m_dates[1]
+    # Captura dd/mm/yyyy
+    ddmm = re.findall(r"\b(\d{2}/\d{2}/\d{4})\b", text)
+    if len(ddmm) >= 2:
+        d1 = _parse_date_any(ddmm[0])
+        d2 = _parse_date_any(ddmm[1])
+        if d1 and d2:
+            return _to_iso(d1), _to_iso(d2)
+
+    # Captura yyyy-mm-dd
+    iso = re.findall(r"\b(\d{4}-\d{2}-\d{2})\b", text)
+    if len(iso) >= 2:
+        d1 = _parse_date_any(iso[0])
+        d2 = _parse_date_any(iso[1])
+        if d1 and d2:
+            return _to_iso(d1), _to_iso(d2)
+
     return None
 
 async def get_current_rental_days_left(item_id: str) -> Optional[Dict[str, Any]]:
     """
-    Devuelve {"end_date": "YYYY-MM-DD", "days_left": int} si hoy está dentro
-    de un alquiler activo del item. Ignora rentals cancelados/completados.
+    Devuelve {"end_date": "YYYY-MM-DD", "days_left": int} si HOY está dentro
+    de un alquiler activo del item.
+    **Regla inclusiva**: el día end_date aún está ocupado.
     """
     today = date.today()
     async with httpx.AsyncClient(timeout=15) as c:
@@ -349,8 +386,10 @@ async def get_current_rental_days_left(item_id: str) -> Optional[Dict[str, Any]]
         ed = _parse_date_any(row.get("end_date"))
         if not sd or not ed:
             continue
-        if sd <= today < ed:
-            return {"end_date": ed.isoformat(), "days_left": (ed - today).days}
+        # Inclusivo: sd <= today <= ed
+        if sd <= today <= ed:
+            # días restantes incluyendo hoy
+            return {"end_date": ed.isoformat(), "days_left": (ed - today).days + 1}
     return None
 # ===== fin utilidades =====
 
@@ -374,8 +413,8 @@ async def prompt_for_dates_once(msisdn: str, item_id: Optional[int] = None) -> N
     # Mantiene posibles start/end ya capturados
     await set_session(msisdn, Step.RENTAL_WAIT_DATES, draft)
 
-    # Solo aquí enviamos el prompt
-    await send_text(msisdn, f"Indica las *fechas* del alquiler para #{draft.get('item_id','?')} (formato: YYYY-MM-DD a YYYY-MM-DD).")
+    # Solo aquí enviamos el prompt (formato VE)
+    await send_text(msisdn, f"Indica las *fechas* del alquiler para #{draft.get('item_id','?')} (formato: DD/MM/AAAA a DD/MM/AAAA).")
 
 # ===== NUEVO: finalización automática del rental si ya tenemos todo =====
 async def finalize_rental_if_ready(item_id: str) -> None:
@@ -404,8 +443,9 @@ async def finalize_rental_if_ready(item_id: str) -> None:
     # Crear la solicitud
     res = await create_rental_request(int(item_id), buyer, start_iso, end_iso)
     if res.get("ok"):
-        await send_text(buyer, f"Solicitud registrada para #{item_id} del {start_iso} al {end_iso}. Estado: requested ✅")
-        await send_text(seller, f"Recibiste una solicitud de alquiler para #{item_id} del {start_iso} al {end_iso}.")
+        # Mostrar fechas en formato VE
+        await send_text(buyer, f"Solicitud registrada para #{item_id} del {_to_ve(start_iso)} al {_to_ve(end_iso)}. Estado: requested ✅")
+        await send_text(seller, f"Recibiste una solicitud de alquiler para #{item_id} del {_to_ve(start_iso)} al {_to_ve(end_iso)}.")
         await set_session(buyer, Step.IDLE, {})
     else:
         if res.get("error") == "FECHAS_NO_DISPONIBLES":
@@ -598,7 +638,7 @@ async def receive_webhook(request: Request):
 
                         dates = _extract_dates(text)
                         if not dates:
-                            await send_text(from_msisdn, "Formato de fechas no reconocido. Ejemplo: 2025-09-10 a 2025-09-12")
+                            await send_text(from_msisdn, "Formato de fechas no reconocido. Ejemplo: 10/09/2025 a 12/09/2025")
                             continue
 
                         start_iso, end_iso = dates
@@ -625,14 +665,14 @@ async def receive_webhook(request: Request):
                         await send_consent_buttons(buyer, "comprador", item_id)
                         await send_consent_buttons(seller, "vendedor", item_id)
                         await send_text(buyer, "Te pedimos autorización para compartir tu contacto con el vendedor.")
-                        # Mensaje al vendedor con FECHAS incluidas:
-                        await send_text(seller, f"Tienes una solicitud de alquiler para #{item_id} del {start_iso} al {end_iso}. ¿Autorizas compartir tu contacto?")
+                        # Mensaje al vendedor con FECHAS incluidas (VE)
+                        await send_text(seller, f"Tienes una solicitud de alquiler para #{item_id} del {_to_ve(start_iso)} al {_to_ve(end_iso)}. ¿Autorizas compartir tu contacto?")
 
                         # Si por alguna razón ya estaban ambos ok, intenta finalizar de una vez
                         if cons_row.get("buyer_ok") and cons_row.get("seller_ok"):
                             await finalize_rental_if_ready(item_id)
                         else:
-                            await send_text(from_msisdn, f"Perfecto. Guardé tus fechas {start_iso} → {end_iso} para #{item_id}. Registraré la solicitud cuando el vendedor autorice.")
+                            await send_text(from_msisdn, f"Perfecto. Guardé tus fechas {_to_ve(start_iso)} → {_to_ve(end_iso)} para #{item_id}. Registraré la solicitud cuando el vendedor autorice.")
                         continue
 
                     # ---- flujo ALQUILAR #ID (acepta ALQUILAR en cualquier parte) ----
@@ -656,12 +696,15 @@ async def receive_webhook(request: Request):
                         # Si está actualmente ocupado, avisa y no sigas
                         busy = await get_current_rental_days_left(item_id)
                         if busy:
-                            end_str = busy["end_date"]
+                            end_str_iso = busy["end_date"]
+                            # Mensaje en formato VE e indicando día siguiente como disponible
+                            ed = _parse_date_any(end_str_iso)
+                            next_free = ed + timedelta(days=1) if ed else None
                             human = _human_days(busy["days_left"])
                             await send_text(
                                 from_msisdn,
-                                f"Lo siento, el artículo #{item_id} está actualmente en renta hasta el {end_str}. "
-                                f"Quedan {human} para que esté disponible."
+                                f"Lo siento, el artículo #{item_id} está actualmente en renta hasta el {_to_ve(ed)}. "
+                                f"Quedan {human}. Estará disponible desde el {_to_ve(next_free)}."
                             )
                             if s == Step.IDLE.value:
                                 await send_main_menu(from_msisdn)
@@ -674,8 +717,8 @@ async def receive_webhook(request: Request):
                         continue
 
                     # ---- captar fechas para crear solicitud de rental (fallback genérico) ----
-                    # Si el usuario manda "ALQUILAR #123 del 2025-09-10 al 2025-09-12" en una sola línea
-                    if re.search(r"\d{4}-\d{2}-\d{2}.*\d{4}-\d{2}-\d{2}", text):
+                    # Si el usuario manda "ALQUILAR #123 del 10/09/2025 al 12/09/2025" o ISO en una sola línea
+                    if re.search(r"(\d{2}/\d{2}/\d{4}).*(\d{2}/\d{2}/\d{4})", text) or re.search(r"\d{4}-\d{2}-\d{2}.*\d{4}-\d{2}-\d{2}", text):
                         m_id = re.search(r"#(\d+)", text)
                         if not m_id:
                             # si estaba esperando fechas, usa el guardado
@@ -693,15 +736,15 @@ async def receive_webhook(request: Request):
                                             cons_row = await upsert_consent(item_id, from_msisdn, listing["owner_wa"])
                                             await send_consent_buttons(from_msisdn, "comprador", item_id)
                                             await send_consent_buttons(listing["owner_wa"], "vendedor", item_id)
-                                            await send_text(listing["owner_wa"], f"Tienes una solicitud de alquiler para #{item_id} del {start_iso} al {end_iso}. ¿Autorizas compartir tu contacto?")
+                                            await send_text(listing["owner_wa"], f"Tienes una solicitud de alquiler para #{item_id} del {_to_ve(start_iso)} al {_to_ve(end_iso)}. ¿Autorizas compartir tu contacto?")
                                             if cons_row.get("buyer_ok") and cons_row.get("seller_ok"):
                                                 await finalize_rental_if_ready(item_id)
                                             else:
-                                                await send_text(from_msisdn, f"Perfecto. Guardé tus fechas {start_iso} → {end_iso} para #{item_id}. Registraré la solicitud cuando el vendedor autorice.")
+                                                await send_text(from_msisdn, f"Perfecto. Guardé tus fechas {_to_ve(start_iso)} → {_to_ve(end_iso)} para #{item_id}. Registraré la solicitud cuando el vendedor autorice.")
                                         else:
                                             await send_text(from_msisdn, "No puedes alquilar tu propio artículo." if listing else "No encuentro ese artículo.")
                                         continue
-                            await send_text(from_msisdn, "Para crear la solicitud necesito el ID del artículo. Ej: ALQUILAR #123 del 2025-09-10 al 2025-09-12")
+                            await send_text(from_msisdn, "Para crear la solicitud necesito el ID del artículo. Ej: ALQUILAR #123 del 10/09/2025 al 12/09/2025")
                             if s == Step.IDLE.value:
                                 await send_main_menu(from_msisdn)
                             continue
@@ -727,12 +770,12 @@ async def receive_webhook(request: Request):
                             cons_row = await upsert_consent(item_id, from_msisdn, listing["owner_wa"])
                             await send_consent_buttons(from_msisdn, "comprador", item_id)
                             await send_consent_buttons(listing["owner_wa"], "vendedor", item_id)
-                            # Mensaje al vendedor con fechas:
-                            await send_text(listing["owner_wa"], f"Tienes una solicitud de alquiler para #{item_id} del {start_iso} al {end_iso}. ¿Autorizas compartir tu contacto?")
+                            # Mensaje al vendedor con fechas (VE):
+                            await send_text(listing["owner_wa"], f"Tienes una solicitud de alquiler para #{item_id} del {_to_ve(start_iso)} al {_to_ve(end_iso)}. ¿Autorizas compartir tu contacto?")
                             if cons_row.get("buyer_ok") and cons_row.get("seller_ok"):
                                 await finalize_rental_if_ready(item_id)
                             else:
-                                await send_text(from_msisdn, f"Perfecto. Guardé tus fechas {start_iso} → {end_iso} para #{item_id}. Registraré la solicitud cuando el vendedor autorice.")
+                                await send_text(from_msisdn, f"Perfecto. Guardé tus fechas {_to_ve(start_iso)} → {_to_ve(end_iso)} para #{item_id}. Registraré la solicitud cuando el vendedor autorice.")
                             continue
 
                     # ---- flujo PUBLICAR (acepta PUBLICAR en cualquier parte) ----
