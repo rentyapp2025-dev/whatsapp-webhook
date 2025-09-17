@@ -132,11 +132,24 @@ async def update_listing_status(item_id: str, owner_wa: str, new_status: str) ->
     async with httpx.AsyncClient(timeout=10.0) as client:
         r = await client.patch(
             f"{BASE}/listings",
-            headers=HEADERS,
+            headers=HEADERS_RETURN, # Usamos RETURN para saber si se modificó algo
             params={"id": f"eq.{item_id}", "owner_wa": f"eq.{owner_wa}"},
             json={"status": new_status}
         )
-        return 200 <= r.status_code < 300
+        # Retorna True si la actualización afectó a alguna fila
+        return bool(r.json())
+
+async def get_listings_for_user(owner_wa: str) -> List[Dict[str, Any]]:
+    """Obtiene todas las publicaciones (activas e inactivas) de un usuario."""
+    async with httpx.AsyncClient(timeout=10.0) as c:
+        params = {
+            "owner_wa": f"eq.{owner_wa}",
+            "select": "id,title,status,price",
+            "order": "created_at.desc"
+        }
+        r = await c.get(f"{BASE}/listings", headers=HEADERS, params=params)
+        r.raise_for_status()
+        return r.json()
 
 # =========================
 # Consents
@@ -233,10 +246,6 @@ async def mark_introduced_once(item_id: str) -> bool:
 # Rentals
 # =========================
 async def create_rental_request(listing_id: int, renter_msisdn: str, start_iso: str, end_iso: str, payment_method: str) -> Dict[str, Any]:
-    """
-    Se llama cuando YA hay consentimiento de ambas partes.
-    Por eso creamos la renta directamente como ACTIVE para evitar que quede en 'requested'.
-    """
     listing = await get_listing(str(listing_id))
     if not listing:
         return {"ok": False, "error": "LISTING_NOT_FOUND"}
@@ -248,7 +257,7 @@ async def create_rental_request(listing_id: int, renter_msisdn: str, start_iso: 
             "seller_wa": listing["owner_wa"],
             "start_date": start_iso[:10],
             "end_date": end_iso[:10],
-            "status": "active",  # <-- FIX principal
+            "status": "active",
             "selected_payment_method": payment_method,
         }
         r = await client.post(f"{BASE}/rentals", headers=HEADERS_RETURN, json=payload)
@@ -268,11 +277,11 @@ async def update_rental_status(rental_id: int, new_status: str) -> bool:
     async with httpx.AsyncClient(timeout=10.0) as c:
         r = await c.patch(
             f"{BASE}/rentals",
-            headers=HEADERS,
+            headers=HEADERS_RETURN,
             params={"id": f"eq.{rental_id}"},
             json={"status": new_status}
         )
-        return 200 <= r.status_code < 300
+        return bool(r.json())
 
 async def request_rental_cancellation(rental_id: int, requester_wa: str) -> Dict[str, Any]:
     async with httpx.AsyncClient(timeout=15.0) as c:
@@ -305,10 +314,6 @@ async def request_rental_cancellation(rental_id: int, requester_wa: str) -> Dict
             return {"status": "WAITING_OTHER", "other_party": other_party_wa}
 
 async def request_rental_extension(rental_id: int, requester_wa: str, new_end_iso: str) -> Dict[str, Any]:
-    """
-    Extensión por mutuo acuerdo.
-    Requiere columnas: buyer_wants_extension, seller_wants_extension, proposed_end_date (date).
-    """
     async with httpx.AsyncClient(timeout=20.0) as c:
         r_get = await c.get(f"{BASE}/rentals", headers=HEADERS, params={"id": f"eq.{rental_id}", "select": "*"})
         rows = r_get.json()
@@ -321,20 +326,17 @@ async def request_rental_extension(rental_id: int, requester_wa: str, new_end_is
         other_flag = "seller_wants_extension" if req_is_buyer else "buyer_wants_extension"
         other_party = rental["seller_wa"] if req_is_buyer else rental["buyer_wa"]
 
-        # Establecer propuesta + flag del solicitante
         await c.patch(
             f"{BASE}/rentals", headers=HEADERS, params={"id": f"eq.{rental_id}"},
             json={"proposed_end_date": new_end_iso[:10], flag_field: True, "status": "extension_pending"}
         )
 
-        # Releer para ver si la otra parte ya había aceptado
         r_now = await c.get(
             f"{BASE}/rentals", headers=HEADERS,
             params={"id": f"eq.{rental_id}", "select": f"{other_flag},buyer_wa,seller_wa,proposed_end_date"}
         )
         curr = (r_now.json() or [{}])[0]
         if curr.get(other_flag) is True:
-            # Mutuo acuerdo: aplicar extensión
             await c.patch(
                 f"{BASE}/rentals", headers=HEADERS, params={"id": f"eq.{rental_id}"},
                 json={
@@ -348,6 +350,18 @@ async def request_rental_extension(rental_id: int, requester_wa: str, new_end_is
             return {"status": "EXTENDED", "parties": [rental["buyer_wa"], rental["seller_wa"]]}
 
         return {"status": "EXTENSION_PENDING", "other_party": other_party}
+
+async def get_rentals_for_user(wa_id: str) -> List[Dict[str, Any]]:
+    """Obtiene todos los alquileres donde un usuario es comprador o vendedor."""
+    async with httpx.AsyncClient(timeout=15.0) as c:
+        params = {
+            "or": f"(buyer_wa.eq.{wa_id},seller_wa.eq.{wa_id})",
+            "select": "*,listing:listings(title)",
+            "order": "start_date.desc"
+        }
+        r = await c.get(f"{BASE}/rentals", headers=HEADERS, params=params)
+        r.raise_for_status()
+        return r.json()
 
 # =========================
 # Reviews
@@ -375,7 +389,7 @@ async def add_review(rental_id: int, reviewer_wa: str, rating: int, comment: str
         payload = {
             "rental_id": rental_id,
             "reviewer_wa": reviewer_wa,
-            "reviewed_wa": reviewed_wa,
+            "reviewed_wa": reviewed_wa, # <-- Asegúrate de tener esta columna en Supabase
             "rating": rating,
             "comment": comment
         }

@@ -1,7 +1,6 @@
 import hmac
 import hashlib
 from typing import Optional, Dict, Any, List
-
 import httpx
 
 from .config import GRAPH_BASE, WHATSAPP_TOKEN, PHONE_NUMBER_ID, APP_SECRET_RAW
@@ -29,7 +28,6 @@ async def _post_messages(payload: Dict[str, Any]):
         try:
             r.raise_for_status()
         except httpx.HTTPStatusError as e:
-            # Log mínimo
             print(f"[GraphAPI] {e.response.status_code} - {e.response.text}")
             raise
 
@@ -85,10 +83,12 @@ async def send_list(
 
 async def send_main_menu(to_msisdn: str):
     rows = [
-        {"id": "menu_publish", "title": "Publicar un artículo", "description": "Ofrece algo en alquiler."},
-        {"id": "menu_rent", "title": "Alquilar por ID", "description": "Inicia una solicitud de alquiler."},
-        {"id": "menu_my_reviews", "title": "Ver mis reseñas", "description": "Lo que otros opinan de ti."},
-        {"id": "menu_help", "title": "Ayuda y Comandos", "description": "Descubre más funciones."},
+        {"id": "menu_publish", "title": "➕ Publicar un artículo", "description": "Ofrece algo en alquiler."},
+        {"id": "menu_rent", "title": "🔍 Alquilar por ID", "description": "Inicia una solicitud de alquiler."},
+        {"id": "menu_my_listings", "title": "📚 Mis Publicaciones", "description": "Gestiona los artículos que ofreces."},
+        {"id": "menu_my_rentals", "title": "📋 Mis Alquileres", "description": "Revisa tus alquileres actuales y pasados."},
+        {"id": "menu_my_reviews", "title": "⭐️ Ver mis reseñas", "description": "Lo que otros opinan de ti."},
+        {"id": "menu_help", "title": "❓ Ayuda y Comandos", "description": "Descubre más funciones."},
     ]
     await send_list(
         to_msisdn,
