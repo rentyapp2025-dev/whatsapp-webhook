@@ -1,8 +1,8 @@
 import os
 import httpx
 import re
-from datetime import datetime, date
-from typing import Optional, Dict, Any, List
+from datetime import datetime, date, timedelta
+from typing import Optional, Dict, Any, List, Tuple
 
 # === Config ===
 SUPABASE_URL = os.environ["SUPABASE_URL"].rstrip("/")
@@ -48,6 +48,7 @@ async def get_overlapping_rentals(item_id: int | str, start_iso: str, end_iso: s
             "status": "in.(pending,requested,approved,active)",
             "select": "id,start_date,end_date,status",
             "and": f"(start_date.lte.{end_d},end_date.gte.{start_d})",
+            "order": "start_date.asc",
         }
         r = await c.get(f"{BASE}/rentals", headers=HEADERS, params=params)
         r.raise_for_status()
@@ -57,6 +58,110 @@ async def get_overlapping_rentals(item_id: int | str, start_iso: str, end_iso: s
 async def is_item_available(item_id: int | str, start_iso: str, end_iso: str) -> bool:
     overlaps = await get_overlapping_rentals(item_id, start_iso, end_iso)
     return len(overlaps) == 0
+
+
+# =========================
+# Calendario / sugerencias de disponibilidad
+# =========================
+async def get_future_bookings(item_id: int | str, from_iso: Optional[str] = None) -> List[Tuple[date, date]]:
+    """
+    Devuelve las reservas futuras (bloqueantes) del item como pares (start,end), ordenadas.
+    """
+    if not from_iso:
+        from_iso = date.today().isoformat()
+
+    async with httpx.AsyncClient(timeout=15.0) as c:
+        params = {
+            "item_id": f"eq.{item_id}",
+            "status": "in.(pending,requested,approved,active)",
+            "select": "start_date,end_date",
+            "end_date": f"gte.{from_iso[:10]}",
+            "order": "start_date.asc",
+        }
+        r = await c.get(f"{BASE}/rentals", headers=HEADERS, params=params)
+        r.raise_for_status()
+        rows = r.json()
+
+    bookings: List[Tuple[date, date]] = []
+    for rnt in rows:
+        try:
+            s = datetime.strptime(rnt["start_date"], "%Y-%m-%d").date()
+            e = datetime.strptime(rnt["end_date"], "%Y-%m-%d").date()
+            if s > e:
+                continue
+            bookings.append((s, e))
+        except Exception:
+            continue
+    bookings.sort(key=lambda t: t[0])
+    return bookings
+
+
+def suggest_windows(
+    bookings: List[Tuple[date, date]],
+    requested_days: int,
+    from_day: Optional[date] = None,
+    horizon_days: int = 120,
+    max_suggestions: int = 3,
+) -> List[Tuple[date, date]]:
+    """
+    Calcula huecos libres (>= requested_days) desde 'from_day' (o hoy) hasta 'from_day + horizon_days'.
+    Devuelve hasta max_suggestions tuplas (start,end) inclusivas.
+    """
+    if requested_days <= 0:
+        requested_days = 1
+    today = date.today()
+    cur = max(from_day or today, today)
+    end_horizon = cur + timedelta(days=horizon_days)
+
+    # Unificar reservas solapadas o adyacentes
+    merged: List[Tuple[date, date]] = []
+    for s, e in sorted(bookings, key=lambda t: t[0]):
+        if e < cur:
+            continue
+        if not merged:
+            merged.append((s, e))
+        else:
+            ps, pe = merged[-1]
+            if s <= pe + timedelta(days=1):  # solapa o toca
+                merged[-1] = (ps, max(pe, e))
+            else:
+                merged.append((s, e))
+
+    suggestions: List[Tuple[date, date]] = []
+
+    # Si no hay reservas -> libre desde hoy
+    if not merged:
+        end = min(end_horizon, cur + timedelta(days=requested_days - 1))
+        suggestions.append((cur, end))
+        return suggestions[:max_suggestions]
+
+    # Antes de la primera reserva
+    first_s, _ = merged[0]
+    if cur < first_s:
+        gap_len = (first_s - cur).days
+        if gap_len >= requested_days:
+            suggestions.append((cur, cur + timedelta(days=requested_days - 1)))
+            if len(suggestions) >= max_suggestions:
+                return suggestions
+
+    # Entre reservas
+    for (s1, e1), (s2, e2) in zip(merged, merged[1:]):
+        start_gap = e1 + timedelta(days=1)
+        end_gap = min(s2 - timedelta(days=1), end_horizon)
+        if start_gap <= end_gap:
+            gap_len = (end_gap - start_gap).days + 1
+            if gap_len >= requested_days:
+                suggestions.append((start_gap, start_gap + timedelta(days=requested_days - 1)))
+                if len(suggestions) >= max_suggestions:
+                    return suggestions
+
+    # Después de la última reserva
+    last_e = merged[-1][1]
+    start_gap = max(last_e + timedelta(days=1), cur)
+    if start_gap <= end_horizon and len(suggestions) < max_suggestions:
+        suggestions.append((start_gap, start_gap + timedelta(days=requested_days - 1)))
+
+    return suggestions[:max_suggestions]
 
 
 # =========================
@@ -538,14 +643,14 @@ async def get_rentals_for_user(wa_id: str) -> List[Dict[str, Any]]:
         return r.json()
 
 
-# ======= Helpers opcionales para extensiones =======
+# ======= Helpers opcionales para extensiones / detalle =======
 async def get_rental(rental_id: int) -> Optional[Dict[str, Any]]:
-    """Obtiene una renta por ID."""
+    """Obtiene una renta por ID (incluye título del listing)."""
     async with httpx.AsyncClient(timeout=10.0) as c:
         r = await c.get(
             f"{BASE}/rentals",
             headers=HEADERS,
-            params={"id": f"eq.{rental_id}", "select": "*", "limit": 1},
+            params={"id": f"eq.{rental_id}", "select": "*,listing:listings(title)", "limit": 1},
         )
         r.raise_for_status()
         rows = r.json()

@@ -11,19 +11,22 @@ class Step(str, Enum):
     PUBLISH_PAYMENTS = "publish_payments"
     RENTAL_WAIT_DATES = "rental_wait_dates"
     RENTAL_WAIT_PAYMENT = "rental_wait_payment"
-    RENTAL_EXTENSION_WAIT_DATES = "rental_extension_wait_dates"  # NUEVO
-
+    RENTAL_EXTENSION_WAIT_DATES = "rental_extension_wait_dates"  
+    RENTAL_VIEW_ONE = "rental_view_one"  
+    
 def step_val(st: Dict[str, Any] | None) -> str:
     v = (st or {}).get("step")
     return v.value if isinstance(v, Step) else v or Step.IDLE.value
 
 # === Fechas / utilidades ===
 def _parse_date_any(s: str) -> Optional[date]:
-    if not s: return None
+    if not s:
+        return None
     s = s.strip()
     try:
         if m := re.fullmatch(r"(\d{2})/(\d{2})/(\d{4})", s):
-            d, mth, y = map(int, m.groups()); return date(y, mth, d)
+            d, mth, y = map(int, m.groups())
+            return date(y, mth, d)
         return datetime.strptime(s[:10], "%Y-%m-%d").date()
     except Exception:
         return None

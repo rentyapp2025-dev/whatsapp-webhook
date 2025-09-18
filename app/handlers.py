@@ -1,6 +1,6 @@
 import re
 import json
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 from datetime import datetime, date
 
 import httpx
@@ -22,6 +22,9 @@ from .clients.supabase_client import (
     get_rentals_for_user,
     confirm_rental_start,                 # Doble confirmación de inicio
     is_item_available,                    # Disponibilidad por fechas
+    get_future_bookings,                  # NUEVO: obtener reservas futuras
+    suggest_windows,                      # NUEVO: sugerir huecos libres
+    get_rental,                           # NUEVO: detalle de una renta
 )
 
 # === Helpers locales ===
@@ -33,6 +36,15 @@ def _validate_date_window(start_iso: str, end_iso: str) -> bool:
         return s >= date.today() and e > s
     except Exception:
         return False
+
+
+def _fmt_suggestions(sugs: List[tuple]) -> str:
+    if not sugs:
+        return ""
+    lines = []
+    for i, (s, e) in enumerate(sugs, 1):
+        lines.append(f"  {i}. {_to_ve(s)} a {_to_ve(e)}")
+    return "\n".join(lines)
 
 
 async def _send_post_agreement_menus(buyer_wa: str, seller_wa: str, item_id: str, rental_id: str):
@@ -196,6 +208,30 @@ async def handle_interactive(msg: Dict[str, Any], st: Dict[str, Any], from_msisd
                 await send_text(from_msisdn, "No se pudo procesar el botón de extensión.")
             return
 
+        # Botones del submenú "Mis Alquileres"
+        if btn_id == "myrentals_all":
+            rentals = await get_rentals_for_user(from_msisdn)
+            if not rentals:
+                await send_text(from_msisdn, "No tienes alquileres activos o pasados.")
+                return
+            response = "Tus alquileres:\n\n"
+            for r in rentals:
+                is_owner = r['seller_wa'] == from_msisdn
+                role = "(Eres el dueño)" if is_owner else "(Eres el inquilino)"
+                title = r.get('listing', {}).get('title', f"Artículo #{r['item_id']}")
+                start, end = _to_ve(r['start_date']), _to_ve(r['end_date'])
+                response += (f"📝 *Renta #{r['id']}* {role}\n"
+                             f"   - Artículo: {title}\n"
+                             f"   - Fechas: {start} a {end}\n"
+                             f"   - Estado: *{r['status']}*\n\n")
+            await send_text(from_msisdn, response)
+            return
+
+        if btn_id == "myrentals_one":
+            await set_session(from_msisdn, Step.RENTAL_VIEW_ONE, {})
+            await send_text(from_msisdn, "Escribe el *número de renta* (ej: `#123` o `123`).")
+            return
+
     if itype == "list_reply":
         row_id = interactive["list_reply"]["id"]
         row_title = interactive["list_reply"]["title"]
@@ -219,7 +255,18 @@ async def handle_interactive(msg: Dict[str, Any], st: Dict[str, Any], from_msisd
                 return
 
             if not await is_item_available(item_id, start_iso, end_iso):
-                await send_text(from_msisdn, "Lo siento, esas fechas ya no están disponibles para este artículo.")
+                # Sugerir alternativas
+                try:
+                    requested_days = (datetime.strptime(end_iso[:10], "%Y-%m-%d").date() - datetime.strptime(start_iso[:10], "%Y-%m-%d").date()).days + 1
+                    bookings = await get_future_bookings(item_id)
+                    sugs = suggest_windows(bookings, requested_days)
+                    msg = "Lo siento, esas fechas ya no están disponibles para este artículo."
+                    if sugs:
+                        msg += "\n\nFechas *sugeridas* libres:\n" + _fmt_suggestions(sugs)
+                        msg += "\n\nPuedes copiar una sugerencia y reenviar las fechas."
+                    await send_text(from_msisdn, msg)
+                except Exception:
+                    await send_text(from_msisdn, "Lo siento, esas fechas ya no están disponibles para este artículo.")
                 await set_session(from_msisdn, Step.IDLE, {})
                 await send_main_menu(from_msisdn)
                 return
@@ -254,7 +301,13 @@ async def handle_interactive(msg: Dict[str, Any], st: Dict[str, Any], from_msisd
         elif row_id == "menu_my_listings":
             await handle_text({"text": {"body": "MIS PUBLICACIONES"}}, st, from_msisdn)
         elif row_id == "menu_my_rentals":
-            await handle_text({"text": {"body": "MIS ALQUILERES"}}, st, from_msisdn)
+            # Mostrar submenú con opciones
+            body = "¿Qué te gustaría ver?"
+            buttons = [
+                {"id": "myrentals_all", "title": "📋 Ver todos"},
+                {"id": "myrentals_one", "title": "🔎 Ver uno (#ID)"},
+            ]
+            await send_reply_buttons(from_msisdn, "Mis Alquileres", body, buttons)
         elif row_id == "menu_my_reviews":
             await handle_text({"text": {"body": "MIS RESEÑAS"}}, st, from_msisdn)
         elif row_id == "menu_help":
@@ -296,7 +349,20 @@ async def handle_text(msg: Dict[str, Any], st: Dict[str, Any], from_msisdn: str)
                 await send_text(from_msisdn, "Las fechas no son válidas. Asegúrate de que el inicio sea desde hoy y el fin posterior.")
                 return
             if not await is_item_available(item_id, start_iso, end_iso):
-                await send_text(from_msisdn, "Lo siento, esas fechas ya están reservadas para este artículo.")
+                # Sugerir alternativas
+                try:
+                    requested_days = (datetime.strptime(end_iso[:10], "%Y-%m-%d").date() - datetime.strptime(start_iso[:10], "%Y-%m-%d").date()).days + 1
+                    bookings = await get_future_bookings(item_id)
+                    sugs = suggest_windows(bookings, requested_days)
+                    msg = "Lo siento, ese rango está *ocupado* para este artículo."
+                    if sugs:
+                        msg += "\n\nFechas *sugeridas* libres:\n" + _fmt_suggestions(sugs)
+                        msg += "\n\nCopia una sugerencia y envíala con el formato: `DD/MM/AAAA a DD/MM/AAAA`."
+                    else:
+                        msg += "\n\nNo encontré huecos próximos del mismo tamaño. Prueba con menos días o desde otra fecha."
+                    await send_text(from_msisdn, msg)
+                except Exception:
+                    await send_text(from_msisdn, "Lo siento, ese rango está ocupado para este artículo.")
                 return
 
             await set_session(from_msisdn, Step.RENTAL_WAIT_PAYMENT, {"item_id": int(item_id), "start_iso": start_iso, "end_iso": end_iso})
@@ -306,6 +372,24 @@ async def handle_text(msg: Dict[str, Any], st: Dict[str, Any], from_msisdn: str)
         else:
             await set_session(from_msisdn, Step.RENTAL_WAIT_DATES, {"item_id": int(item_id)})
             await send_text(from_msisdn, f"Perfecto. Ahora, indica las *fechas* que necesitas para el artículo #{item_id} (formato: DD/MM/AAAA a DD/MM/AAAA).")
+        return
+
+    # Ver una renta específica directamente: "ALQUILER #123" o "Renta #123"
+    if re.search(r"\b(ALQUILER|RENTA)\b", upper) and re.search(r"[#№](\d+)", text):
+        rid = int(re.search(r"[#№](\d+)", text).group(1))
+        r = await get_rental(rid)
+        if not r:
+            await send_text(from_msisdn, f"No encontré la renta #{rid}.")
+            return
+        is_owner = r["seller_wa"] == from_msisdn
+        role = "(Eres el dueño)" if is_owner else "(Eres el inquilino)"
+        title = (r.get("listing") or {}).get("title", f"Artículo #{r['item_id']}")
+        start, end = _to_ve(r['start_date']), _to_ve(r['end_date'])
+        info = (f"📝 *Renta #{r['id']}* {role}\n"
+                f"   - Artículo: {title}\n"
+                f"   - Fechas: {start} a {end}\n"
+                f"   - Estado: *{r['status']}*")
+        await send_text(from_msisdn, info)
         return
 
     # Comandos directos
@@ -346,21 +430,31 @@ async def handle_text(msg: Dict[str, Any], st: Dict[str, Any], from_msisdn: str)
         return
 
     if upper == "MIS ALQUILERES":
-        rentals = await get_rentals_for_user(from_msisdn)
-        if not rentals:
-            await send_text(from_msisdn, "No tienes alquileres activos o pasados.")
+        # Mostrar submenú con opciones
+        body = "¿Qué te gustaría ver?"
+        buttons = [
+            {"id": "myrentals_all", "title": "📋 Ver todos"},
+            {"id": "myrentals_one", "title": "🔎 Ver uno (#ID)"},
+        ]
+        await send_reply_buttons(from_msisdn, "Mis Alquileres", body, buttons)
+        return
+
+    # Atajo: "MIS ALQUILERES #123"
+    if upper.startswith("MIS ALQUILERES #") or re.match(r"^MIS\s+ALQUILERES\s*[#№]\d+", upper):
+        rid = int(re.search(r"[#№](\d+)", text).group(1))
+        r = await get_rental(rid)
+        if not r:
+            await send_text(from_msisdn, f"No encontré la renta #{rid}.")
             return
-        response = "Tus alquileres:\n\n"
-        for r in rentals:
-            is_owner = r['seller_wa'] == from_msisdn
-            role = "(Eres el dueño)" if is_owner else "(Eres el inquilino)"
-            title = r.get('listing', {}).get('title', f"Artículo #{r['item_id']}")
-            start, end = _to_ve(r['start_date']), _to_ve(r['end_date'])
-            response += (f"📝 *Renta #{r['id']}* {role}\n"
-                         f"   - Artículo: {title}\n"
-                         f"   - Fechas: {start} a {end}\n"
-                         f"   - Estado: *{r['status']}*\n\n")
-        await send_text(from_msisdn, response)
+        is_owner = r["seller_wa"] == from_msisdn
+        role = "(Eres el dueño)" if is_owner else "(Eres el inquilino)"
+        title = (r.get("listing") or {}).get("title", f"Artículo #{r['item_id']}")
+        start, end = _to_ve(r['start_date']), _to_ve(r['end_date'])
+        info = (f"📝 *Renta #{r['id']}* {role}\n"
+                f"   - Artículo: {title}\n"
+                f"   - Fechas: {start} a {end}\n"
+                f"   - Estado: *{r['status']}*")
+        await send_text(from_msisdn, info)
         return
 
     if upper.startswith("ELIMINAR #"):
@@ -438,7 +532,20 @@ async def handle_text(msg: Dict[str, Any], st: Dict[str, Any], from_msisdn: str)
             return
 
         if not await is_item_available(item_id, start_iso, end_iso):
-            await send_text(from_msisdn, "Esas fechas ya están reservadas. Prueba con un rango distinto.")
+            # Sugerencias si no hay disponibilidad
+            try:
+                requested_days = (datetime.strptime(end_iso[:10], "%Y-%m-%d").date() - datetime.strptime(start_iso[:10], "%Y-%m-%d").date()).days + 1
+                bookings = await get_future_bookings(item_id)
+                sugs = suggest_windows(bookings, requested_days)
+                msg = "Esas fechas ya están reservadas."
+                if sugs:
+                    msg += "\n\nFechas *sugeridas* libres:\n" + _fmt_suggestions(sugs)
+                    msg += "\n\nCopia una y vuelve a enviarla con el formato: `DD/MM/AAAA a DD/MM/AAAA`."
+                else:
+                    msg += "\n\nNo encontré huecos próximos del mismo tamaño. Prueba con menos días o desde otra fecha."
+                await send_text(from_msisdn, msg)
+            except Exception:
+                await send_text(from_msisdn, "Esas fechas ya están reservadas. Prueba con un rango distinto.")
             return
 
         await set_session(from_msisdn, Step.RENTAL_WAIT_PAYMENT, {"item_id": item_id, "start_iso": start_iso, "end_iso": end_iso})
@@ -485,6 +592,31 @@ async def handle_text(msg: Dict[str, Any], st: Dict[str, Any], from_msisdn: str)
         await send_main_menu(from_msisdn)
         return
 
+    # Estado: pedir un ID de renta específico
+    if s == Step.RENTAL_VIEW_ONE:
+        m = re.search(r"(\d+)", text)
+        if not m:
+            await send_text(from_msisdn, "Por favor envía un número de renta válido. Ej: `#123` o `123`.")
+            return
+        rid = int(m.group(1))
+        r = await get_rental(rid)
+        await set_session(from_msisdn, Step.IDLE, {})
+        if not r:
+            await send_text(from_msisdn, f"No encontré la renta #{rid}.")
+            await send_main_menu(from_msisdn)
+            return
+        is_owner = r["seller_wa"] == from_msisdn
+        role = "(Eres el dueño)" if is_owner else "(Eres el inquilino)"
+        title = (r.get("listing") or {}).get("title", f"Artículo #{r['item_id']}")
+        start, end = _to_ve(r['start_date']), _to_ve(r['end_date'])
+        info = (f"📝 *Renta #{r['id']}* {role}\n"
+                f"   - Artículo: {title}\n"
+                f"   - Fechas: {start} a {end}\n"
+                f"   - Estado: *{r['status']}*")
+        await send_text(from_msisdn, info)
+        await send_main_menu(from_msisdn)
+        return
+
     # Fallback: IA (opcional)
     intent_data = await get_intent_from_llm(text)
     if intent_data and "intent" in intent_data:
@@ -508,7 +640,17 @@ async def handle_text(msg: Dict[str, Any], st: Dict[str, Any], from_msisdn: str)
                     await send_text(from_msisdn, "Las fechas no son válidas. Inicio desde hoy y fin posterior.")
                     return
                 if not await is_item_available(item_id, start_iso, end_iso):
-                    await send_text(from_msisdn, "Ese rango ya está reservado para este artículo.")
+                    try:
+                        requested_days = (datetime.strptime(end_iso[:10], "%Y-%m-%d").date() - datetime.strptime(start_iso[:10], "%Y-%m-%d").date()).days + 1
+                        bookings = await get_future_bookings(item_id)
+                        sugs = suggest_windows(bookings, requested_days)
+                        msg = "Ese rango ya está reservado para este artículo."
+                        if sugs:
+                            msg += "\n\nFechas *sugeridas* libres:\n" + _fmt_suggestions(sugs)
+                            msg += "\n\nCopia una y vuelve a enviarla con el formato: `DD/MM/AAAA a DD/MM/AAAA`."
+                        await send_text(from_msisdn, msg)
+                    except Exception:
+                        await send_text(from_msisdn, "Ese rango ya está reservado para este artículo.")
                     return
                 await set_session(from_msisdn, Step.RENTAL_WAIT_PAYMENT, {"item_id": int(item_id), "start_iso": start_iso, "end_iso": end_iso})
                 payment_options = listing.get("payment_methods") or ["A convenir"]
