@@ -161,6 +161,31 @@ async def handle_text(msg: Dict[str, Any], st: Dict[str, Any], from_msisdn: str)
         await send_main_menu(from_msisdn)
         return
 
+    # --- ALQUILAR detectado en cualquier parte del texto (robusto) ---
+    m_cmd = re.search(r"\bALQUILAR\b", upper)
+    m_id = re.search(r"[#№](\d+)", text)   # acepta # o №
+    if m_cmd and m_id:
+        item_id = m_id.group(1)
+        listing = await get_listing(item_id)
+        if not listing:
+            await send_text(from_msisdn, f"No encontré un artículo con el ID #{item_id}.")
+            return
+        if listing['owner_wa'] == from_msisdn:
+            await send_text(from_msisdn, "No puedes alquilar tu propio artículo.")
+            return
+
+        dates = _extract_dates(text)
+        if dates:
+            start_iso, end_iso = dates
+            await set_session(from_msisdn, Step.RENTAL_WAIT_PAYMENT, {"item_id": int(item_id), "start_iso": start_iso, "end_iso": end_iso})
+            payment_options = listing.get("payment_methods") or ["A convenir"]
+            rows = [{"id": p.replace(" ", "_"), "title": p} for p in payment_options]
+            await send_list(from_msisdn, f"Alquiler de #{item_id}", "Selecciona tu método de pago:", "Ver Pagos", rows)
+        else:
+            await set_session(from_msisdn, Step.RENTAL_WAIT_DATES, {"item_id": int(item_id)})
+            await send_text(from_msisdn, f"Perfecto. Ahora, indica las *fechas* que necesitas para el artículo #{item_id} (formato: DD/MM/AAAA a DD/MM/AAAA).")
+        return
+
     # Comandos directos y estructurados
     if upper.startswith("RESEÑA #"):
         match = re.search(r"RESEÑA\s*#(\d+)\s*([1-5])\s*(.*)", text, re.IGNORECASE)
@@ -370,9 +395,9 @@ async def get_intent_from_llm(text: str) -> Optional[Dict[str, Any]]:
                      "y determinar su intención principal. Debes responder únicamente con un objeto JSON, sin explicaciones.\n"
                      "Intenciones: 'rent', 'get_my_listings', 'get_my_rentals', 'greet', 'unknown'.\n"
                      "Para 'rent', extrae 'item_id' y 'dates_text' (la parte del texto con las fechas).\n"
-                     'Ejemplo 1: user="Quiero alquilar el #123 para la semana que viene" -> {"intent": "rent", "parameters": {"item_id": "123", "dates_text": "para la semana que viene"}}\n'
-                     'Ejemplo 2: user="mis publicaciones" -> {"intent": "get_my_listings", "parameters": {}}\n'
-                     'Ejemplo 3: user="hola que tal" -> {"intent": "greet", "parameters": {}}')
+                     'Ejemplo 1: user=\"Quiero alquilar el #123 para la semana que viene\" -> {\"intent\": \"rent\", \"parameters\": {\"item_id\": \"123\", \"dates_text\": \"para la semana que viene\"}}\n'
+                     'Ejemplo 2: user=\"mis publicaciones\" -> {\"intent\": \"get_my_listings\", \"parameters\": {}}\n'
+                     'Ejemplo 3: user=\"hola que tal\" -> {\"intent\": \"greet\", \"parameters\": {}}')
     messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": text}]
     try:
         response_text = chat_completion(messages, temperature=0.2, max_tokens=200)
