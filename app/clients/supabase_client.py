@@ -17,11 +17,13 @@ HEADERS = {
 HEADERS_RETURN = {**HEADERS, "Prefer": "return=representation"}
 HEADERS_UPSERT = {**HEADERS, "Prefer": "return=representation,resolution=merge-duplicates"}
 
+
 def _norm_phone(s: Optional[str]) -> str:
     return re.sub(r"\D", "", s or "")
 
+
 # =========================
-# Helpers de validación (NUEVO)
+# Helpers de validación
 # =========================
 def _valid_date_window(start_iso: str, end_iso: str) -> bool:
     """start >= hoy y end > start (comparación por fecha, sin tiempo)."""
@@ -31,6 +33,7 @@ def _valid_date_window(start_iso: str, end_iso: str) -> bool:
         return s >= date.today() and e > s
     except Exception:
         return False
+
 
 async def get_overlapping_rentals(item_id: int | str, start_iso: str, end_iso: str) -> List[Dict[str, Any]]:
     """
@@ -50,9 +53,11 @@ async def get_overlapping_rentals(item_id: int | str, start_iso: str, end_iso: s
         r.raise_for_status()
         return r.json()
 
+
 async def is_item_available(item_id: int | str, start_iso: str, end_iso: str) -> bool:
     overlaps = await get_overlapping_rentals(item_id, start_iso, end_iso)
     return len(overlaps) == 0
+
 
 # =========================
 # Users
@@ -74,7 +79,7 @@ async def ensure_user(msisdn: str, name: Optional[str] = None):
                     f"{BASE}/users",
                     headers=HEADERS,
                     params={"wa_id": f"eq.{msisdn}"},
-                    json={"name": name}
+                    json={"name": name},
                 )
             return
 
@@ -83,6 +88,7 @@ async def ensure_user(msisdn: str, name: Optional[str] = None):
             headers=HEADERS_RETURN,
             json={"wa_id": msisdn, "name": name or msisdn},
         )
+
 
 async def get_user_name(msisdn: str) -> str:
     async with httpx.AsyncClient(timeout=10.0) as client:
@@ -94,6 +100,7 @@ async def get_user_name(msisdn: str) -> str:
         r.raise_for_status()
         rows = r.json()
         return rows[0]["name"] if rows and rows[0].get("name") else msisdn
+
 
 # =========================
 # Sessions
@@ -114,6 +121,7 @@ async def set_session(msisdn: str, step: str, draft: dict | None = None):
         )
         r.raise_for_status()
 
+
 async def get_session(msisdn: str) -> Dict[str, Any]:
     async with httpx.AsyncClient(timeout=10.0) as client:
         r = await client.get(
@@ -126,6 +134,7 @@ async def get_session(msisdn: str) -> Dict[str, Any]:
         if rows:
             return {"step": rows[0].get("step", "idle"), "draft": rows[0].get("draft", {})}
         return {"step": "idle", "draft": {}}
+
 
 # =========================
 # Listings
@@ -143,6 +152,7 @@ async def insert_listing(owner_msisdn: str, title: str, price_text: str, zone: s
         r = await client.post(f"{BASE}/listings", headers=HEADERS_RETURN, json=payload)
         r.raise_for_status()
         return str(r.json()[0]["id"])
+
 
 async def get_listing(item_id: str) -> Optional[Dict[str, Any]]:
     async with httpx.AsyncClient(timeout=10.0) as client:
@@ -162,26 +172,29 @@ async def get_listing(item_id: str) -> Optional[Dict[str, Any]]:
             listing["owner_name"] = listing.get("owner_wa")
         return listing
 
+
 async def update_listing_status(item_id: str, owner_wa: str, new_status: str) -> bool:
     async with httpx.AsyncClient(timeout=10.0) as client:
         r = await client.patch(
             f"{BASE}/listings",
             headers=HEADERS_RETURN,
             params={"id": f"eq.{item_id}", "owner_wa": f"eq.{owner_wa}"},
-            json={"status": new_status}
+            json={"status": new_status},
         )
         return bool(r.json())
+
 
 async def get_listings_for_user(owner_wa: str) -> List[Dict[str, Any]]:
     async with httpx.AsyncClient(timeout=10.0) as c:
         params = {
             "owner_wa": f"eq.{owner_wa}",
             "select": "id,title,status,price",
-            "order": "created_at.desc"
+            "order": "created_at.desc",
         }
         r = await c.get(f"{BASE}/listings", headers=HEADERS, params=params)
         r.raise_for_status()
         return r.json()
+
 
 # =========================
 # Consents
@@ -203,6 +216,7 @@ async def upsert_consent(item_id: str, buyer_msisdn: str, seller_msisdn: str):
         r.raise_for_status()
         return r.json()[0]
 
+
 async def get_consent(item_id: str) -> Optional[Dict[str, Any]]:
     async with httpx.AsyncClient(timeout=20.0) as client:
         r = await client.get(
@@ -218,6 +232,7 @@ async def get_consent(item_id: str) -> Optional[Dict[str, Any]]:
         r.raise_for_status()
         rows = r.json()
         return rows[0] if rows else None
+
 
 async def set_consent_flag(item_id: str, msisdn: str, ok: bool) -> Optional[Dict[str, Any]]:
     actor = _norm_phone(msisdn)
@@ -257,6 +272,7 @@ async def set_consent_flag(item_id: str, msisdn: str, ok: bool) -> Optional[Dict
         upd.raise_for_status()
         return upd.json()[0]
 
+
 async def mark_introduced_once(item_id: str) -> bool:
     ts = datetime.utcnow().isoformat()
     async with httpx.AsyncClient(timeout=20.0) as client:
@@ -274,10 +290,17 @@ async def mark_introduced_once(item_id: str) -> bool:
         rows = upd.json() or []
         return len(rows) > 0
 
+
 # =========================
 # Rentals
 # =========================
-async def create_rental_request(listing_id: int, renter_msisdn: str, start_iso: str, end_iso: str, payment_method: str) -> Dict[str, Any]:
+async def create_rental_request(
+    listing_id: int,
+    renter_msisdn: str,
+    start_iso: str,
+    end_iso: str,
+    payment_method: str,
+) -> Dict[str, Any]:
     """
     Crea la renta en estado PENDIENTE. Se activa con confirmación doble.
     - Rechaza si el listing no existe o no está activo
@@ -292,7 +315,7 @@ async def create_rental_request(listing_id: int, renter_msisdn: str, start_iso: 
     if not _valid_date_window(start_iso, end_iso):
         return {"ok": False, "error": "INVALID_DATES"}
 
-    # Anti-overbooking (también se valida en handlers)
+    # Anti-overbooking
     if not await is_item_available(listing_id, start_iso, end_iso):
         return {"ok": False, "error": "DATES_NOT_AVAILABLE"}
 
@@ -312,6 +335,7 @@ async def create_rental_request(listing_id: int, renter_msisdn: str, start_iso: 
             return {"ok": False, "error": "DB_ERROR"}
         return {"ok": True, "row": r.json()[0]}
 
+
 async def confirm_rental_start(rental_id: int, actor_wa: str) -> Dict[str, Any]:
     """
     Marca la confirmación del actor. Si ambas partes confirmaron, ACTIVA la renta,
@@ -325,7 +349,10 @@ async def confirm_rental_start(rental_id: int, actor_wa: str) -> Dict[str, Any]:
         r = await c.get(
             f"{BASE}/rentals",
             headers=HEADERS,
-            params={"id": f"eq.{rental_id}", "select": "id,buyer_wa,seller_wa,status,buyer_confirm_start,seller_confirm_start,start_date,end_date"}
+            params={
+                "id": f"eq.{rental_id}",
+                "select": "id,buyer_wa,seller_wa,status,buyer_confirm_start,seller_confirm_start,start_date,end_date",
+            },
         )
         rows = r.json()
         if not rows:
@@ -362,14 +389,16 @@ async def confirm_rental_start(rental_id: int, actor_wa: str) -> Dict[str, Any]:
                 return {"status": "INVALID", "reason": "OUT_OF_WINDOW"}
 
             upd = await c.patch(
-                f"{BASE}/rentals", headers=HEADERS,
+                f"{BASE}/rentals",
+                headers=HEADERS,
                 params={"id": f"eq.{rental_id}"},
-                json={"status": "active", "started_at": datetime.utcnow().isoformat()}
+                json={"status": "active", "started_at": datetime.utcnow().isoformat()},
             )
             upd.raise_for_status()
             return {"status": "ACTIVATED", "parties": [rental["buyer_wa"], rental["seller_wa"]]}
 
         return {"status": "WAITING_OTHER", "other_party": other_party}
+
 
 async def get_active_rentals_for_item(item_id: str) -> List[Dict[str, Any]]:
     """
@@ -381,15 +410,17 @@ async def get_active_rentals_for_item(item_id: str) -> List[Dict[str, Any]]:
         r.raise_for_status()
         return r.json()
 
+
 async def update_rental_status(rental_id: int, new_status: str) -> bool:
     async with httpx.AsyncClient(timeout=10.0) as c:
         r = await c.patch(
             f"{BASE}/rentals",
             headers=HEADERS_RETURN,
             params={"id": f"eq.{rental_id}"},
-            json={"status": new_status}
+            json={"status": new_status},
         )
         return bool(r.json())
+
 
 async def request_rental_cancellation(rental_id: int, requester_wa: str) -> Dict[str, Any]:
     async with httpx.AsyncClient(timeout=15.0) as c:
@@ -403,28 +434,33 @@ async def request_rental_cancellation(rental_id: int, requester_wa: str) -> Dict
         if rental.get("status") in ("cancelled", "completed"):
             return {"status": "INVALID"}
 
-        other_party_wa = ""
-        is_buyer = _norm_phone(requester_wa) == _norm_phone(rental['buyer_wa'])
-
+        is_buyer = _norm_phone(requester_wa) == _norm_phone(rental["buyer_wa"])
         if is_buyer:
             update_payload = {"buyer_wants_cancel": True}
-            other_party_wa = rental['seller_wa']
+            other_party_wa = rental["seller_wa"]
         else:
             update_payload = {"seller_wants_cancel": True}
-            other_party_wa = rental['buyer_wa']
+            other_party_wa = rental["buyer_wa"]
 
         await c.patch(f"{BASE}/rentals", headers=HEADERS, params={"id": f"eq.{rental_id}"}, json=update_payload)
 
         r_now = await c.get(
-            f"{BASE}/rentals", headers=HEADERS,
-            params={"id": f"eq.{rental_id}", "select": "buyer_wants_cancel,seller_wants_cancel,buyer_wa,seller_wa"}
+            f"{BASE}/rentals",
+            headers=HEADERS,
+            params={"id": f"eq.{rental_id}", "select": "buyer_wants_cancel,seller_wants_cancel,buyer_wa,seller_wa"},
         )
         rental2 = (r_now.json() or [{}])[0]
-        if rental2.get('buyer_wants_cancel') and rental2.get('seller_wants_cancel'):
-            await c.patch(f"{BASE}/rentals", headers=HEADERS, params={"id": f"eq.{rental_id}"}, json={"status": "cancelled"})
-            return {"status": "CANCELLED", "parties": [rental['buyer_wa'], rental['seller_wa']]}
+        if rental2.get("buyer_wants_cancel") and rental2.get("seller_wants_cancel"):
+            await c.patch(
+                f"{BASE}/rentals",
+                headers=HEADERS,
+                params={"id": f"eq.{rental_id}"},
+                json={"status": "cancelled"},
+            )
+            return {"status": "CANCELLED", "parties": [rental["buyer_wa"], rental["seller_wa"]]}
         else:
             return {"status": "WAITING_OTHER", "other_party": other_party_wa}
+
 
 async def request_rental_extension(rental_id: int, requester_wa: str, new_end_iso: str) -> Dict[str, Any]:
     async with httpx.AsyncClient(timeout=20.0) as c:
@@ -460,40 +496,47 @@ async def request_rental_extension(rental_id: int, requester_wa: str, new_end_is
         other_party = rental["seller_wa"] if req_is_buyer else rental["buyer_wa"]
 
         await c.patch(
-            f"{BASE}/rentals", headers=HEADERS, params={"id": f"eq.{rental_id}"},
-            json={"proposed_end_date": new_end_iso[:10], flag_field: True, "status": "extension_pending"}
+            f"{BASE}/rentals",
+            headers=HEADERS,
+            params={"id": f"eq.{rental_id}"},
+            json={"proposed_end_date": new_end_iso[:10], flag_field: True, "status": "extension_pending"},
         )
 
         r_now = await c.get(
-            f"{BASE}/rentals", headers=HEADERS,
-            params={"id": f"eq.{rental_id}", "select": f"{other_flag},buyer_wa,seller_wa,proposed_end_date"}
+            f"{BASE}/rentals",
+            headers=HEADERS,
+            params={"id": f"eq.{rental_id}", "select": f"{other_flag},buyer_wa,seller_wa,proposed_end_date"},
         )
         curr = (r_now.json() or [{}])[0]
         if curr.get(other_flag) is True:
             await c.patch(
-                f"{BASE}/rentals", headers=HEADERS, params={"id": f"eq.{rental_id}"},
+                f"{BASE}/rentals",
+                headers=HEADERS,
+                params={"id": f"eq.{rental_id}"},
                 json={
                     "end_date": new_end_iso[:10],
                     "proposed_end_date": None,
                     "buyer_wants_extension": False,
                     "seller_wants_extension": False,
-                    "status": "active"
-                }
+                    "status": "active",
+                },
             )
             return {"status": "EXTENDED", "parties": [rental["buyer_wa"], rental["seller_wa"]]}
 
         return {"status": "EXTENSION_PENDING", "other_party": other_party}
+
 
 async def get_rentals_for_user(wa_id: str) -> List[Dict[str, Any]]:
     async with httpx.AsyncClient(timeout=15.0) as c:
         params = {
             "or": f"(buyer_wa.eq.{wa_id},seller_wa.eq.{wa_id})",
             "select": "*,listing:listings(title)",
-            "order": "start_date.desc"
+            "order": "start_date.desc",
         }
         r = await c.get(f"{BASE}/rentals", headers=HEADERS, params=params)
         r.raise_for_status()
         return r.json()
+
 
 # =========================
 # Reviews
@@ -503,7 +546,7 @@ async def add_review(rental_id: int, reviewer_wa: str, rating: int, comment: str
         r_get = await c.get(
             f"{BASE}/rentals",
             headers=HEADERS,
-            params={"select": "buyer_wa,seller_wa,status", "id": f"eq.{rental_id}", "limit": 1}
+            params={"select": "buyer_wa,seller_wa,status", "id": f"eq.{rental_id}", "limit": 1},
         )
         if not r_get.json():
             return {"ok": False, "error": "RENTAL_NOT_FOUND"}
@@ -535,7 +578,7 @@ async def add_review(rental_id: int, reviewer_wa: str, rating: int, comment: str
             "reviewer_wa": reviewer_wa,
             "reviewed_wa": reviewed_wa,
             "rating": r_int,
-            "comment": comment
+            "comment": comment,
         }
         r_post = await c.post(f"{BASE}/reviews", headers=HEADERS_RETURN, json=payload)
 
@@ -544,12 +587,13 @@ async def add_review(rental_id: int, reviewer_wa: str, rating: int, comment: str
         r_post.raise_for_status()
         return {"ok": True, "data": r_post.json()}
 
+
 async def get_reviews_for_user(wa_id: str) -> List[Dict[str, Any]]:
     async with httpx.AsyncClient(timeout=10.0) as c:
         params = {
             "select": "rating,comment,created_at",
             "reviewed_wa": f"eq.{wa_id}",
-            "order": "created_at.desc"
+            "order": "created_at.desc",
         }
         r = await c.get(f"{BASE}/reviews", headers=HEADERS, params=params)
         r.raise_for_status()
