@@ -132,11 +132,11 @@ async def update_listing_status(item_id: str, owner_wa: str, new_status: str) ->
     async with httpx.AsyncClient(timeout=10.0) as client:
         r = await client.patch(
             f"{BASE}/listings",
-            headers=HEADERS_RETURN, # Usamos RETURN para saber si se modificó algo
+            headers=HEADERS_RETURN,  # return representation para saber si hubo cambios
             params={"id": f"eq.{item_id}", "owner_wa": f"eq.{owner_wa}"},
             json={"status": new_status}
         )
-        # Retorna True si la actualización afectó a alguna fila
+        # True si afectó filas
         return bool(r.json())
 
 async def get_listings_for_user(owner_wa: str) -> List[Dict[str, Any]]:
@@ -246,6 +246,9 @@ async def mark_introduced_once(item_id: str) -> bool:
 # Rentals
 # =========================
 async def create_rental_request(listing_id: int, renter_msisdn: str, start_iso: str, end_iso: str, payment_method: str) -> Dict[str, Any]:
+    """
+    Crea la renta en estado PENDIENTE. Se activa con update_rental_status(..., 'active').
+    """
     listing = await get_listing(str(listing_id))
     if not listing:
         return {"ok": False, "error": "LISTING_NOT_FOUND"}
@@ -257,7 +260,7 @@ async def create_rental_request(listing_id: int, renter_msisdn: str, start_iso: 
             "seller_wa": listing["owner_wa"],
             "start_date": start_iso[:10],
             "end_date": end_iso[:10],
-            "status": "active",
+            "status": "pending",  # <--- AHORA PENDIENTE
             "selected_payment_method": payment_method,
         }
         r = await client.post(f"{BASE}/rentals", headers=HEADERS_RETURN, json=payload)
@@ -267,8 +270,12 @@ async def create_rental_request(listing_id: int, renter_msisdn: str, start_iso: 
         return {"ok": True, "row": r.json()[0]}
 
 async def get_active_rentals_for_item(item_id: str) -> List[Dict[str, Any]]:
+    """
+    Estados que bloquean borrar una publicación:
+    pending, requested, approved, active
+    """
     async with httpx.AsyncClient(timeout=10.0) as c:
-        params = {"item_id": f"eq.{item_id}", "status": "in.(requested,approved,active)"}
+        params = {"item_id": f"eq.{item_id}", "status": "in.(pending,requested,approved,active)"}
         r = await c.get(f"{BASE}/rentals", headers=HEADERS, params=params)
         r.raise_for_status()
         return r.json()
@@ -389,7 +396,7 @@ async def add_review(rental_id: int, reviewer_wa: str, rating: int, comment: str
         payload = {
             "rental_id": rental_id,
             "reviewer_wa": reviewer_wa,
-            "reviewed_wa": reviewed_wa, # <-- Asegúrate de tener esta columna en Supabase
+            "reviewed_wa": reviewed_wa,  # asegúrate de tener esta columna
             "rating": rating,
             "comment": comment
         }

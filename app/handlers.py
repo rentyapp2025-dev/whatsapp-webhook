@@ -23,9 +23,16 @@ from .clients.supabase_client import (
 )
 
 async def _send_post_agreement_menus(buyer_wa: str, seller_wa: str, item_id: str, rental_id: str):
+    """
+    Menú profesional post-acuerdo.
+    """
     body = (
-        f"Opciones para la renta del artículo #{item_id}.\n\n"
-        "Puedes confirmar el inicio, cancelar antes de empezar o solicitar una extensión."
+        f"Renta del artículo #{item_id}\n\n"
+        "Estado actual: *PENDIENTE*.\n"
+        "Opciones disponibles:"
+        "\n• Confirmar inicio (activa la renta)"
+        "\n• Cancelar (requiere confirmación de ambas partes)"
+        "\n• Extender (proponer nueva fecha de fin)"
     )
     buttons = [
         {"id": f"rental_confirm_{rental_id}", "title": "✅ Confirmar inicio"},
@@ -36,6 +43,10 @@ async def _send_post_agreement_menus(buyer_wa: str, seller_wa: str, item_id: str
     await send_reply_buttons(seller_wa, "Gestión de Renta", body, buttons)
 
 async def finalize_and_introduce(item_id: str, actor_msisdn: str):
+    """
+    Se llama cuando ambos dieron consentimiento.
+    Crea la renta en estado PENDIENTE y presenta a las partes.
+    """
     cons = await get_consent(item_id)
     if not cons:
         return
@@ -53,14 +64,27 @@ async def finalize_and_introduce(item_id: str, actor_msisdn: str):
             rental_id_str = str(r["row"]["id"])
         await set_session(buyer_wa, Step.IDLE, {})
 
+    # Presentación (una sola vez) + aviso de estado
     if await mark_introduced_once(item_id):
         buyer_name, seller_name = await get_user_name(buyer_wa), await get_user_name(seller_wa)
-        base_msg = f"¡Acuerdo logrado! Ya pueden coordinar el alquiler del artículo #{item_id}."
+        base_msg = (
+            f"¡Acuerdo logrado para el artículo #{item_id}! "
+            "Hemos compartido sus contactos para coordinar detalles."
+        )
         await send_text(buyer_wa, f"{base_msg}\nVendedor: {seller_name} ({seller_wa})")
         await send_text(seller_wa, f"{base_msg}\nComprador: {buyer_name} ({buyer_wa})")
+
         if rental_id_str:
+            info = (
+                f"Se creó la *Renta #{rental_id_str}* en estado *PENDIENTE* "
+                f"(del { _to_ve(draft['start_iso']) } al { _to_ve(draft['end_iso']) }).\n"
+                "Pulsa *Confirmar inicio* cuando esté todo listo para activarla."
+            )
+            await send_text(buyer_wa, info)
+            await send_text(seller_wa, info)
             await _send_post_agreement_menus(buyer_wa, seller_wa, str(item_id), rental_id_str)
 
+    # Limpiar sesión y menú para quien accionó
     if actor_msisdn != buyer_wa:
         await set_session(actor_msisdn, Step.IDLE, {})
     await send_main_menu(actor_msisdn)
@@ -74,6 +98,7 @@ async def handle_interactive(msg: Dict[str, Any], st: Dict[str, Any], from_msisd
     if itype == "button_reply":
         btn_id = interactive["button_reply"]["id"]
 
+        # CONSENTIMIENTO
         if btn_id.startswith("consent_"):
             answer, item_id = btn_id.split("_")[1], btn_id.split("_")[2]
             cons = await set_consent_flag(item_id, from_msisdn, ok=(answer == "yes"))
@@ -92,6 +117,7 @@ async def handle_interactive(msg: Dict[str, Any], st: Dict[str, Any], from_msisd
                 await send_text(from_msisdn, "Gracias. Esperamos la respuesta de la otra parte.")
             return
 
+        # POST-ACUERDO
         if btn_id.startswith("rental_confirm_"):
             await handle_rental_confirmation(btn_id, from_msisdn)
             return
@@ -111,6 +137,7 @@ async def handle_interactive(msg: Dict[str, Any], st: Dict[str, Any], from_msisd
         row_id = interactive["list_reply"]["id"]
         row_title = interactive["list_reply"]["title"]
 
+        # Método de pago → crea consentimiento
         if s == Step.RENTAL_WAIT_PAYMENT:
             draft = st["draft"]
             draft["selected_payment_method"] = row_title
@@ -135,6 +162,7 @@ async def handle_interactive(msg: Dict[str, Any], st: Dict[str, Any], from_msisd
             await send_reply_buttons(buyer, "Autorización Final", "¿Autorizas compartir tu contacto con el vendedor?", buyer_buttons)
             return
 
+        # Menú principal
         if row_id == "menu_publish":
             await set_session(from_msisdn, Step.PUBLISH_TITLE, {})
             await send_text(from_msisdn, "¡Vamos a publicar! Primero, dime el *título* de tu artículo.")
@@ -161,9 +189,9 @@ async def handle_text(msg: Dict[str, Any], st: Dict[str, Any], from_msisdn: str)
         await send_main_menu(from_msisdn)
         return
 
-    # --- ALQUILAR detectado en cualquier parte del texto (robusto) ---
+    # ALQUILAR robusto
     m_cmd = re.search(r"\bALQUILAR\b", upper)
-    m_id = re.search(r"[#№](\d+)", text)   # acepta # o №
+    m_id = re.search(r"[#№](\d+)", text)
     if m_cmd and m_id:
         item_id = m_id.group(1)
         listing = await get_listing(item_id)
@@ -186,7 +214,7 @@ async def handle_text(msg: Dict[str, Any], st: Dict[str, Any], from_msisdn: str)
             await send_text(from_msisdn, f"Perfecto. Ahora, indica las *fechas* que necesitas para el artículo #{item_id} (formato: DD/MM/AAAA a DD/MM/AAAA).")
         return
 
-    # Comandos directos y estructurados
+    # Comandos directos
     if upper.startswith("RESEÑA #"):
         match = re.search(r"RESEÑA\s*#(\d+)\s*([1-5])\s*(.*)", text, re.IGNORECASE)
         if not match:
@@ -338,7 +366,7 @@ async def handle_text(msg: Dict[str, Any], st: Dict[str, Any], from_msisdn: str)
         await send_main_menu(from_msisdn)
         return
 
-    # Fallback: si no es un comando y no está en un flujo, intentar con IA
+    # Fallback: IA (opcional)
     intent_data = await get_intent_from_llm(text)
     if intent_data and "intent" in intent_data:
         intent, params = intent_data.get("intent"), intent_data.get("parameters", {})
@@ -389,15 +417,13 @@ async def handle_message(value: Dict[str, Any], msg: Dict[str, Any]):
     else:
         await send_text(from_msisdn, "Solo puedo procesar mensajes de texto y botones. Por favor, usa el menú.")
 
-# === FUNCIONES AUXILIARES DE HANDLERS ===
+# === AUXILIARES ===
 async def get_intent_from_llm(text: str) -> Optional[Dict[str, Any]]:
-    system_prompt = ("Eres un asistente experto para un bot de WhatsApp llamado Renty. Tu tarea es analizar el mensaje del usuario "
-                     "y determinar su intención principal. Debes responder únicamente con un objeto JSON, sin explicaciones.\n"
-                     "Intenciones: 'rent', 'get_my_listings', 'get_my_rentals', 'greet', 'unknown'.\n"
-                     "Para 'rent', extrae 'item_id' y 'dates_text' (la parte del texto con las fechas).\n"
-                     'Ejemplo 1: user=\"Quiero alquilar el #123 para la semana que viene\" -> {\"intent\": \"rent\", \"parameters\": {\"item_id\": \"123\", \"dates_text\": \"para la semana que viene\"}}\n'
-                     'Ejemplo 2: user=\"mis publicaciones\" -> {\"intent\": \"get_my_listings\", \"parameters\": {}}\n'
-                     'Ejemplo 3: user=\"hola que tal\" -> {\"intent\": \"greet\", \"parameters\": {}}')
+    system_prompt = (
+        "Eres un asistente experto para un bot de WhatsApp llamado Renty. "
+        "Responde SOLO con un JSON. Intenciones: 'rent', 'get_my_listings', 'get_my_rentals', 'greet', 'unknown'. "
+        "Para 'rent', extrae 'item_id' y 'dates_text'."
+    )
     messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": text}]
     try:
         response_text = chat_completion(messages, temperature=0.2, max_tokens=200)
@@ -421,7 +447,7 @@ async def handle_cancellation_request(rental_id_str: str, requester_wa: str):
         elif status == "WAITING_OTHER":
             await send_text(requester_wa, "👍 Solicitud de cancelación enviada. La otra parte debe confirmarla para que sea efectiva.")
             msg_to_other = (f"⚠️ El otro usuario ha solicitado cancelar la renta #{rental_id_str}.\n\n"
-                            f"Para aceptar, simplemente responde con el texto: CANCELAR RENTA #{rental_id_str}")
+                            f"Para aceptar, responde: CANCELAR RENTA #{rental_id_str}")
             await send_text(result.get("other_party"), msg_to_other)
         elif status == "NOT_FOUND":
              await send_text(requester_wa, f"No se encontró una renta con el ID #{rental_id_str}.")
@@ -436,7 +462,7 @@ async def handle_rental_confirmation(btn_id: str, from_msisdn: str):
         rental_id = int(btn_id.split("_")[-1])
         ok = await update_rental_status(rental_id, "active")
         if ok:
-            await send_text(from_msisdn, f"✅ Has confirmado el inicio de la renta #{rental_id}. ¡Que la disfrutes!")
+            await send_text(from_msisdn, f"✅ Renta #{rental_id} *confirmada*. Estado: *ACTIVA*.")
         else:
             await send_text(from_msisdn, "No se pudo confirmar la renta. Es posible que ya esté activa o haya sido cancelada.")
     except Exception as e:
