@@ -538,6 +538,48 @@ async def get_rentals_for_user(wa_id: str) -> List[Dict[str, Any]]:
         return r.json()
 
 
+# ======= Helpers opcionales para extensiones =======
+async def get_rental(rental_id: int) -> Optional[Dict[str, Any]]:
+    """Obtiene una renta por ID."""
+    async with httpx.AsyncClient(timeout=10.0) as c:
+        r = await c.get(
+            f"{BASE}/rentals",
+            headers=HEADERS,
+            params={"id": f"eq.{rental_id}", "select": "*", "limit": 1},
+        )
+        r.raise_for_status()
+        rows = r.json()
+        return rows[0] if rows else None
+
+
+async def reject_rental_extension(rental_id: int, actor_wa: str) -> Dict[str, Any]:
+    """
+    Rechaza una solicitud de extensión (si está extension_pending) y limpia flags.
+    """
+    async with httpx.AsyncClient(timeout=15.0) as c:
+        r = await c.get(f"{BASE}/rentals", headers=HEADERS, params={"id": f"eq.{rental_id}", "select": "*"})
+        rows = r.json()
+        if not rows:
+            return {"status": "NOT_FOUND"}
+        rental = rows[0]
+
+        if rental.get("status") != "extension_pending":
+            return {"status": "INVALID"}
+
+        await c.patch(
+            f"{BASE}/rentals",
+            headers=HEADERS,
+            params={"id": f"eq.{rental_id}"},
+            json={
+                "proposed_end_date": None,
+                "buyer_wants_extension": False,
+                "seller_wants_extension": False,
+                "status": "active",
+            },
+        )
+        return {"status": "REJECTED", "parties": [rental["buyer_wa"], rental["seller_wa"]]}
+
+
 # =========================
 # Reviews
 # =========================
