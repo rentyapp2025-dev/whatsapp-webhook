@@ -16,10 +16,10 @@ from .clients.supabase_client import (
     get_active_rentals_for_item, update_listing_status,
     add_review, get_reviews_for_user,
     request_rental_cancellation,
-    update_rental_status,
     request_rental_extension,
-    get_listings_for_user,  # NUEVO
-    get_rentals_for_user,   # NUEVO
+    get_listings_for_user,
+    get_rentals_for_user,
+    confirm_rental_start,                 # << NUEVO: doble confirmación de inicio
 )
 
 async def _send_post_agreement_menus(buyer_wa: str, seller_wa: str, item_id: str, rental_id: str):
@@ -29,10 +29,11 @@ async def _send_post_agreement_menus(buyer_wa: str, seller_wa: str, item_id: str
     body = (
         f"Renta del artículo #{item_id}\n\n"
         "Estado actual: *PENDIENTE*.\n"
+        "Para activar la renta, *ambas partes* deben confirmar el inicio.\n\n"
         "Opciones disponibles:"
-        "\n• Confirmar inicio (activa la renta)"
+        "\n• Confirmar inicio (activa la renta cuando los dos confirmen)"
         "\n• Cancelar (requiere confirmación de ambas partes)"
-        "\n• Extender (proponer nueva fecha de fin)"
+        "\n• Extender (proponer nueva fecha de fin; requiere confirmación de ambas partes)"
     )
     buttons = [
         {"id": f"rental_confirm_{rental_id}", "title": "✅ Confirmar inicio"},
@@ -78,7 +79,7 @@ async def finalize_and_introduce(item_id: str, actor_msisdn: str):
             info = (
                 f"Se creó la *Renta #{rental_id_str}* en estado *PENDIENTE* "
                 f"(del { _to_ve(draft['start_iso']) } al { _to_ve(draft['end_iso']) }).\n"
-                "Pulsa *Confirmar inicio* cuando esté todo listo para activarla."
+                "Pulsa *Confirmar inicio* cuando esté todo listo. La renta se activará cuando ambos confirmen."
             )
             await send_text(buyer_wa, info)
             await send_text(seller_wa, info)
@@ -458,13 +459,27 @@ async def handle_cancellation_request(rental_id_str: str, requester_wa: str):
         await send_text(requester_wa, "Ocurrió un error al procesar tu solicitud de cancelación.")
 
 async def handle_rental_confirmation(btn_id: str, from_msisdn: str):
+    """
+    Doble confirmación de inicio:
+      - Registra la confirmación del actor
+      - Si la otra parte ya confirmó -> activa la renta (status=active)
+      - Si no -> avisa que falta la otra parte
+    """
     try:
         rental_id = int(btn_id.split("_")[-1])
-        ok = await update_rental_status(rental_id, "active")
-        if ok:
-            await send_text(from_msisdn, f"✅ Renta #{rental_id} *confirmada*. Estado: *ACTIVA*.")
-        else:
-            await send_text(from_msisdn, "No se pudo confirmar la renta. Es posible que ya esté activa o haya sido cancelada.")
+        result = await confirm_rental_start(rental_id, from_msisdn)
+        status = result.get("status")
+        if status == "ACTIVATED":
+            for wa in result.get("parties", []):
+                await send_text(wa, f"✅ Renta #{rental_id} *confirmada por ambas partes*. Estado: *ACTIVA*.")
+        elif status == "WAITING_OTHER":
+            other = result.get("other_party")
+            await send_text(from_msisdn, "👍 Tu confirmación fue registrada. Falta la otra parte.")
+            await send_text(other, f"⚠️ La otra parte confirmó el inicio de la renta #{rental_id}. Entra a *Gestión de Renta* y pulsa *Confirmar inicio* para activarla.")
+        elif status == "INVALID":
+            await send_text(from_msisdn, "Esta renta no puede confirmarse (posiblemente ya está activa o fue cancelada).")
+        else:  # NOT_FOUND u otra
+            await send_text(from_msisdn, "No se encontró la renta.")
     except Exception as e:
         print(f"Error en handle_rental_confirmation para botón {btn_id}: {e}")
         await send_text(from_msisdn, "Ocurrió un error al confirmar la renta.")

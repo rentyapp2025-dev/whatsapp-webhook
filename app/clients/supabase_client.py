@@ -132,15 +132,13 @@ async def update_listing_status(item_id: str, owner_wa: str, new_status: str) ->
     async with httpx.AsyncClient(timeout=10.0) as client:
         r = await client.patch(
             f"{BASE}/listings",
-            headers=HEADERS_RETURN,  # return representation para saber si hubo cambios
+            headers=HEADERS_RETURN,
             params={"id": f"eq.{item_id}", "owner_wa": f"eq.{owner_wa}"},
             json={"status": new_status}
         )
-        # True si afectó filas
         return bool(r.json())
 
 async def get_listings_for_user(owner_wa: str) -> List[Dict[str, Any]]:
-    """Obtiene todas las publicaciones (activas e inactivas) de un usuario."""
     async with httpx.AsyncClient(timeout=10.0) as c:
         params = {
             "owner_wa": f"eq.{owner_wa}",
@@ -247,7 +245,7 @@ async def mark_introduced_once(item_id: str) -> bool:
 # =========================
 async def create_rental_request(listing_id: int, renter_msisdn: str, start_iso: str, end_iso: str, payment_method: str) -> Dict[str, Any]:
     """
-    Crea la renta en estado PENDIENTE. Se activa con update_rental_status(..., 'active').
+    Crea la renta en estado PENDIENTE. Se activa con confirmación doble.
     """
     listing = await get_listing(str(listing_id))
     if not listing:
@@ -260,7 +258,7 @@ async def create_rental_request(listing_id: int, renter_msisdn: str, start_iso: 
             "seller_wa": listing["owner_wa"],
             "start_date": start_iso[:10],
             "end_date": end_iso[:10],
-            "status": "pending",  # <--- AHORA PENDIENTE
+            "status": "pending",  # <- ahora pendiente
             "selected_payment_method": payment_method,
         }
         r = await client.post(f"{BASE}/rentals", headers=HEADERS_RETURN, json=payload)
@@ -269,10 +267,60 @@ async def create_rental_request(listing_id: int, renter_msisdn: str, start_iso: 
             return {"ok": False, "error": "DB_ERROR"}
         return {"ok": True, "row": r.json()[0]}
 
+async def confirm_rental_start(rental_id: int, actor_wa: str) -> Dict[str, Any]:
+    """
+    Marca la confirmación del actor. Si ambas partes confirmaron, ACTIVA la renta.
+    Return:
+      - {"status": "ACTIVATED", "parties": [buyer, seller]}
+      - {"status": "WAITING_OTHER", "other_party": wa}
+      - {"status": "NOT_FOUND"} / {"status": "INVALID"}
+    """
+    async with httpx.AsyncClient(timeout=20.0) as c:
+        r = await c.get(f"{BASE}/rentals", headers=HEADERS,
+                        params={"id": f"eq.{rental_id}", "select": "id,buyer_wa,seller_wa,status,buyer_confirm_start,seller_confirm_start"})
+        rows = r.json()
+        if not rows:
+            return {"status": "NOT_FOUND"}
+        rental = rows[0]
+
+        if rental.get("status") not in ("pending", "approved"):
+            # ya activa/cancelada/etc.
+            return {"status": "INVALID"}
+
+        actor_n = _norm_phone(actor_wa)
+        buyer_n = _norm_phone(rental["buyer_wa"])
+        seller_n = _norm_phone(rental["seller_wa"])
+
+        if actor_n == buyer_n:
+            field_set = {"buyer_confirm_start": True}
+            other_party = rental["seller_wa"]
+            other_flag = rental.get("seller_confirm_start")
+        elif actor_n == seller_n:
+            field_set = {"seller_confirm_start": True}
+            other_party = rental["buyer_wa"]
+            other_flag = rental.get("buyer_confirm_start")
+        else:
+            return {"status": "INVALID"}
+
+        # Set mi confirmación
+        await c.patch(f"{BASE}/rentals", headers=HEADERS, params={"id": f"eq.{rental_id}"}, json=field_set)
+
+        # ¿Ya confirmó la otra parte?
+        if other_flag is True:
+            # activar
+            upd = await c.patch(
+                f"{BASE}/rentals", headers=HEADERS,
+                params={"id": f"eq.{rental_id}"},
+                json={"status": "active", "started_at": datetime.utcnow().isoformat()}
+            )
+            upd.raise_for_status()
+            return {"status": "ACTIVATED", "parties": [rental["buyer_wa"], rental["seller_wa"]]}
+
+        return {"status": "WAITING_OTHER", "other_party": other_party}
+
 async def get_active_rentals_for_item(item_id: str) -> List[Dict[str, Any]]:
     """
-    Estados que bloquean borrar una publicación:
-    pending, requested, approved, active
+    Estados que bloquean borrar una publicación: pending, requested, approved, active
     """
     async with httpx.AsyncClient(timeout=10.0) as c:
         params = {"item_id": f"eq.{item_id}", "status": "in.(pending,requested,approved,active)"}
@@ -359,7 +407,6 @@ async def request_rental_extension(rental_id: int, requester_wa: str, new_end_is
         return {"status": "EXTENSION_PENDING", "other_party": other_party}
 
 async def get_rentals_for_user(wa_id: str) -> List[Dict[str, Any]]:
-    """Obtiene todos los alquileres donde un usuario es comprador o vendedor."""
     async with httpx.AsyncClient(timeout=15.0) as c:
         params = {
             "or": f"(buyer_wa.eq.{wa_id},seller_wa.eq.{wa_id})",
@@ -396,7 +443,7 @@ async def add_review(rental_id: int, reviewer_wa: str, rating: int, comment: str
         payload = {
             "rental_id": rental_id,
             "reviewer_wa": reviewer_wa,
-            "reviewed_wa": reviewed_wa,  # asegúrate de tener esta columna
+            "reviewed_wa": reviewed_wa,
             "rating": rating,
             "comment": comment
         }
