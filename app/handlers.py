@@ -1,6 +1,7 @@
 import re
 import json
 from typing import Dict, Any, Optional
+from datetime import datetime, date
 
 import httpx
 
@@ -19,8 +20,20 @@ from .clients.supabase_client import (
     request_rental_extension,
     get_listings_for_user,
     get_rentals_for_user,
-    confirm_rental_start,                 # << NUEVO: doble confirmación de inicio
+    confirm_rental_start,                 # Doble confirmación de inicio
+    is_item_available,                    # NUEVO: disponibilidad por fechas
 )
+
+# === Helpers locales ===
+def _validate_date_window(start_iso: str, end_iso: str) -> bool:
+    """start >= hoy y end > start (comparación por fecha, sin horas)."""
+    try:
+        s = datetime.strptime(start_iso[:10], "%Y-%m-%d").date()
+        e = datetime.strptime(end_iso[:10], "%Y-%m-%d").date()
+        return s >= date.today() and e > s
+    except Exception:
+        return False
+
 
 async def _send_post_agreement_menus(buyer_wa: str, seller_wa: str, item_id: str, rental_id: str):
     """
@@ -58,11 +71,20 @@ async def finalize_and_introduce(item_id: str, actor_msisdn: str):
 
     rental_id_str = ""
     if 'start_iso' in draft and 'end_iso' in draft and 'selected_payment_method' in draft:
-        r = await create_rental_request(
-            int(item_id), buyer_wa, draft['start_iso'], draft['end_iso'], draft['selected_payment_method']
-        )
-        if r.get("ok"):
-            rental_id_str = str(r["row"]["id"])
+        # Revalidación final (por si algo cambió antes de escribir la renta)
+        listing = await get_listing(str(item_id))
+        if not listing or listing.get("status") != "active":
+            await send_text(buyer_wa, "La publicación ya no está activa; no se pudo crear la renta.")
+        elif not _validate_date_window(draft['start_iso'], draft['end_iso']):
+            await send_text(buyer_wa, "Las fechas ya no son válidas. Intenta proponer un nuevo rango.")
+        elif not await is_item_available(item_id, draft['start_iso'], draft['end_iso']):
+            await send_text(buyer_wa, "Ese rango de fechas ya fue tomado. Propón nuevas fechas.")
+        else:
+            r = await create_rental_request(
+                int(item_id), buyer_wa, draft['start_iso'], draft['end_iso'], draft['selected_payment_method']
+            )
+            if r.get("ok"):
+                rental_id_str = str(r["row"]["id"])
         await set_session(buyer_wa, Step.IDLE, {})
 
     # Presentación (una sola vez) + aviso de estado
@@ -138,14 +160,34 @@ async def handle_interactive(msg: Dict[str, Any], st: Dict[str, Any], from_msisd
         row_id = interactive["list_reply"]["id"]
         row_title = interactive["list_reply"]["title"]
 
-        # Método de pago → crea consentimiento
+        # Método de pago → crea consentimiento (con revalidación previa)
         if s == Step.RENTAL_WAIT_PAYMENT:
             draft = st["draft"]
+            start_iso, end_iso, item_id = draft['start_iso'], draft['end_iso'], str(draft['item_id'])
+
+            listing = await get_listing(item_id)
+            if not listing or listing.get("status") != "active":
+                await send_text(from_msisdn, "La publicación ya no está activa.")
+                await set_session(from_msisdn, Step.IDLE, {})
+                await send_main_menu(from_msisdn)
+                return
+
+            if not _validate_date_window(start_iso, end_iso):
+                await send_text(from_msisdn, "Las fechas no son válidas. Usa un inicio desde hoy y fin posterior al inicio.")
+                await set_session(from_msisdn, Step.IDLE, {})
+                await send_main_menu(from_msisdn)
+                return
+
+            if not await is_item_available(item_id, start_iso, end_iso):
+                await send_text(from_msisdn, "Lo siento, esas fechas ya no están disponibles para este artículo.")
+                await set_session(from_msisdn, Step.IDLE, {})
+                await send_main_menu(from_msisdn)
+                return
+
+            # Si todo OK, persistimos y pedimos consentimientos
             draft["selected_payment_method"] = row_title
             await set_session(from_msisdn, s, draft)
 
-            item_id, start_iso, end_iso = str(draft['item_id']), draft['start_iso'], draft['end_iso']
-            listing = await get_listing(item_id)
             seller, buyer = listing["owner_wa"], from_msisdn
             await upsert_consent(item_id, buyer, seller)
 
@@ -202,10 +244,21 @@ async def handle_text(msg: Dict[str, Any], st: Dict[str, Any], from_msisdn: str)
         if listing['owner_wa'] == from_msisdn:
             await send_text(from_msisdn, "No puedes alquilar tu propio artículo.")
             return
+        if listing.get("status") != "active":
+            await send_text(from_msisdn, "Este artículo no está disponible para nuevas rentas.")
+            return
 
         dates = _extract_dates(text)
         if dates:
             start_iso, end_iso = dates
+            # Validaciones de fechas y disponibilidad antes de pasar a pagos
+            if not _validate_date_window(start_iso, end_iso):
+                await send_text(from_msisdn, "Las fechas no son válidas. Asegúrate de que el inicio sea desde hoy y el fin posterior.")
+                return
+            if not await is_item_available(item_id, start_iso, end_iso):
+                await send_text(from_msisdn, "Lo siento, esas fechas ya están reservadas para este artículo.")
+                return
+
             await set_session(from_msisdn, Step.RENTAL_WAIT_PAYMENT, {"item_id": int(item_id), "start_iso": start_iso, "end_iso": end_iso})
             payment_options = listing.get("payment_methods") or ["A convenir"]
             rows = [{"id": p.replace(" ", "_"), "title": p} for p in payment_options]
@@ -296,12 +349,13 @@ async def handle_text(msg: Dict[str, Any], st: Dict[str, Any], from_msisdn: str)
         await handle_cancellation_request(rental_id, from_msisdn)
         return
 
-    # Máquina de estados
+    # Máquina de estados (Publicación)
     if s == Step.PUBLISH_TITLE:
         await set_session(from_msisdn, Step.PUBLISH_PRICE, {"title": text})
         await send_text(from_msisdn, "¡Bien! Ahora, indica el *precio por día* (ej: 10 USD).")
         return
     if s == Step.PUBLISH_PRICE:
+        # (opcional) podríamos normalizar el monto a número aquí
         st["draft"]["price"] = text
         await set_session(from_msisdn, Step.PUBLISH_ZONE, st["draft"])
         await send_text(from_msisdn, "Ok. ¿En qué *zona* se encuentra? (ej: Chacao, Caracas)")
@@ -313,6 +367,8 @@ async def handle_text(msg: Dict[str, Any], st: Dict[str, Any], from_msisdn: str)
         return
     if s == Step.PUBLISH_PAYMENTS:
         pmts = [p.strip() for p in re.split(r"[,;]+", text) if p.strip()]
+        # deduplicar y acotar
+        pmts = list(dict.fromkeys(pmts))[:10]
         d = st["draft"]
         item_id = await insert_listing(from_msisdn, d["title"], d["price"], d["zone"], pmts)
         await set_session(from_msisdn, Step.IDLE, {})
@@ -321,6 +377,7 @@ async def handle_text(msg: Dict[str, Any], st: Dict[str, Any], from_msisdn: str)
         await send_main_menu(from_msisdn)
         return
 
+    # Máquina de estados (Alquiler)
     if s == Step.RENTAL_WAIT_DATES:
         dates = _extract_dates(text)
         if not dates:
@@ -328,8 +385,23 @@ async def handle_text(msg: Dict[str, Any], st: Dict[str, Any], from_msisdn: str)
             return
         start_iso, end_iso = dates
         item_id = st["draft"]["item_id"]
-        await set_session(from_msisdn, Step.RENTAL_WAIT_PAYMENT, {"item_id": item_id, "start_iso": start_iso, "end_iso": end_iso})
+
         listing = await get_listing(str(item_id))
+        if not listing or listing.get("status") != "active":
+            await send_text(from_msisdn, "Este artículo no está activo para alquiler.")
+            await set_session(from_msisdn, Step.IDLE, {})
+            await send_main_menu(from_msisdn)
+            return
+
+        if not _validate_date_window(start_iso, end_iso):
+            await send_text(from_msisdn, "Fechas inválidas. Usa un rango desde hoy y con fin posterior al inicio.")
+            return
+
+        if not await is_item_available(item_id, start_iso, end_iso):
+            await send_text(from_msisdn, "Esas fechas ya están reservadas. Prueba con un rango distinto.")
+            return
+
+        await set_session(from_msisdn, Step.RENTAL_WAIT_PAYMENT, {"item_id": item_id, "start_iso": start_iso, "end_iso": end_iso})
         payment_options = listing.get("payment_methods") or ["A convenir"]
         rows = [{"id": p.replace(" ", "_"), "title": p} for p in payment_options]
         await send_list(from_msisdn, f"Alquiler de #{item_id}", "¡Fechas guardadas! Ahora, selecciona tu método de pago.", "Ver Pagos", rows)
@@ -380,9 +452,18 @@ async def handle_text(msg: Dict[str, Any], st: Dict[str, Any], from_msisdn: str)
             if listing['owner_wa'] == from_msisdn:
                 await send_text(from_msisdn, "No puedes alquilar tu propio artículo.")
                 return
+            if listing.get("status") != "active":
+                await send_text(from_msisdn, "Este artículo no está disponible para nuevas rentas.")
+                return
             dates = _extract_dates(dates_text) if dates_text else None
             if dates:
                 start_iso, end_iso = dates
+                if not _validate_date_window(start_iso, end_iso):
+                    await send_text(from_msisdn, "Las fechas no son válidas. Inicio desde hoy y fin posterior.")
+                    return
+                if not await is_item_available(item_id, start_iso, end_iso):
+                    await send_text(from_msisdn, "Ese rango ya está reservado para este artículo.")
+                    return
                 await set_session(from_msisdn, Step.RENTAL_WAIT_PAYMENT, {"item_id": int(item_id), "start_iso": start_iso, "end_iso": end_iso})
                 payment_options = listing.get("payment_methods") or ["A convenir"]
                 rows = [{"id": p.replace(" ", "_"), "title": p} for p in payment_options]
@@ -462,7 +543,7 @@ async def handle_rental_confirmation(btn_id: str, from_msisdn: str):
     """
     Doble confirmación de inicio:
       - Registra la confirmación del actor
-      - Si la otra parte ya confirmó -> activa la renta (status=active)
+      - Si la otra parte ya confirmó -> activa la renta (status=active) siempre que hoy ∈ [start,end]
       - Si no -> avisa que falta la otra parte
     """
     try:
@@ -476,6 +557,8 @@ async def handle_rental_confirmation(btn_id: str, from_msisdn: str):
             other = result.get("other_party")
             await send_text(from_msisdn, "👍 Tu confirmación fue registrada. Falta la otra parte.")
             await send_text(other, f"⚠️ La otra parte confirmó el inicio de la renta #{rental_id}. Entra a *Gestión de Renta* y pulsa *Confirmar inicio* para activarla.")
+        elif status == "INVALID" and result.get("reason") == "OUT_OF_WINDOW":
+            await send_text(from_msisdn, "Aún no puede activarse: solo se activa dentro del rango de fechas acordado.")
         elif status == "INVALID":
             await send_text(from_msisdn, "Esta renta no puede confirmarse (posiblemente ya está activa o fue cancelada).")
         else:  # NOT_FOUND u otra

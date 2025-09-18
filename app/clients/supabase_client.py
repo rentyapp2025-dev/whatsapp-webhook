@@ -1,7 +1,7 @@
 import os
 import httpx
 import re
-from datetime import datetime
+from datetime import datetime, date
 from typing import Optional, Dict, Any, List
 
 # === Config ===
@@ -19,6 +19,40 @@ HEADERS_UPSERT = {**HEADERS, "Prefer": "return=representation,resolution=merge-d
 
 def _norm_phone(s: Optional[str]) -> str:
     return re.sub(r"\D", "", s or "")
+
+# =========================
+# Helpers de validación (NUEVO)
+# =========================
+def _valid_date_window(start_iso: str, end_iso: str) -> bool:
+    """start >= hoy y end > start (comparación por fecha, sin tiempo)."""
+    try:
+        s = datetime.strptime(start_iso[:10], "%Y-%m-%d").date()
+        e = datetime.strptime(end_iso[:10], "%Y-%m-%d").date()
+        return s >= date.today() and e > s
+    except Exception:
+        return False
+
+async def get_overlapping_rentals(item_id: int | str, start_iso: str, end_iso: str) -> List[Dict[str, Any]]:
+    """
+    Rentas del mismo item con estados bloqueantes que se solapan con [start,end] (inclusive).
+    Solape si: (start_db <= end) AND (end_db >= start)
+    """
+    start_d = start_iso[:10]
+    end_d = end_iso[:10]
+    async with httpx.AsyncClient(timeout=15.0) as c:
+        params = {
+            "item_id": f"eq.{item_id}",
+            "status": "in.(pending,requested,approved,active)",
+            "select": "id,start_date,end_date,status",
+            "and": f"(start_date.lte.{end_d},end_date.gte.{start_d})",
+        }
+        r = await c.get(f"{BASE}/rentals", headers=HEADERS, params=params)
+        r.raise_for_status()
+        return r.json()
+
+async def is_item_available(item_id: int | str, start_iso: str, end_iso: str) -> bool:
+    overlaps = await get_overlapping_rentals(item_id, start_iso, end_iso)
+    return len(overlaps) == 0
 
 # =========================
 # Users
@@ -246,10 +280,21 @@ async def mark_introduced_once(item_id: str) -> bool:
 async def create_rental_request(listing_id: int, renter_msisdn: str, start_iso: str, end_iso: str, payment_method: str) -> Dict[str, Any]:
     """
     Crea la renta en estado PENDIENTE. Se activa con confirmación doble.
+    - Rechaza si el listing no existe o no está activo
+    - Rechaza si fechas son inválidas o no disponibles
     """
     listing = await get_listing(str(listing_id))
     if not listing:
         return {"ok": False, "error": "LISTING_NOT_FOUND"}
+    if listing.get("status") != "active":
+        return {"ok": False, "error": "LISTING_INACTIVE"}
+
+    if not _valid_date_window(start_iso, end_iso):
+        return {"ok": False, "error": "INVALID_DATES"}
+
+    # Anti-overbooking (también se valida en handlers)
+    if not await is_item_available(listing_id, start_iso, end_iso):
+        return {"ok": False, "error": "DATES_NOT_AVAILABLE"}
 
     async with httpx.AsyncClient(timeout=15.0) as client:
         payload = {
@@ -258,7 +303,7 @@ async def create_rental_request(listing_id: int, renter_msisdn: str, start_iso: 
             "seller_wa": listing["owner_wa"],
             "start_date": start_iso[:10],
             "end_date": end_iso[:10],
-            "status": "pending",  # <- ahora pendiente
+            "status": "pending",
             "selected_payment_method": payment_method,
         }
         r = await client.post(f"{BASE}/rentals", headers=HEADERS_RETURN, json=payload)
@@ -269,22 +314,25 @@ async def create_rental_request(listing_id: int, renter_msisdn: str, start_iso: 
 
 async def confirm_rental_start(rental_id: int, actor_wa: str) -> Dict[str, Any]:
     """
-    Marca la confirmación del actor. Si ambas partes confirmaron, ACTIVA la renta.
+    Marca la confirmación del actor. Si ambas partes confirmaron, ACTIVA la renta,
+    siempre que la fecha actual esté dentro de [start_date, end_date].
     Return:
       - {"status": "ACTIVATED", "parties": [buyer, seller]}
       - {"status": "WAITING_OTHER", "other_party": wa}
-      - {"status": "NOT_FOUND"} / {"status": "INVALID"}
+      - {"status": "NOT_FOUND"} / {"status": "INVALID"} / {"status": "INVALID", "reason": "OUT_OF_WINDOW"}
     """
     async with httpx.AsyncClient(timeout=20.0) as c:
-        r = await c.get(f"{BASE}/rentals", headers=HEADERS,
-                        params={"id": f"eq.{rental_id}", "select": "id,buyer_wa,seller_wa,status,buyer_confirm_start,seller_confirm_start"})
+        r = await c.get(
+            f"{BASE}/rentals",
+            headers=HEADERS,
+            params={"id": f"eq.{rental_id}", "select": "id,buyer_wa,seller_wa,status,buyer_confirm_start,seller_confirm_start,start_date,end_date"}
+        )
         rows = r.json()
         if not rows:
             return {"status": "NOT_FOUND"}
         rental = rows[0]
 
         if rental.get("status") not in ("pending", "approved"):
-            # ya activa/cancelada/etc.
             return {"status": "INVALID"}
 
         actor_n = _norm_phone(actor_wa)
@@ -302,12 +350,17 @@ async def confirm_rental_start(rental_id: int, actor_wa: str) -> Dict[str, Any]:
         else:
             return {"status": "INVALID"}
 
-        # Set mi confirmación
+        # Registrar mi confirmación
         await c.patch(f"{BASE}/rentals", headers=HEADERS, params={"id": f"eq.{rental_id}"}, json=field_set)
 
-        # ¿Ya confirmó la otra parte?
+        # Si ya confirmó la otra parte, validar ventana temporal y activar
         if other_flag is True:
-            # activar
+            today = datetime.utcnow().date()
+            s = datetime.strptime(rental["start_date"], "%Y-%m-%d").date()
+            e = datetime.strptime(rental["end_date"], "%Y-%m-%d").date()
+            if not (s <= today <= e):
+                return {"status": "INVALID", "reason": "OUT_OF_WINDOW"}
+
             upd = await c.patch(
                 f"{BASE}/rentals", headers=HEADERS,
                 params={"id": f"eq.{rental_id}"},
@@ -345,6 +398,11 @@ async def request_rental_cancellation(rental_id: int, requester_wa: str) -> Dict
             return {"status": "NOT_FOUND"}
 
         rental = r_get.json()[0]
+
+        # No cancelar si ya está cerrada
+        if rental.get("status") in ("cancelled", "completed"):
+            return {"status": "INVALID"}
+
         other_party_wa = ""
         is_buyer = _norm_phone(requester_wa) == _norm_phone(rental['buyer_wa'])
 
@@ -376,6 +434,26 @@ async def request_rental_extension(rental_id: int, requester_wa: str, new_end_is
             return {"status": "NOT_FOUND"}
 
         rental = rows[0]
+
+        # Solo se puede extender si está activa
+        if rental.get("status") != "active":
+            return {"status": "INVALID"}
+
+        # nueva fecha >= end_date actual
+        try:
+            old_end = datetime.strptime(rental["end_date"], "%Y-%m-%d").date()
+            new_end = datetime.strptime(new_end_iso[:10], "%Y-%m-%d").date()
+        except Exception:
+            return {"status": "INVALID"}
+
+        if new_end < old_end:
+            return {"status": "INVALID"}
+
+        # No pisar otras reservas futuras del mismo item
+        item_id = rental["item_id"]
+        if not await is_item_available(item_id, rental["start_date"], new_end_iso[:10]):
+            return {"status": "INVALID"}
+
         req_is_buyer = _norm_phone(requester_wa) == _norm_phone(rental["buyer_wa"])
         flag_field = "buyer_wants_extension" if req_is_buyer else "seller_wants_extension"
         other_flag = "seller_wants_extension" if req_is_buyer else "buyer_wants_extension"
@@ -438,13 +516,25 @@ async def add_review(rental_id: int, reviewer_wa: str, rating: int, comment: str
         if reviewer_norm not in [buyer_norm, seller_norm]:
             return {"ok": False, "error": "NOT_PART_OF_RENTAL"}
 
+        # Solo reseñar rentas completadas
+        if rental.get("status") != "completed":
+            return {"ok": False, "error": "RENTAL_NOT_COMPLETED"}
+
+        # Rating duro 1..5
+        try:
+            r_int = int(rating)
+        except Exception:
+            return {"ok": False, "error": "INVALID_RATING"}
+        if not (1 <= r_int <= 5):
+            return {"ok": False, "error": "INVALID_RATING"}
+
         reviewed_wa = rental["seller_wa"] if reviewer_norm == buyer_norm else rental["buyer_wa"]
 
         payload = {
             "rental_id": rental_id,
             "reviewer_wa": reviewer_wa,
             "reviewed_wa": reviewed_wa,
-            "rating": rating,
+            "rating": r_int,
             "comment": comment
         }
         r_post = await c.post(f"{BASE}/reviews", headers=HEADERS_RETURN, json=payload)
