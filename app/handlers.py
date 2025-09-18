@@ -1,7 +1,7 @@
 import re
 import json
 from typing import Dict, Any, Optional, List
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 
 import httpx
 
@@ -22,9 +22,9 @@ from .clients.supabase_client import (
     get_rentals_for_user,
     confirm_rental_start,                 # Doble confirmación de inicio
     is_item_available,                    # Disponibilidad por fechas
-    get_future_bookings,                  # NUEVO: obtener reservas futuras
-    suggest_windows,                      # NUEVO: sugerir huecos libres
-    get_rental,                           # NUEVO: detalle de una renta
+    get_future_bookings,                  # Obtener reservas futuras
+    suggest_windows,                      # Sugerir huecos libres
+    get_rental,                           # Detalle de una renta
 )
 
 # === Helpers locales ===
@@ -49,9 +49,7 @@ def _fmt_suggestions(sugs: List[tuple]) -> str:
 
 async def _send_post_agreement_menus(buyer_wa: str, seller_wa: str, item_id: str, rental_id: str):
     """
-    Menús post-acuerdo diferenciados por rol:
-      - Arrendatario (buyer): Confirmar inicio, Cancelar, Extender
-      - Arrendador  (seller): Confirmar inicio, Cancelar
+    Menús post-acuerdo para estado PENDIENTE (sin 'Extender').
     """
     body_common = (
         f"Renta del artículo #{item_id}\n\n"
@@ -60,21 +58,19 @@ async def _send_post_agreement_menus(buyer_wa: str, seller_wa: str, item_id: str
         "Opciones disponibles:"
     )
 
-    # Arrendatario (con EXTENDER)
+    # Arrendatario (SIN EXTENDER aquí)
     body_buyer = (
         body_common
         + "\n• Confirmar inicio (activa la renta cuando los dos confirmen)"
           "\n• Cancelar (requiere confirmación de ambas partes)"
-          "\n• Extender (proponer nueva fecha de fin; requiere confirmación de ambas partes)"
     )
     buttons_buyer = [
         {"id": f"rental_confirm_{rental_id}", "title": "✅ Confirmar inicio"},
         {"id": f"rental_cancel_{rental_id}", "title": "❌ Cancelar"},
-        {"id": f"rental_extend_{rental_id}", "title": "🔄 Extender"},
     ]
     await send_reply_buttons(buyer_wa, "Gestión de Renta", body_buyer, buttons_buyer)
 
-    # Arrendador (sin EXTENDER)
+    # Arrendador (igual)
     body_seller = (
         body_common
         + "\n• Confirmar inicio (activa la renta cuando los dos confirmen)"
@@ -85,6 +81,39 @@ async def _send_post_agreement_menus(buyer_wa: str, seller_wa: str, item_id: str
         {"id": f"rental_cancel_{rental_id}", "title": "❌ Cancelar"},
     ]
     await send_reply_buttons(seller_wa, "Gestión de Renta", body_seller, buttons_seller)
+
+
+async def _send_rental_management_menu(target_wa: str, rental: Dict[str, Any]):
+    """
+    Muestra botones de acción según estado de la renta.
+    - pending  -> Confirmar / Cancelar
+    - active   -> Extender / Cancelar
+    - finished/cancelled/others -> solo info
+    """
+    rid = rental["id"]
+    status = (rental.get("status") or "").lower()
+    title = (rental.get("listing") or {}).get("title", f"Artículo #{rental['item_id']}")
+    start, end = _to_ve(rental['start_date']), _to_ve(rental['end_date'])
+
+    header = "Gestión de Renta"
+    body = f"📝 *Renta #{rid}*\n- Artículo: {title}\n- Fechas: {start} a {end}\n- Estado: *{rental['status']}*"
+
+    if status == "pending":
+        buttons = [
+            {"id": f"rental_confirm_{rid}", "title": "✅ Confirmar inicio"},
+            {"id": f"rental_cancel_{rid}", "title": "❌ Cancelar"},
+        ]
+        await send_reply_buttons(target_wa, header, body + "\n\n¿Qué deseas hacer?", buttons)
+
+    elif status == "active":
+        buttons = [
+            {"id": f"rental_extend_{rid}", "title": "🔄 Extender"},
+            {"id": f"rental_cancel_{rid}", "title": "❌ Cancelar"},
+        ]
+        await send_reply_buttons(target_wa, header, body + "\n\n¿Qué deseas hacer?", buttons)
+
+    else:
+        await send_text(target_wa, body)
 
 
 async def finalize_and_introduce(item_id: str, actor_msisdn: str):
@@ -194,16 +223,15 @@ async def handle_interactive(msg: Dict[str, Any], st: Dict[str, Any], from_msisd
             try:
                 _, _, rid, end_iso = btn_id.split("_", 3)
                 rid_int = int(rid)
-                # Confirmamos la misma fecha propuesta desde la otra parte
                 res = await request_rental_extension(rid_int, from_msisdn, end_iso)
                 if res.get("status") == "EXTENDED":
                     for wa in res.get("parties", []):
                         await send_text(wa, f"✅ La renta #{rid_int} fue *extendida* hasta *{_to_ve(end_iso)}* por mutuo acuerdo.")
                 elif res.get("status") == "EXTENSION_PENDING":
-                    # Aún faltaría la otra parte (caso raro si apretó el mismo solicitante)
                     await send_text(from_msisdn, "Tu respuesta fue registrada. Falta la confirmación de la otra parte.")
                 else:
-                    await send_text(from_msisdn, "No se pudo confirmar la extensión. Verifica que la renta esté activa.")
+                    reason = res.get("reason") or "Verifica que la renta esté activa y la fecha sea válida."
+                    await send_text(from_msisdn, f"No se pudo confirmar la extensión. {reason}")
             except Exception:
                 await send_text(from_msisdn, "No se pudo procesar el botón de extensión.")
             return
@@ -224,6 +252,7 @@ async def handle_interactive(msg: Dict[str, Any], st: Dict[str, Any], from_msisd
                              f"   - Artículo: {title}\n"
                              f"   - Fechas: {start} a {end}\n"
                              f"   - Estado: *{r['status']}*\n\n")
+            response += "👉 Para gestionar uno, escribe: *MIS ALQUILERES #ID*"
             await send_text(from_msisdn, response)
             return
 
@@ -390,6 +419,8 @@ async def handle_text(msg: Dict[str, Any], st: Dict[str, Any], from_msisdn: str)
                 f"   - Fechas: {start} a {end}\n"
                 f"   - Estado: *{r['status']}*")
         await send_text(from_msisdn, info)
+        # Menú de acciones según estado
+        await _send_rental_management_menu(from_msisdn, r)
         return
 
     # Comandos directos
@@ -455,6 +486,7 @@ async def handle_text(msg: Dict[str, Any], st: Dict[str, Any], from_msisdn: str)
                 f"   - Fechas: {start} a {end}\n"
                 f"   - Estado: *{r['status']}*")
         await send_text(from_msisdn, info)
+        await _send_rental_management_menu(from_msisdn, r)
         return
 
     if upper.startswith("ELIMINAR #"):
@@ -560,6 +592,23 @@ async def handle_text(msg: Dict[str, Any], st: Dict[str, Any], from_msisdn: str)
             await set_session(from_msisdn, Step.IDLE, {})
             await send_main_menu(from_msisdn)
             return
+
+        # Obtener la renta actual para validar estado y fecha fin
+        r = await get_rental(int(rental_id))
+        if not r:
+            await send_text(from_msisdn, f"No encontré la renta #{rental_id}.")
+            await set_session(from_msisdn, Step.IDLE, {})
+            await send_main_menu(from_msisdn)
+            return
+
+        status_r = (r.get("status") or "").lower()
+        if status_r != "active":
+            await send_text(from_msisdn, "Solo puedes extender una renta *activa*.")
+            await set_session(from_msisdn, Step.IDLE, {})
+            await send_main_menu(from_msisdn)
+            return
+
+        # Parseo de fecha: admitimos "DD/MM/AAAA" o "DD/MM/AAAA a DD/MM/AAAA"
         dates = _extract_dates(text)
         end_iso = None
         if dates:
@@ -567,29 +616,84 @@ async def handle_text(msg: Dict[str, Any], st: Dict[str, Any], from_msisdn: str)
         else:
             m1 = re.search(r"\b(\d{2}/\d{2}/\d{4})\b", text)
             if m1:
-                d, mth, y = map(int, m1.group(1).split("/")); end_iso = f"{y:04d}-{mth:02d}-{d:02d}"
+                d_, mth, y = map(int, m1.group(1).split("/"))
+                end_iso = f"{y:04d}-{mth:02d}-{d_:02d}"
+
         if not end_iso:
-            await send_text(from_msisdn, "Formato de fecha no válido. Usa DD/MM/AAAA.")
+            await send_text(from_msisdn, "Formato de fecha no válido. Usa *DD/MM/AAAA* para la nueva fecha de fin.")
             return
+
+        # Validaciones de ventana (nueva fecha fin > hoy y > fecha fin actual)
+        try:
+            new_end = datetime.strptime(end_iso[:10], "%Y-%m-%d").date()
+            current_end = datetime.strptime(r["end_date"][:10], "%Y-%m-%d").date()
+            today = date.today()
+        except Exception:
+            await send_text(from_msisdn, "No pude interpretar la fecha. Usa *DD/MM/AAAA*.")
+            return
+
+        if new_end <= today:
+            await send_text(from_msisdn, "La nueva fecha de fin debe ser *posterior a hoy*.")
+            return
+        if new_end <= current_end:
+            await send_text(from_msisdn, f"La nueva fecha de fin debe ser *posterior a { _to_ve(r['end_date']) }*.")
+            return
+
+        # Disponibilidad del TRAMO EXTRA: (current_end + 1) .. new_end
+        item_id = r["item_id"]
+        try:
+            bookings = await get_future_bookings(str(item_id)) or []
+            filtered = []
+            for b in bookings:
+                if str(b.get("rental_id")) == str(r["id"]):
+                    continue
+                filtered.append(b)
+
+            extra_start = current_end + timedelta(days=1)
+            extra_end = new_end
+
+            def _overlaps(a_start, a_end, b_start, b_end):
+                return a_start <= b_end and b_start <= a_end
+
+            conflict = False
+            for b in filtered:
+                bs = datetime.strptime(b["start_date"][:10], "%Y-%m-%d").date()
+                be = datetime.strptime(b["end_date"][:10], "%Y-%m-%d").date()
+                if _overlaps(extra_start, extra_end, bs, be):
+                    conflict = True
+                    break
+
+            if conflict:
+                await send_text(from_msisdn, "No es posible extender: el tramo adicional *se solapa* con otra reserva.")
+                return
+        except Exception:
+            # Si falla la comprobación, seguimos (comportamiento conservador del backend decidirá)
+            pass
+
+        # Solicitud de extensión (requiere confirmación de la otra parte)
         result = await request_rental_extension(int(rental_id), from_msisdn, end_iso)
         status = result.get("status")
+
         if status == "EXTENSION_PENDING":
             other = result.get("other_party")
             await send_text(from_msisdn, f"Solicitud de extensión registrada hasta *{_to_ve(end_iso)}*. La otra parte debe confirmarla.")
-            # Enviamos botones de aceptación al arrendador (u otra parte)
-            buttons = [
-                {"id": f"rental_ext_accept_{rental_id}_{end_iso[:10]}", "title": "✅ Aceptar extensión"},
-            ]
-            body = (f"El otro usuario solicita *extender* la renta #{rental_id} "
-                    f"hasta *{_to_ve(end_iso)}*.\n\nElige una opción:")
+            buttons = [{"id": f"rental_ext_accept_{rental_id}_{end_iso[:10]}", "title": "✅ Aceptar extensión"}]
+            body = (f"El otro usuario solicita *extender* la renta #{rental_id} hasta *{_to_ve(end_iso)}*.\n\nElige una opción:")
             await send_reply_buttons(other, "Extensión de Renta", body, buttons)
+            await set_session(from_msisdn, Step.IDLE, {})
+            await send_main_menu(from_msisdn)
+
         elif status == "EXTENDED":
             for party in result.get("parties", []):
                 await send_text(party, f"¡Listo! La renta #{rental_id} fue extendida hasta *{_to_ve(end_iso)}* por mutuo acuerdo.")
+            await set_session(from_msisdn, Step.IDLE, {})
+            await send_main_menu(from_msisdn)
+
         else:
-            await send_text(from_msisdn, "No se pudo procesar la extensión.")
-        await set_session(from_msisdn, Step.IDLE, {})
-        await send_main_menu(from_msisdn)
+            reason = result.get("reason") or "No se pudo procesar la extensión."
+            await send_text(from_msisdn, f"No se pudo procesar la extensión. {reason}")
+            await set_session(from_msisdn, Step.IDLE, {})
+            await send_main_menu(from_msisdn)
         return
 
     # Estado: pedir un ID de renta específico
@@ -614,7 +718,8 @@ async def handle_text(msg: Dict[str, Any], st: Dict[str, Any], from_msisdn: str)
                 f"   - Fechas: {start} a {end}\n"
                 f"   - Estado: *{r['status']}*")
         await send_text(from_msisdn, info)
-        await send_main_menu(from_msisdn)
+        await _send_rental_management_menu(from_msisdn, r)
+        # (Opcional) enviar menú principal después de que el usuario interactúe con los botones
         return
 
     # Fallback: IA (opcional)
@@ -700,7 +805,8 @@ async def get_intent_from_llm(text: str) -> Optional[Dict[str, Any]]:
     try:
         response_text = chat_completion(messages, temperature=0.2, max_tokens=200)
         match = re.search(r"\{.*\}", response_text, re.DOTALL)
-        if match: return json.loads(match.group(0))
+        if match: 
+            return json.loads(match.group(0))
         return None
     except Exception as e:
         print(f"Error al contactar el LLM: {e}")
@@ -723,7 +829,7 @@ async def handle_cancellation_request(rental_id_str: str, requester_wa: str):
                             f"Para aceptar, responde: CANCELAR RENTA #{rental_id_str}")
             await send_text(result.get("other_party"), msg_to_other)
         elif status == "NOT_FOUND":
-             await send_text(requester_wa, f"No se encontró una renta con el ID #{rental_id_str}.")
+            await send_text(requester_wa, f"No se encontró una renta con el ID #{rental_id_str}.")
         else:
             await send_text(requester_wa, "No se pudo procesar tu solicitud. La renta podría no ser cancelable en este momento.")
     except Exception as e:

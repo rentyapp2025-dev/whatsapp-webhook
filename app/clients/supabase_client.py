@@ -145,7 +145,7 @@ def suggest_windows(
                 return suggestions
 
     # Entre reservas
-    for (s1, e1), (s2, e2) in zip(merged, merged[1:]):
+    for (s1, e1), (s2, _e2) in zip(merged, merged[1:]):
         start_gap = e1 + timedelta(days=1)
         end_gap = min(s2 - timedelta(days=1), end_horizon)
         if start_gap <= end_gap:
@@ -162,6 +162,28 @@ def suggest_windows(
         suggestions.append((start_gap, start_gap + timedelta(days=requested_days - 1)))
 
     return suggestions[:max_suggestions]
+
+
+async def suggest_availability_for_request(
+    item_id: int | str,
+    start_iso: str,
+    end_iso: str,
+    max_suggestions: int = 3,
+) -> List[Tuple[str, str]]:
+    """
+    Dadas fechas solicitadas no disponibles, sugiere hasta 'max_suggestions' ventanas alternativas
+    (mismo número de días) en las que el item está libre.
+    """
+    try:
+        s = datetime.strptime(start_iso[:10], "%Y-%m-%d").date()
+        e = datetime.strptime(end_iso[:10], "%Y-%m-%d").date()
+    except Exception:
+        return []
+
+    requested_days = (e - s).days + 1
+    bookings = await get_future_bookings(item_id, from_iso=s.isoformat())
+    sugg = suggest_windows(bookings, requested_days, from_day=s, max_suggestions=max_suggestions)
+    return [(a.isoformat(), b.isoformat()) for a, b in sugg]
 
 
 # =========================
@@ -568,6 +590,15 @@ async def request_rental_cancellation(rental_id: int, requester_wa: str) -> Dict
 
 
 async def request_rental_extension(rental_id: int, requester_wa: str, new_end_iso: str) -> Dict[str, Any]:
+    """
+    Registra/acepta una extensión. Reglas:
+      - La renta debe estar ACTIVA.
+      - La nueva fecha final debe ser >= end_date actual.
+      - No debe solapar con otras reservas del mismo item.
+      - La extensión queda en 'extension_pending' hasta que ambas partes marquen su intención
+        (buyer_wants_extension / seller_wants_extension). Cuando ambas partes coinciden, se
+        actualiza 'end_date' y se limpia el estado intermedio.
+    """
     async with httpx.AsyncClient(timeout=20.0) as c:
         r_get = await c.get(f"{BASE}/rentals", headers=HEADERS, params={"id": f"eq.{rental_id}", "select": "*"})
         rows = r_get.json()
