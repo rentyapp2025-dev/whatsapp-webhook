@@ -109,13 +109,7 @@ def _format_collision_message(overlap_end: date) -> str:
 
 
 async def _send_rental_management_menu(target_wa: str, rental: Dict[str, Any]):
-    """
-    Muestra botones de acción según estado de la renta.
-    - pending  -> Confirmar / Cancelar
-    - active   -> Extender / Cancelar
-    - finished/cancelled/others -> solo info
-    Incluye token anti-tap y, si existe en el objeto, el versioning esperado.
-    """
+    """Menú de acciones según estado."""
     rid = rental["id"]
     status = (rental.get("status") or "").lower()
     body = _card_for_rental(rental, target_wa)
@@ -130,22 +124,17 @@ async def _send_rental_management_menu(target_wa: str, rental: Dict[str, Any]):
             {"id": f"rental_cancel_{rid}_{token}{ver_suffix}", "title": "❌ Cancelar"},
         ]
         await send_reply_buttons(target_wa, "Gestión de Renta", body + "\n\n¿Qué deseas hacer?", buttons)
-
     elif status == "active":
         buttons = [
             {"id": f"rental_extend_{rid}_{token}{ver_suffix}", "title": "🔄 Extender"},
             {"id": f"rental_cancel_{rid}_{token}{ver_suffix}", "title": "❌ Cancelar"},
         ]
         await send_reply_buttons(target_wa, "Gestión de Renta", body + "\n\n¿Qué deseas hacer?", buttons)
-
     else:
         await send_text(target_wa, body)
 
 
 async def _render_my_rentals_page(user_wa: str, rentals: List[Dict[str, Any]], offset: int):
-    """
-    Renderiza una página de 'Mis Alquileres' con paginación básica.
-    """
     if not rentals:
         await send_text(user_wa, "No tienes alquileres activos o pasados.")
         return
@@ -159,7 +148,6 @@ async def _render_my_rentals_page(user_wa: str, rentals: List[Dict[str, Any]], o
     txt = "Tus alquileres:\n\n" + "\n\n".join(chunks)
     await send_text(user_wa, txt)
 
-    # Botones de paginación
     buttons = []
     if offset > 0:
         prev_off = max(0, offset - MYRENTALS_PAGE_SIZE)
@@ -167,16 +155,11 @@ async def _render_my_rentals_page(user_wa: str, rentals: List[Dict[str, Any]], o
     if end_index < len(rentals):
         next_off = end_index
         buttons.append({"id": f"myrentals_page_{next_off}", "title": "➡️ Siguientes"})
-    # Ayuda de gestión directa
     buttons.append({"id": "myrentals_one", "title": "🔎 Ver uno (#ID)"})
-
     await send_reply_buttons(user_wa, "Mis Alquileres", "Navega tus rentas o gestiona una en particular:", buttons)
 
 
 async def _send_post_agreement_menus(buyer_wa: str, seller_wa: str, item_id: str, rental_id: str):
-    """
-    Menús post-acuerdo para estado PENDIENTE (sin 'Extender').
-    """
     body_common = (
         f"Renta del artículo #{item_id}\n\n"
         "Estado actual: *PENDIENTE*.\n"
@@ -213,10 +196,6 @@ async def _send_post_agreement_menus(buyer_wa: str, seller_wa: str, item_id: str
 # Flujo de creación inicial
 # =========================
 async def finalize_and_introduce(item_id: str, actor_msisdn: str):
-    """
-    Se llama cuando ambos dieron consentimiento.
-    Crea la renta en estado PENDIENTE y presenta a las partes.
-    """
     cons = await get_consent(item_id)
     if not cons:
         return
@@ -248,7 +227,6 @@ async def finalize_and_introduce(item_id: str, actor_msisdn: str):
                 rental_id_str = str(r["row"]["id"])
         await set_session(buyer_wa, Step.IDLE, {})
 
-    # Presentación (una sola vez) + aviso de estado
     if await mark_introduced_once(item_id):
         buyer_name, seller_name = await get_user_name(buyer_wa), await get_user_name(seller_wa)
         base_msg = (
@@ -284,46 +262,11 @@ async def handle_interactive(msg: Dict[str, Any], st: Dict[str, Any], from_msisd
     if itype == "button_reply":
         btn_id = interactive["button_reply"]["id"]
 
-        # CONSENTIMIENTO (versionado con fechas)
+        # CONSENTIMIENTO
         if btn_id.startswith("consent_"):
-            # Formatos:
-            #   consent_yes_{itemId}_{YYYY-MM-DD}_{YYYY-MM-DD}
-            #   consent_no_{itemId}_{YYYY-MM-DD}_{YYYY-MM-DD}
+            # consent_yes_{itemId} | consent_no_{itemId}
             parts = btn_id.split("_")
-            answer = parts[1]
-            item_id = parts[2]
-            btn_start = parts[3] if len(parts) > 3 else None
-            btn_end = parts[4] if len(parts) > 4 else None
-
-            # Recuperar sesión del COMPRADOR para validar contra el borrador vigente
-            cons_preview = await get_consent(item_id)
-            buyer_wa = (cons_preview or {}).get("buyer_wa") or from_msisdn
-            buyer_session = await get_session(buyer_wa)
-            draft = buyer_session.get("draft", {})
-            have_full_draft = all(k in draft for k in ("start_iso", "end_iso", "selected_payment_method"))
-
-            # Si el botón trae fechas, deben coincidir con el borrador actual
-            if btn_start and btn_end and have_full_draft:
-                if btn_start[:10] != draft["start_iso"][:10] or btn_end[:10] != draft["end_iso"][:10]:
-                    await send_text(from_msisdn, "Esta autorización corresponde a una solicitud anterior. Vuelve a elegir el método de pago para las fechas actuales.")
-                    listing = await get_listing(str(draft.get("item_id") or item_id))
-                    if listing:
-                        rows = [{"id": p.replace(" ", "_"), "title": p} for p in (listing.get("payment_methods") or ["A convenir"])]
-                        await send_list(buyer_wa, f"Alquiler de #{listing['id']}", "Selecciona tu método de pago:", "Ver Pagos", rows)
-                        await set_session(buyer_wa, Step.RENTAL_WAIT_PAYMENT, draft if draft else {"item_id": int(listing["id"])})
-                    return
-
-            # Si no hay borrador completo, relanzar pago (evita finalizar con datos viejos)
-            if not have_full_draft:
-                await send_text(from_msisdn, "Recibí tu respuesta. Necesitamos que completes el método de pago para continuar.")
-                listing = await get_listing(item_id)
-                if listing:
-                    rows = [{"id": p.replace(" ", "_"), "title": p} for p in (listing.get("payment_methods") or ["A convenir"])]
-                    await send_list(buyer_wa, f"Alquiler de #{item_id}", "Selecciona tu método de pago:", "Ver Pagos", rows)
-                    await set_session(buyer_wa, Step.RENTAL_WAIT_PAYMENT, {"item_id": int(item_id)})
-                return
-
-            # --- flujo normal de consentimiento ---
+            answer, item_id = parts[1], parts[2]
             cons = await set_consent_flag(item_id, from_msisdn, ok=(answer == "yes"))
             if not cons:
                 await send_text(from_msisdn, "No se encontró la solicitud.")
@@ -400,7 +343,7 @@ async def handle_interactive(msg: Dict[str, Any], st: Dict[str, Any], from_msisd
         row_id = interactive["list_reply"]["id"]
         row_title = interactive["list_reply"]["title"]
 
-        # Método de pago → crea consentimiento (revalidando antes)
+        # Método de pago → crea consentimiento (con revalidación previa)
         if s == Step.RENTAL_WAIT_PAYMENT:
             draft = st["draft"]
             start_iso, end_iso, item_id = draft['start_iso'], draft['end_iso'], str(draft['item_id'])
@@ -430,29 +373,24 @@ async def handle_interactive(msg: Dict[str, Any], st: Dict[str, Any], from_msisd
                 await set_session(from_msisdn, Step.RENTAL_WAIT_DATES, {"item_id": int(item_id)})
                 return
 
-            # OK → guardamos método de pago y pedimos consentimientos
+            # Si todo OK, persistimos y pedimos consentimientos
             draft["selected_payment_method"] = row_title
             await set_session(from_msisdn, s, draft)
 
             seller, buyer = listing["owner_wa"], from_msisdn
             await upsert_consent(item_id, buyer, seller)
 
-            s_iso, e_iso = start_iso[:10], end_iso[:10]
             msg_to_seller = (f"¡Nueva solicitud para tu artículo #{item_id}!\n\n"
                              f"Fechas: del *{_to_ve(start_iso)}* al *{_to_ve(end_iso)}*\n"
                              f"Método de pago: *{row_title}*\n\n"
                              "¿Aceptas compartir tu contacto para coordinar?")
-            seller_buttons = [
-                {"id": f"consent_yes_{item_id}_{s_iso}_{e_iso}", "title": "Sí, acepto"},
-                {"id": f"consent_no_{item_id}_{s_iso}_{e_iso}", "title": "No, gracias"},
-            ]
+            seller_buttons = [{"id": f"consent_yes_{item_id}", "title": "Sí, acepto"},
+                              {"id": f"consent_no_{item_id}", "title": "No, gracias"}]
             await send_reply_buttons(seller, "Confirmación de Alquiler", msg_to_seller, seller_buttons)
 
             await send_text(buyer, "¡Excelente! Hemos enviado tu solicitud al dueño. Para continuar, solo falta tu autorización final para compartir tu contacto.")
-            buyer_buttons = [
-                {"id": f"consent_yes_{item_id}_{s_iso}_{e_iso}", "title": "Sí, autorizo"},
-                {"id": f"consent_no_{item_id}_{s_iso}_{e_iso}", "title": "No autorizo"},
-            ]
+            buyer_buttons = [{"id": f"consent_yes_{item_id}", "title": "Sí, autorizo"},
+                             {"id": f"consent_no_{item_id}", "title": "No autorizo"}]
             await send_reply_buttons(buyer, "Autorización Final", "¿Autorizas compartir tu contacto con el vendedor?", buyer_buttons)
             return
 
@@ -496,6 +434,32 @@ async def handle_text(msg: Dict[str, Any], st: Dict[str, Any], from_msisdn: str)
         await set_session(from_msisdn, Step.IDLE, {})
         await send_main_menu(from_msisdn)
         return
+
+    # === NUEVO: fallback textual para consentimiento final ===
+    if s == Step.RENTAL_WAIT_PAYMENT and st.get("draft", {}).get("item_id"):
+        item_id = str(st["draft"]["item_id"])
+        if upper in {"SI, AUTORIZO", "SÍ, AUTORIZO", "SI AUTORIZO", "SÍ AUTORIZO"}:
+            cons = await set_consent_flag(item_id, from_msisdn, ok=True)
+            if not cons:
+                await send_text(from_msisdn, "No se encontró la solicitud.")
+                return
+            if cons.get("buyer_ok") and cons.get("seller_ok"):
+                await finalize_and_introduce(item_id, from_msisdn)
+            else:
+                await send_text(from_msisdn, "Gracias. Esperamos la respuesta de la otra parte.")
+            return
+        if upper in {"NO AUTORIZO", "NO, AUTORIZO", "NO", "NO ACEPTO"}:
+            cons = await set_consent_flag(item_id, from_msisdn, ok=False)
+            if cons:
+                other = cons["seller_wa"] if from_msisdn == cons["buyer_wa"] else cons["buyer_wa"]
+                await send_text(from_msisdn, "Entendido. Tu decisión fue registrada.")
+                await send_text(other, "La otra parte ha rechazado la solicitud. La operación se canceló.")
+                await set_session(from_msisdn, Step.IDLE, {})
+                await send_main_menu(from_msisdn)
+            else:
+                await send_text(from_msisdn, "No se encontró la solicitud.")
+            return
+    # === FIN fallback textual consentimiento ===
 
     # ALQUILAR robusto
     m_cmd = re.search(r"\bALQUILAR\b", upper)
