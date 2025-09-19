@@ -3,16 +3,15 @@ import httpx
 import re
 from datetime import datetime, date, timedelta, timezone
 from typing import Optional, Dict, Any, List, Tuple
+from zoneinfo import ZoneInfo
 
 # =========================
 # Config & Consts
 # =========================
 SUPABASE_URL = os.environ["SUPABASE_URL"].rstrip("/")
 SUPABASE_KEY = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
-
-# Zona horaria de negocio (ajústala a tu operación)
-BUSINESS_TZ = os.environ.get("BUSINESS_TZ", "America/Caracas")
 # Límite de días por alquiler (opcional)
+BUSINESS_TZ = os.environ.get("BUSINESS_TZ", "America/Caracas")
 MIN_RENT_DAYS = int(os.environ.get("MIN_RENT_DAYS", "1"))
 MAX_RENT_DAYS = int(os.environ.get("MAX_RENT_DAYS", "90"))
 # Habilitar idempotencia (requiere tabla action_dedup)
@@ -40,6 +39,10 @@ BLOCKING_STATUSES = (STATUS_PENDING, "requested", STATUS_APPROVED, STATUS_ACTIVE
 # =========================
 # Utils
 # =========================
+def _today_business() -> date:
+    """Devuelve 'hoy' según la zona horaria de negocio (no UTC)."""
+    return datetime.now(ZoneInfo(BUSINESS_TZ)).date()
+
 def _now_utc_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -50,11 +53,11 @@ def _parse_iso_to_date(s: str) -> date:
     return datetime.strptime(s[:10], "%Y-%m-%d").date()
 
 def _valid_date_window(start_iso: str, end_iso: str) -> bool:
-    """start >= hoy y end > start (comparación por fecha, sin tiempo)."""
+    """Inicio >= hoy (en tz de negocio) y fin > inicio."""
     try:
-        s = _parse_iso_to_date(start_iso)
-        e = _parse_iso_to_date(end_iso)
-        return s >= date.today() and e > s
+        s = date.fromisoformat(start_iso[:10])
+        e = date.fromisoformat(end_iso[:10])
+        return s >= _today_business() and e > s
     except Exception:
         return False
 
@@ -137,13 +140,26 @@ async def get_overlapping_rentals(item_id: int | str, start_iso: str, end_iso: s
 async def is_item_available(item_id: int | str, start_iso: str, end_iso: str) -> bool:
     return len(await get_overlapping_rentals(item_id, start_iso, end_iso)) == 0
 
+# Helpers de colisión (opcionales para usar en handlers)
+def end_of_first_overlap(bookings: List[Tuple[date, date]], s: date, e: date) -> date:
+    """Devuelve el fin de la primera reserva que solape con [s,e]."""
+    for bs, be in bookings:
+        if not (e < bs or s > be):  # hay solape
+            return be
+    cands = [be for _, be in bookings if be >= s]
+    return max(cands) if cands else s
+
+def days_left_until(d: date) -> int:
+    """Días restantes hasta 'd' (incluyendo hoy) en tz de negocio."""
+    return (d - _today_business()).days + 1
+
 # =========================
 # Calendario / sugerencias
 # =========================
 async def get_future_bookings(item_id: int | str, from_iso: Optional[str] = None) -> List[Tuple[date, date]]:
     """Reservas futuras (bloqueantes) como pares (start,end)."""
     if not from_iso:
-        from_iso = date.today().isoformat()
+        from_iso = _today_business().isoformat()
 
     async with httpx.AsyncClient(timeout=15.0) as c:
         params = {
@@ -180,7 +196,7 @@ def suggest_windows(
     """Huecos libres (>= requested_days) desde from_day (o hoy) hasta horizon."""
     if requested_days <= 0:
         requested_days = 1
-    today = date.today()
+    today = _today_business()
     cur = max(from_day or today, today)
     end_horizon = cur + timedelta(days=horizon_days)
 
@@ -576,7 +592,7 @@ async def confirm_rental_start(rental_id: int, actor_wa: str, *, action_token: O
         # reload to check both confirmations
         rental = await _load_rental_full(c, rental_id)
         if rental.get(other_field) is True:
-            today = date.today()
+            today = _today_business()
             s = _parse_iso_to_date(rental["start_date"])
             e = _parse_iso_to_date(rental["end_date"])
             if not (s <= today <= e):
@@ -691,7 +707,7 @@ async def request_rental_extension(
     except Exception:
         return {"status": "INVALID", "reason": "BAD_DATE"}
 
-    if new_end <= date.today():
+    if new_end <= _today_business():
         return {"status": "INVALID", "reason": "END_NOT_AFTER_TODAY"}
 
     async with httpx.AsyncClient(timeout=20.0) as c:

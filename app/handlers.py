@@ -23,9 +23,10 @@ from .clients.supabase_client import (
     get_rentals_for_user,
     confirm_rental_start,                 # Doble confirmación de inicio
     is_item_available,                    # Disponibilidad por fechas
-    get_future_bookings,                  # Obtener reservas futuras
-    suggest_windows,                      # Sugerir huecos libres
+    get_future_bookings,                  # Obtener reservas futuras (pares de date)
     get_rental,                           # Detalle de una renta
+    _today_business,                      # Hoy en TZ de negocio
+    end_of_first_overlap,                 # Fin de la reserva que choca
 )
 
 # ======================
@@ -38,11 +39,11 @@ BUSINESS_TZ = "America/Caracas"  # referencia comunicacional (guardas UTC en DB)
 # Helpers de fechas
 # =================
 def _validate_date_window(start_iso: str, end_iso: str) -> bool:
-    """start >= hoy y end > start (comparación por fecha, sin horas)."""
+    """start >= hoy (en TZ de negocio) y end > start (comparación por fecha, sin horas)."""
     try:
         s = datetime.strptime(start_iso[:10], "%Y-%m-%d").date()
         e = datetime.strptime(end_iso[:10], "%Y-%m-%d").date()
-        return s >= date.today() and e > s
+        return s >= _today_business() and e > s
     except Exception:
         return False
 
@@ -92,6 +93,20 @@ def _card_for_rental(r: Dict[str, Any], you_msisdn: str) -> str:
     if r.get("policy"):
         lines.append(f"   - Política: {r['policy']}")
     return "\n".join(lines)
+
+
+def _format_collision_message(overlap_end: date) -> str:
+    """Mensaje de colisión: fin de la renta activa y días restantes."""
+    fin = overlap_end.strftime("%d/%m/%Y")
+    left = (overlap_end - _today_business()).days + 1
+    if left < 1:
+        left = 1
+    dias = "día" if left == 1 else "días"
+    return (
+        f"Esas fechas chocan con una renta activa que finaliza el *{fin}* "
+        f"(faltan *{left} {dias}*).\n\n"
+        "Envía un nuevo rango que *no* solape con el formato: *DD/MM/AAAA a DD/MM/AAAA*."
+    )
 
 
 async def _send_rental_management_menu(target_wa: str, rental: Dict[str, Any]):
@@ -222,7 +237,14 @@ async def finalize_and_introduce(item_id: str, actor_msisdn: str):
         elif not _validate_date_window(draft['start_iso'], draft['end_iso']):
             await send_text(buyer_wa, "Las fechas ya no son válidas. Intenta proponer un nuevo rango.")
         elif not await is_item_available(item_id, draft['start_iso'], draft['end_iso']):
-            await send_text(buyer_wa, "Ese rango de fechas ya fue tomado. Propón nuevas fechas.")
+            # Colisión: informar fin y días restantes y pedir reintento
+            bookings = await get_future_bookings(item_id, from_iso=draft['start_iso'])
+            s_d = _safe_date(draft['start_iso']); e_d = _safe_date(draft['end_iso'])
+            if s_d and e_d and bookings:
+                overlap_end = end_of_first_overlap(bookings, s_d, e_d)
+                await send_text(buyer_wa, _format_collision_message(overlap_end))
+            else:
+                await send_text(buyer_wa, "Ese rango ya fue tomado. Propón nuevas fechas.")
         else:
             r = await create_rental_request(
                 int(item_id), buyer_wa, draft['start_iso'], draft['end_iso'], draft['selected_payment_method']
@@ -370,20 +392,15 @@ async def handle_interactive(msg: Dict[str, Any], st: Dict[str, Any], from_msisd
                 return
 
             if not await is_item_available(item_id, start_iso, end_iso):
-                # Sugerir alternativas
-                try:
-                    requested_days = (_safe_date(end_iso) - _safe_date(start_iso)).days + 1  # type: ignore
-                    bookings = await get_future_bookings(item_id)
-                    sugs = suggest_windows(bookings, requested_days)
-                    msg = "Lo siento, esas fechas ya no están disponibles para este artículo."
-                    if sugs:
-                        msg += "\n\nFechas *sugeridas* libres:\n" + _fmt_suggestions(sugs)
-                        msg += "\n\nPuedes copiar una sugerencia y reenviar las fechas."
-                    await send_text(from_msisdn, msg)
-                except Exception:
+                # Colisión: informar fin y días restantes, mantener paso para reintento
+                s_d = _safe_date(start_iso); e_d = _safe_date(end_iso)
+                bookings = await get_future_bookings(item_id, from_iso=start_iso)
+                if s_d and e_d and bookings:
+                    overlap_end = end_of_first_overlap(bookings, s_d, e_d)
+                    await send_text(from_msisdn, _format_collision_message(overlap_end))
+                else:
                     await send_text(from_msisdn, "Lo siento, esas fechas ya no están disponibles para este artículo.")
-                await set_session(from_msisdn, Step.IDLE, {})
-                await send_main_menu(from_msisdn)
+                await set_session(from_msisdn, Step.RENTAL_WAIT_DATES, {"item_id": int(item_id)})
                 return
 
             # Si todo OK, persistimos y pedimos consentimientos
@@ -473,20 +490,15 @@ async def handle_text(msg: Dict[str, Any], st: Dict[str, Any], from_msisdn: str)
                 await send_text(from_msisdn, "Las fechas no son válidas. Asegúrate de que el inicio sea desde hoy y el fin posterior.")
                 return
             if not await is_item_available(item_id, start_iso, end_iso):
-                # Sugerir alternativas
-                try:
-                    requested_days = (_safe_date(end_iso) - _safe_date(start_iso)).days + 1  # type: ignore
-                    bookings = await get_future_bookings(item_id)
-                    sugs = suggest_windows(bookings, requested_days)
-                    msg = "Lo siento, ese rango está *ocupado* para este artículo."
-                    if sugs:
-                        msg += "\n\nFechas *sugeridas* libres:\n" + _fmt_suggestions(sugs)
-                        msg += "\n\nCopia una sugerencia y envíala con el formato: `DD/MM/AAAA a DD/MM/AAAA`."
-                    else:
-                        msg += "\n\nNo encontré huecos próximos del mismo tamaño. Prueba con menos días o desde otra fecha."
-                    await send_text(from_msisdn, msg)
-                except Exception:
+                # Colisión → informar fin y días restantes, mantener el paso para reintento
+                s_d = _safe_date(start_iso); e_d = _safe_date(end_iso)
+                bookings = await get_future_bookings(item_id, from_iso=start_iso)
+                if s_d and e_d and bookings:
+                    overlap_end = end_of_first_overlap(bookings, s_d, e_d)
+                    await send_text(from_msisdn, _format_collision_message(overlap_end))
+                else:
                     await send_text(from_msisdn, "Lo siento, ese rango está ocupado para este artículo.")
+                await set_session(from_msisdn, Step.RENTAL_WAIT_DATES, {"item_id": int(item_id)})
                 return
 
             await set_session(from_msisdn, Step.RENTAL_WAIT_PAYMENT, {"item_id": int(item_id), "start_iso": start_iso, "end_iso": end_iso})
@@ -638,20 +650,16 @@ async def handle_text(msg: Dict[str, Any], st: Dict[str, Any], from_msisdn: str)
             return
 
         if not await is_item_available(item_id, start_iso, end_iso):
-            # Sugerencias si no hay disponibilidad
-            try:
-                requested_days = (_safe_date(end_iso) - _safe_date(start_iso)).days + 1  # type: ignore
-                bookings = await get_future_bookings(item_id)
-                sugs = suggest_windows(bookings, requested_days)
-                msg = "Esas fechas ya están reservadas."
-                if sugs:
-                    msg += "\n\nFechas *sugeridas* libres:\n" + _fmt_suggestions(sugs)
-                    msg += "\n\nCopia una y vuelve a enviarla con el formato: `DD/MM/AAAA a DD/MM/AAAA`."
-                else:
-                    msg += "\n\nNo encontré huecos próximos del mismo tamaño. Prueba con menos días o desde otra fecha."
-                await send_text(from_msisdn, msg)
-            except Exception:
-                await send_text(from_msisdn, "Esas fechas ya están reservadas. Prueba con un rango distinto.")
+            # Colisión → informar fin y días restantes, mantener el paso para reintento
+            s_d = _safe_date(start_iso); e_d = _safe_date(end_iso)
+            bookings = await get_future_bookings(item_id, from_iso=start_iso)
+            if s_d and e_d and bookings:
+                overlap_end = end_of_first_overlap(bookings, s_d, e_d)
+                await send_text(from_msisdn, _format_collision_message(overlap_end))
+            else:
+                await send_text(from_msisdn, "Esas fechas ya están reservadas. Prueba un rango distinto.")
+            # seguimos esperando fechas
+            await set_session(from_msisdn, Step.RENTAL_WAIT_DATES, {"item_id": item_id})
             return
 
         await set_session(from_msisdn, Step.RENTAL_WAIT_PAYMENT, {"item_id": item_id, "start_iso": start_iso, "end_iso": end_iso})
@@ -704,7 +712,7 @@ async def handle_text(msg: Dict[str, Any], st: Dict[str, Any], from_msisdn: str)
             await send_text(from_msisdn, "No pude interpretar la fecha. Usa *DD/MM/AAAA*.")
             return
 
-        today = date.today()
+        today = _today_business()
         if new_end <= today:
             await send_text(from_msisdn, "La nueva fecha de fin debe ser *posterior a hoy*.")
             return
@@ -715,32 +723,16 @@ async def handle_text(msg: Dict[str, Any], st: Dict[str, Any], from_msisdn: str)
         # Disponibilidad del TRAMO EXTRA: (current_end + 1) .. new_end
         item_id = r["item_id"]
         try:
+            # get_future_bookings devuelve List[Tuple[date, date]]
             bookings = await get_future_bookings(str(item_id)) or []
-            filtered = []
-            for b in bookings:
-                # ignorar la renta actual
-                if str(b.get("rental_id")) == str(r["id"]):
-                    continue
-                filtered.append(b)
-
             extra_start = current_end + timedelta(days=1)
             extra_end = new_end
-
-            conflict = False
-            for b in filtered:
-                bs = _safe_date(b["start_date"])
-                be = _safe_date(b["end_date"])
-                if not (bs and be):
-                    continue
-                if _overlaps(extra_start, extra_end, bs, be):
-                    conflict = True
-                    break
-
+            conflict = any(_overlaps(extra_start, extra_end, bs, be) for (bs, be) in bookings)
             if conflict:
                 await send_text(from_msisdn, "No es posible extender: el tramo adicional *se solapa* con otra reserva.")
                 return
         except Exception:
-            # Si falla la comprobación, continuamos y dejamos la decisión al backend (que debe validar).
+            # Si falla la comprobación, continuamos y dejamos la decisión al backend (que valida).
             pass
 
         # Solicitud de extensión (requiere confirmación de la otra parte)
@@ -809,17 +801,15 @@ async def handle_text(msg: Dict[str, Any], st: Dict[str, Any], from_msisdn: str)
                     await send_text(from_msisdn, "Las fechas no son válidas. Inicio desde hoy y fin posterior.")
                     return
                 if not await is_item_available(item_id, start_iso, end_iso):
-                    try:
-                        requested_days = (_safe_date(end_iso) - _safe_date(start_iso)).days + 1  # type: ignore
-                        bookings = await get_future_bookings(item_id)
-                        sugs = suggest_windows(bookings, requested_days)
-                        msg = "Ese rango ya está reservado para este artículo."
-                        if sugs:
-                            msg += "\n\nFechas *sugeridas* libres:\n" + _fmt_suggestions(sugs)
-                            msg += "\n\nCopia una y vuelve a enviarla con el formato: `DD/MM/AAAA a DD/MM/AAAA`."
-                        await send_text(from_msisdn, msg)
-                    except Exception:
+                    # Colisión -> informar fin y días restantes y mantener paso
+                    s_d = _safe_date(start_iso); e_d = _safe_date(end_iso)
+                    bookings = await get_future_bookings(item_id, from_iso=start_iso)
+                    if s_d and e_d and bookings:
+                        overlap_end = end_of_first_overlap(bookings, s_d, e_d)
+                        await send_text(from_msisdn, _format_collision_message(overlap_end))
+                    else:
                         await send_text(from_msisdn, "Ese rango ya está reservado para este artículo.")
+                    await set_session(from_msisdn, Step.RENTAL_WAIT_DATES, {"item_id": int(item_id)})
                     return
                 await set_session(from_msisdn, Step.RENTAL_WAIT_PAYMENT, {"item_id": int(item_id), "start_iso": start_iso, "end_iso": end_iso})
                 payment_options = listing.get("payment_methods") or ["A convenir"]
