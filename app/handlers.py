@@ -408,11 +408,16 @@ async def handle_interactive(msg: Dict[str, Any], st: Dict[str, Any], from_msisd
                 return
 
             # Si todo OK, persistimos y pedimos consentimientos
+            # Si todo OK, persistimos y pedimos consentimientos
             draft["selected_payment_method"] = row_title
 
             seller, buyer = listing["owner_wa"], from_msisdn
-            await upsert_consent(item_id, buyer, seller)
-            consent_id = str(consent_row["id"])
+            cons_res = await upsert_consent(item_id, buyer, seller)
+
+            # soporta que upsert_consent devuelva {"row": {...}} o directamente {...}
+            row = cons_res.get("row", cons_res) if cons_res else {}
+            consent_id = str(row["id"])
+
             # guardamos consent_id en el draft (para fallback textual)
             new_draft = {**draft, "consent_id": consent_id}
             await set_session(from_msisdn, s, new_draft)
