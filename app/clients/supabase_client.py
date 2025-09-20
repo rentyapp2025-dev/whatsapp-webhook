@@ -393,64 +393,30 @@ async def get_listings_for_user(owner_wa: str) -> List[Dict[str, Any]]:
         return r.json()
 
 # =========================
-# Consents (NUEVO: por consent_id)
+# Consents (SIEMPRE NUEVOS)
 # =========================
 
 async def create_consent(item_id: str, buyer_msisdn: str, seller_msisdn: str) -> Dict[str, Any]:
     """
-    Crea SIEMPRE una nueva fila por solicitud.
-    - Valida tipos y no vacíos.
-    - Asegura existencia de users (buyer y seller) para evitar FK errors.
-    - NO envía columnas inexistentes en tu tabla.
+    Crea SIEMPRE una nueva fila para cada solicitud.
+    Importante: usamos los WA tal cual (sin normalizar) para respetar FK/formatos existentes.
     """
-    # Validaciones defensivas
-    if item_id is None or str(item_id).strip() == "":
-        raise ValueError("create_consent: item_id vacío")
-    try:
-        item_id_int = int(item_id)
-    except Exception:
-        raise ValueError(f"create_consent: item_id inválido: {item_id!r}")
-
-    buyer_raw = (buyer_msisdn or "").strip()
-    seller_raw = (seller_msisdn or "").strip()
-    if not buyer_raw or not seller_raw:
-        raise ValueError("create_consent: buyer_wa/seller_wa vacíos")
-    if buyer_raw == seller_raw:
-        raise ValueError("create_consent: buyer_wa y seller_wa no pueden ser iguales")
-
-    # Asegurar existencia en users (FK)
-    try:
-        await ensure_user(buyer_raw)
-    except Exception:
-        pass
-    try:
-        await ensure_user(seller_raw)
-    except Exception:
-        pass
-
     payload = {
-        "item_id": item_id_int,
-        "buyer_wa": buyer_raw,    # SIN normalizar, para coincidir con FK/formatos existentes
-        "seller_wa": seller_raw,
+        "item_id": int(item_id),
+        "buyer_wa": buyer_msisdn,
+        "seller_wa": seller_msisdn,
         "buyer_ok": False,
         "seller_ok": False,
         "introduced_at": None,
     }
-
     async with httpx.AsyncClient(timeout=20.0) as c:
         r = await c.post(f"{BASE}/consents", headers=HEADERS_RETURN, json=payload)
-        if r.status_code >= 400:
-            # Log explícito para entender el 400 en runtime
-            print("create_consent ERROR:", r.status_code, r.text, payload)
         r.raise_for_status()
         rows = r.json() or []
         return rows[0] if rows else {}
 
+# (Se deja este helper por si lo necesitas más adelante; no interfiere)
 async def _get_latest_consent_for_triplet(item_id: str, buyer_msisdn: str, seller_msisdn: str) -> Optional[Dict[str, Any]]:
-    """
-    Último consent para (item_id, buyer, seller) usando los valores EXACTOS
-    (sin normalizar) para que coincida con índices/FKs existentes.
-    """
     async with httpx.AsyncClient(timeout=20.0) as c:
         params = {
             "select": "*",
@@ -465,31 +431,21 @@ async def _get_latest_consent_for_triplet(item_id: str, buyer_msisdn: str, selle
         rows = r.json() or []
         return rows[0] if rows else None
 
-# -----------------------------------------------------------------
-# COMPAT: función antigua que usa item_id (con fallback de 409)
-# -----------------------------------------------------------------
+# Compat: algunos handlers llaman upsert_consent. Lo dejamos como wrapper.
 async def upsert_consent(item_id: str, buyer_msisdn: str, seller_msisdn: str):
     """
-    Crea un consent nuevo. Si hay 409 (índice único/FK), devuelve el último existente
-    para (item_id, buyer, seller) usando los valores EXACTOS.
-    Devuelve SIEMPRE {"row": {...}} o relanza el error si no hay fila.
+    Compatibilidad: devuelve {"row": {...}} creando SIEMPRE un consent nuevo.
+    (Asegúrate de haber eliminado el índice único para evitar 409.)
     """
-    try:
-        row = await create_consent(item_id, buyer_msisdn, seller_msisdn)
-        return {"row": row}
-    except httpx.HTTPStatusError as e:
-        if e.response is not None and e.response.status_code == 409:
-            existing = await _get_latest_consent_for_triplet(item_id, buyer_msisdn, seller_msisdn)
-            if existing:
-                return {"row": existing}
-        raise
+    row = await create_consent(item_id, buyer_msisdn, seller_msisdn)
+    return {"row": row}
 
 async def set_consent_flag_by_id(consent_id: str, msisdn: str, ok: bool) -> Optional[Dict[str, Any]]:
     """
-    Marca buyer_ok / seller_ok. Se permite match por igualdad exacta o
-    por versión normalizada para tolerar formatos distintos.
+    Marca buyer_ok / seller_ok. Coincide por igualdad exacta o por versión normalizada
+    solo para comparar (no para escribir).
     """
-    actor = msisdn  # exacto; usamos normalización solo para comparar
+    actor = msisdn
     actor_norm = _norm_phone(msisdn)
 
     async with httpx.AsyncClient(timeout=20.0) as client:
@@ -514,8 +470,7 @@ async def set_consent_flag_by_id(consent_id: str, msisdn: str, ok: bool) -> Opti
         elif actor == seller_raw or actor_norm == seller_norm:
             field = "seller_ok"
         else:
-            # no coincide: devolvemos lo que hay sin modificar
-            return row
+            return row  # no corresponde a ninguna de las partes
 
         upd = await client.patch(
             f"{BASE}/consents",
@@ -552,17 +507,11 @@ async def mark_introduced_once_by_consent(consent_id: str) -> bool:
         rows = upd.json() or []
         return len(rows) > 0
 
-
+# Compat antiguos (se conservan; no toco su lógica)
 async def get_consent(item_id_or_consent_id: str) -> Optional[Dict[str, Any]]:
-    """
-    COMPAT: si recibe un número que existe como consent.id -> devuelve por id;
-    si no, intenta devolver el último consent para ese item_id.
-    """
-    # Intentar por id exacto
     row = await get_consent_by_id(item_id_or_consent_id)
     if row:
         return row
-    # Fallback: último por item_id
     async with httpx.AsyncClient(timeout=20.0) as client:
         r = await client.get(
             f"{BASE}/consents",
@@ -579,15 +528,9 @@ async def get_consent(item_id_or_consent_id: str) -> Optional[Dict[str, Any]]:
         return rows[0] if rows else None
 
 async def set_consent_flag(item_id_or_consent_id: str, msisdn: str, ok: bool) -> Optional[Dict[str, Any]]:
-    """
-    DEPRECATED COMPAT: si existe un consent con ese id exacto -> usa por id.
-    Si no, toma el último consent del item_id dado y marca la bandera.
-    """
-    # por id
     row = await set_consent_flag_by_id(item_id_or_consent_id, msisdn, ok)
     if row:
         return row
-    # por último del item
     actor = _norm_phone(msisdn)
     async with httpx.AsyncClient(timeout=20.0) as client:
         g = await client.get(
@@ -623,15 +566,9 @@ async def set_consent_flag(item_id_or_consent_id: str, msisdn: str, ok: bool) ->
         return upd.json()[0]
 
 async def mark_introduced_once(item_id_or_consent_id: str) -> bool:
-    """
-    DEPRECATED COMPAT: si el id existe -> marca por id.
-    Si no, marca introduced_at del consent más reciente del item_id.
-    """
-    # por id
     ok_by_id = await mark_introduced_once_by_consent(item_id_or_consent_id)
     if ok_by_id:
         return True
-    # por último del item
     ts = _now_utc_iso()
     async with httpx.AsyncClient(timeout=20.0) as client:
         upd = await client.patch(
@@ -776,10 +713,8 @@ async def confirm_rental_start(rental_id: int, actor_wa: str, *, action_token: O
                 params={"id": f"eq.{rental_id}", "version": f"eq.{expected_version}"},
                 json={"status": STATUS_ACTIVE, "started_at": _now_utc_iso(), "version": expected_version + 1, "updated_at": _now_utc_iso()},
             )
-            # Si no devolvió fila, versión cambió (race); reintentar lectura
             rows = r_upd.json() if r_upd.content else []
             if not rows:
-                # estado cambió por carrera: leer y devolver
                 rental = await _load_rental_full(c, rental_id)
                 if (rental or {}).get("status") == STATUS_ACTIVE:
                     return {"status": "ACTIVATED", "parties": [rental["buyer_wa"], rental["seller_wa"]]}
@@ -1014,7 +949,6 @@ async def reject_rental_extension(rental_id: int, actor_wa: str, *, action_token
         )
         rows = r_upd.json() if r_upd.content else []
         if not rows:
-            # carrera
             latest = await _load_rental_full(c, rental_id)
             if (latest or {}).get("status") == STATUS_ACTIVE and (latest or {}).get("proposed_end_date") is None:
                 await _log_event(rental_id, "extension_rejected", actor_wa, {"race": True})
