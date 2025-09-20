@@ -1003,6 +1003,13 @@ async def add_review(rental_id: int, reviewer_wa: str, rating: int, comment: str
         if r_post.status_code == 409:
             return {"ok": False, "error": "ALREADY_REVIEWED"}
         r_post.raise_for_status()
+
+        # Recalcular reputación del usuario reseñado (si no usas trigger en DB)
+        try:
+            await recalc_reputation(reviewed_wa)
+        except Exception:
+            pass
+
         return {"ok": True, "data": r_post.json()}
 
 async def get_reviews_for_user(wa_id: str) -> List[Dict[str, Any]]:
@@ -1015,3 +1022,64 @@ async def get_reviews_for_user(wa_id: str) -> List[Dict[str, Any]]:
         r = await c.get(f"{BASE}/reviews", headers=HEADERS, params=params)
         r.raise_for_status()
         return r.json()
+
+# ============================================================
+# Fin de alquileres: búsqueda, marcado y reputación (NUEVO)
+# ============================================================
+async def get_rentals_ended_since(since_iso: str) -> List[Dict[str, Any]]:
+    """
+    Devuelve rentas con end_date <= since_iso y que aún no tienen ended_notified_at.
+    Incluye estados que razonablemente pueden llegar al final del periodo sin cerrarse.
+    """
+    allowed = [STATUS_ACTIVE, STATUS_PENDING, STATUS_APPROVED, STATUS_EXTENSION_PENDING]
+    async with httpx.AsyncClient(timeout=15.0) as c:
+        params = {
+            "select": "id,item_id,buyer_wa,seller_wa,end_date,status,ended_notified_at",
+            "end_date": f"lte.{since_iso[:10]}",
+            "ended_notified_at": "is.null",
+            "status": f"in.({','.join(allowed)})",
+            "order": "end_date.asc",
+        }
+        r = await c.get(f"{BASE}/rentals", headers=HEADERS, params=params)
+        r.raise_for_status()
+        return r.json() or []
+
+async def mark_rental_end_notified(rental_id: int, *, set_completed: bool = True) -> bool:
+    """
+    Marca una renta como notificada al finalizar su periodo.
+    Opcionalmente, cambia el estado a 'completed' para permitir reseñas.
+    """
+    payload = {"ended_notified_at": _now_utc_iso(), "updated_at": _now_utc_iso()}
+    if set_completed:
+        payload["status"] = STATUS_COMPLETED
+
+    async with httpx.AsyncClient(timeout=10.0) as c:
+        r = await c.patch(
+            f"{BASE}/rentals",
+            headers=HEADERS_RETURN,
+            params={"id": f"eq.{rental_id}"},
+            json=payload,
+        )
+        return bool(r.json())
+
+async def recalc_reputation(user_wa: str) -> float:
+    """
+    Recalcula reputation = avg(rating) para users. Si no hay reseñas, 0.0.
+    """
+    norm = _norm_phone(user_wa)
+    async with httpx.AsyncClient(timeout=15.0) as c:
+        r = await c.get(
+            f"{BASE}/reviews",
+            headers=HEADERS,
+            params={"select": "rating", "reviewed_wa": f"eq.{norm}"},
+        )
+        r.raise_for_status()
+        ratings = [row.get("rating") for row in (r.json() or []) if row.get("rating") is not None]
+        avg = round(sum(ratings) / len(ratings), 2) if ratings else 0.0
+        await c.patch(
+            f"{BASE}/users",
+            headers=HEADERS_RETURN,
+            params={"wa_id": f"eq.{norm}"},
+            json={"reputation": avg},
+        )
+        return avg

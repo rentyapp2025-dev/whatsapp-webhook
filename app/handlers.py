@@ -352,6 +352,71 @@ async def handle_interactive(msg: Dict[str, Any], st: Dict[str, Any], from_msisd
                 await send_text(from_msisdn, "No se pudo procesar el botón de extensión.")
             return
 
+        # ========= Fin de alquiler: reseña / reporte =========
+        # Enviados por tu job diario (o manual) el día de fin.
+        # Formatos:
+        #   end_review_owner_{rid}_{token}
+        #   end_review_buyer_{rid}_{token}
+        #   end_report_owner_{rid}_{token}
+        #   end_report_buyer_{rid}_{token}
+        if btn_id.startswith("end_review_owner_") or btn_id.startswith("end_review_buyer_"):
+            try:
+                parts = btn_id.split("_")
+                rid = int(parts[3])
+                r = await get_rental(rid)
+                if not r:
+                    await send_text(from_msisdn, "No encontré esa renta.")
+                    return
+                if from_msisdn not in (r["buyer_wa"], r["seller_wa"]):
+                    await send_text(from_msisdn, "No puedes reseñar una renta en la que no participaste.")
+                    return
+
+                # Definimos a quién se evalúa: si el botón es "owner", se evalúa al comprador; si es "buyer", al dueño.
+                reviewee = r["buyer_wa"] if btn_id.startswith("end_review_owner_") else r["seller_wa"]
+
+                # Guardamos bandera en draft sin cambiar Step para no romper otros flujos
+                await set_session(from_msisdn, s, {
+                    **(st.get("draft") or {}),
+                    "awaiting_review": {"rental_id": rid, "reviewee_wa": reviewee}
+                })
+
+                quien = "comprador" if reviewee == r["buyer_wa"] else "dueño"
+                await send_text(
+                    from_msisdn,
+                    f"Califica al *{quien}* con un número del *1 al 5* y, si quieres, agrega un comentario.\n"
+                    "Ejemplos:\n• 5 Excelente\n• 3 Bien\n• 1 Mal"
+                )
+            except Exception as e:
+                print(f"end_review_* error: {e}")
+                await send_text(from_msisdn, "No pudimos iniciar la reseña.")
+            return
+
+        if btn_id.startswith("end_report_owner_") or btn_id.startswith("end_report_buyer_"):
+            try:
+                parts = btn_id.split("_")
+                rid = int(parts[3])
+                r = await get_rental(rid)
+                if not r:
+                    await send_text(from_msisdn, "No encontré esa renta.")
+                    return
+                if from_msisdn not in (r["buyer_wa"], r["seller_wa"]):
+                    await send_text(from_msisdn, "No puedes reportar una renta en la que no participaste.")
+                    return
+
+                await set_session(from_msisdn, s, {
+                    **(st.get("draft") or {}),
+                    "awaiting_report": {"rental_id": rid}
+                })
+                await send_text(
+                    from_msisdn,
+                    "Cuéntanos brevemente el problema (p. ej. *no entregó el artículo*, *daños*, etc.)."
+                )
+            except Exception as e:
+                print(f"end_report_* error: {e}")
+                await send_text(from_msisdn, "No pudimos iniciar el reporte.")
+            return
+        # ========= Fin de alquiler: reseña / reporte (FIN) =========
+
         # Paginación de "Mis Alquileres"
         if btn_id.startswith("myrentals_page_"):
             try:
@@ -376,6 +441,15 @@ async def handle_interactive(msg: Dict[str, Any], st: Dict[str, Any], from_msisd
     if itype == "list_reply":
         row_id = interactive["list_reply"]["id"]
         row_title = interactive["list_reply"]["title"]
+
+        # 🚧 Guard-rail anti "tap viejo": si no estamos en RENTAL_WAIT_PAYMENT y no es del menú, ignoramos.
+        if s != Step.RENTAL_WAIT_PAYMENT and not str(row_id).startswith("menu_"):
+            await send_text(
+                from_msisdn,
+                "Esa lista ya venció. Para alquilar, escribe: *ALQUILAR #<id>* y luego envía las fechas."
+            )
+            await send_main_menu(from_msisdn)
+            return
 
         # Método de pago → crea consentimiento (con revalidación previa)
         if s == Step.RENTAL_WAIT_PAYMENT:
@@ -471,6 +545,54 @@ async def handle_text(msg: Dict[str, Any], st: Dict[str, Any], from_msisdn: str)
     if not text:
         return
     upper = text.upper()
+
+    # --- Flujo: respuesta a reseña pendiente (sin agregar nuevos Step) ---
+    draft = st.get("draft") or {}
+    if isinstance(draft, dict) and draft.get("awaiting_review"):
+        try:
+            m = re.search(r"\b([1-5])\b", text)
+            if not m:
+                await send_text(from_msisdn, "Envía un número del *1 al 5* seguido (opcional) de un comentario. Ej: 5 Muy responsable.")
+                return
+            rating = int(m.group(1))
+            comment = re.sub(r"^\s*\b[1-5]\b\s*", "", text).strip()
+
+            rid = int(draft["awaiting_review"]["rental_id"])
+            # reviewed_wa está disponible si luego quieres recalcular reputación
+            # reviewed_wa = draft["awaiting_review"]["reviewee_wa"]
+
+            result = await add_review(rid, from_msisdn, rating, comment)
+            if result.get("ok"):
+                await send_text(from_msisdn, "✅ ¡Gracias! Tu reseña fue registrada.")
+            else:
+                await send_text(from_msisdn, f"No se pudo guardar la reseña: {result.get('error','intenta más tarde')}")
+        except Exception as e:
+            print(f"awaiting_review error: {e}")
+            await send_text(from_msisdn, "Ocurrió un problema al registrar tu reseña.")
+        finally:
+            await set_session(from_msisdn, Step.IDLE, {})
+            await send_main_menu(from_msisdn)
+        return
+
+    # --- Flujo: respuesta a reporte pendiente ---
+    if isinstance(draft, dict) and draft.get("awaiting_report"):
+        try:
+            rid = int(draft["awaiting_report"]["rental_id"])
+            # Registro simple (aquí solo notificamos; si creas tabla 'incidents', llámala desde supabase_client)
+            r = await get_rental(rid)
+            other = r["buyer_wa"] if from_msisdn == r["seller_wa"] else r["seller_wa"]
+            await send_text(from_msisdn, "⚠️ Reporte recibido. Nuestro equipo lo revisará.")
+            try:
+                await send_text(other, f"El otro usuario abrió un reporte sobre la renta #{rid}:\n\"{text[:500]}\"")
+            except Exception:
+                pass
+        except Exception as e:
+            print(f"awaiting_report error: {e}")
+            await send_text(from_msisdn, "No pudimos registrar tu reporte en este momento.")
+        finally:
+            await set_session(from_msisdn, Step.IDLE, {})
+            await send_main_menu(from_msisdn)
+        return
 
     if upper in {"MENU", "MENÚ", "INICIO", "AYUDA"}:
         await set_session(from_msisdn, Step.IDLE, {})
