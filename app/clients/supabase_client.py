@@ -408,8 +408,6 @@ async def create_consent(item_id: str, buyer_msisdn: str, seller_msisdn: str) ->
         "buyer_ok": False,
         "seller_ok": False,
         "introduced_at": None,
-        "created_at": _now_utc_iso(),
-        "updated_at": _now_utc_iso(),
     }
     async with httpx.AsyncClient(timeout=20.0) as c:
         r = await c.post(f"{BASE}/consents", headers=HEADERS_RETURN, json=payload)
@@ -454,7 +452,7 @@ async def set_consent_flag_by_id(consent_id: str, msisdn: str, ok: bool) -> Opti
         g = await client.get(
             f"{BASE}/consents",
             headers=HEADERS,
-            params={"select": "id,buyer_wa,seller_wa,buyer_ok,seller_ok,updated_at", "id": f"eq.{consent_id}", "limit": 1},
+            params={"select": "id,buyer_wa,seller_wa,buyer_ok,seller_ok,introduced_at", "id": f"eq.{consent_id}", "limit": 1},
         )
         g.raise_for_status()
         rows = g.json()
@@ -472,13 +470,13 @@ async def set_consent_flag_by_id(consent_id: str, msisdn: str, ok: bool) -> Opti
         elif actor == seller_raw or actor_norm == seller_norm:
             field = "seller_ok"
         else:
-            return row
+            return row  # no corresponde a ninguna de las partes
 
         upd = await client.patch(
             f"{BASE}/consents",
             headers=HEADERS_RETURN,
             params={"id": f"eq.{row['id']}", "select": "*"},
-            json={field: bool(ok), "updated_at": _now_utc_iso()},
+            json={field: bool(ok)},
         )
         upd.raise_for_status()
         res = upd.json() or []
