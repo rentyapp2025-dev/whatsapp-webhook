@@ -396,186 +396,47 @@ async def get_listings_for_user(owner_wa: str) -> List[Dict[str, Any]]:
 # Consents (NUEVO: por consent_id)
 # =========================
 
-# ---------- CONSENTS: helpers ----------
-async def _get_latest_open_consent(item_id: str | int, buyer_msisdn: str, seller_msisdn: str) -> Optional[Dict[str, Any]]:
-    buyer_n = _norm_phone(buyer_msisdn)
-    seller_n = _norm_phone(seller_msisdn)
-    async with httpx.AsyncClient(timeout=15.0) as c:
-        params = {
-            "select": "*",
-            "item_id": f"eq.{int(item_id)}",
-            "buyer_wa": f"eq.{buyer_n}",
-            "seller_wa": f"eq.{seller_n}",
-            "closed_at": "is.null",
-            "order": "id.desc",
-            "limit": 1,
-        }
-        r = await c.get(f"{BASE}/consents", headers=HEADERS, params=params)
-        r.raise_for_status()
-        rows = r.json()
-        return rows[0] if rows else None
-
-
-# ---------- CONSENTS: create (siempre intenta fila nueva) ----------
-async def create_consent(item_id: str | int, buyer_msisdn: str, seller_msisdn: str) -> Dict[str, Any]:
+async def create_consent(item_id: str, buyer_msisdn: str, seller_msisdn: str) -> Dict[str, Any]:
     """
-    Crea SIEMPRE un consent nuevo. Si la BD devuelve 409 por algún índice inesperado,
-    devuelve el último consent abierto para ese (item, buyer, seller) como fallback.
-    Si devuelve 400 por formato, reintenta con payload mínimo.
-    """
-    buyer_n = _norm_phone(buyer_msisdn)
-    seller_n = _norm_phone(seller_msisdn)
-
-    payloads = [
-        # completo (si tus columnas tienen NOT NULL/DEFAULTs esto va bien)
-        {
-            "item_id": int(item_id),
-            "buyer_wa": buyer_n,
-            "seller_wa": seller_n,
-            "buyer_ok": False,
-            "seller_ok": False,
-            "updated_at": _now_utc_iso(),
-            # no mandamos introduced_at ni closed_at (quedan NULL)
-        },
-        # minimal si hubiera algún 400 raro
-        {
-            "item_id": int(item_id),
-            "buyer_wa": buyer_n,
-            "seller_wa": seller_n,
-            "buyer_ok": False,
-            "seller_ok": False,
-        },
-        {
-            "item_id": int(item_id),
-            "buyer_wa": buyer_n,
-            "seller_wa": seller_n,
-        },
-    ]
-
-    async with httpx.AsyncClient(timeout=20.0) as c:
-        last_err_txt = ""
-        for p in payloads:
-            r = await c.post(f"{BASE}/consents", headers=HEADERS_RETURN, json=p)
-            if r.status_code in (200, 201):
-                rows = r.json()
-                if rows:
-                    return rows[0]
-            elif r.status_code == 409:
-                # Hay algún índice único que no vemos -> devolvemos el abierto más reciente
-                existed = await _get_latest_open_consent(item_id, buyer_msisdn, seller_msisdn)
-                if existed:
-                    return existed
-                # si no hay abierto, relanzamos el error para enterarnos
-                r.raise_for_status()
-            else:
-                # guardamos el posible mensaje de PostgREST y probamos con el siguiente payload
-                try:
-                    last_err_txt = r.text
-                except Exception:
-                    last_err_txt = ""
-                continue
-
-        # si llegamos aquí, no funcionó ningún payload
-        raise httpx.HTTPStatusError(
-            message=f"POST /consents failed (payloads exhausted). Last response: {last_err_txt or 'no body'}",
-            request=None,
-            response=r,  # r es el último intento
-        )
-
-
-# ---------- CONSENTS: get by id ----------
-async def get_consent_by_id(consent_id: str) -> Optional[Dict[str, Any]]:
-    async with httpx.AsyncClient(timeout=20.0) as client:
-        r = await client.get(
-            f"{BASE}/consents",
-            headers=HEADERS,
-            params={"select": "*", "id": f"eq.{consent_id}", "limit": 1},
-        )
-        r.raise_for_status()
-        rows = r.json()
-        return rows[0] if rows else None
-
-
-# ---------- CONSENTS: marcar flags por id ----------
-async def set_consent_flag_by_id(consent_id: str, msisdn: str, ok: bool) -> Optional[Dict[str, Any]]:
-    actor = _norm_phone(msisdn)
-    async with httpx.AsyncClient(timeout=20.0) as client:
-        g = await client.get(
-            f"{BASE}/consents",
-            headers=HEADERS,
-            params={"select": "id,buyer_wa,seller_wa,buyer_ok,seller_ok", "id": f"eq.{consent_id}", "limit": 1},
-        )
-        g.raise_for_status()
-        rows = g.json()
-        if not rows:
-            return None
-
-        row = rows[0]
-        buyer_n = _norm_phone(row.get("buyer_wa"))
-        seller_n = _norm_phone(row.get("seller_wa"))
-
-        if actor == buyer_n:
-            field = "buyer_ok"
-        elif actor == seller_n:
-            field = "seller_ok"
-        else:
-            # no autorizado, devolvemos lo que hay sin tocar
-            return row
-
-        upd = await client.patch(
-            f"{BASE}/consents",
-            headers=HEADERS_RETURN,
-            params={"id": f"eq.{row['id']}", "select": "*"},
-            json={field: bool(ok), "updated_at": _now_utc_iso()},
-        )
-        upd.raise_for_status()
-        return upd.json()[0]
-
-
-# ---------- CONSENTS: marcar introduced_at una sola vez ----------
-async def mark_introduced_once_by_consent(consent_id: str) -> bool:
-    ts = _now_utc_iso()
-    async with httpx.AsyncClient(timeout=20.0) as client:
-        upd = await client.patch(
-            f"{BASE}/consents",
-            headers=HEADERS_RETURN,
-            params={"id": f"eq.{consent_id}", "introduced_at": "is.null", "select": "id,introduced_at"},
-            json={"introduced_at": ts, "updated_at": ts},
-        )
-        upd.raise_for_status()
-        rows = upd.json() or []
-        return len(rows) > 0
-
-
-# ---------- COMPAT: upsert_consent (no upsert; crea o devuelve abierto) ----------
-async def upsert_consent(item_id: str | int, buyer_msisdn: str, seller_msisdn: str) -> Dict[str, Any]:
-    """
-    Compat: antes era upsert por item. Ahora:
-      - intenta crear un consent NUEVO;
-      - si hay 409 (índice inesperado), devuelve el último abierto para ese triple.
-      - retorna SIEMPRE la fila (dict) con 'id' incluido.
+    Crea SIEMPRE una nueva fila. Importante:
+      - Limpia y valida item_id.
+      - NO envía created_at (tu tabla no lo tiene).
+      - buyer_wa / seller_wa se usan EXACTOS (sin normalizar).
     """
     try:
-        row = await create_consent(item_id, buyer_msisdn, seller_msisdn)
-        return row
-    except httpx.HTTPStatusError as e:
-        # como cinturón y tirantes, si algo raro pasó, intenta devolver el abierto
-        existed = await _get_latest_open_consent(item_id, buyer_msisdn, seller_msisdn)
-        if existed:
-            return existed
-        raise
+        item_id_clean = int(str(item_id).strip())
+    except Exception:
+        raise ValueError(f"item_id inválido para consent: {item_id!r}")
+
+    payload = {
+        "item_id": item_id_clean,
+        "buyer_wa": buyer_msisdn,
+        "seller_wa": seller_msisdn,
+        "buyer_ok": False,
+        "seller_ok": False,
+        "introduced_at": None,
+        "updated_at": _now_utc_iso(),
+    }
+    async with httpx.AsyncClient(timeout=20.0) as c:
+        r = await c.post(f"{BASE}/consents", headers=HEADERS_RETURN, json=payload)
+        if r.status_code >= 400:
+            # Log explícito para depurar con el payload que causó el error
+            print("create_consent ERROR:", r.status_code, r.text, payload)
+        r.raise_for_status()
+        rows = r.json() or []
+        return rows[0] if rows else {}
 
 async def _get_latest_consent_for_triplet(item_id: str, buyer_msisdn: str, seller_msisdn: str) -> Optional[Dict[str, Any]]:
     """
-    Último consent para (item_id, buyer, seller) usando los valores EXACTOS
-    (sin normalizar) para que coincida con índices/FKs existentes.
+    Último consent para (item_id, buyer, seller) usando los valores EXACTOS.
     """
+    item_id_clean = int(str(item_id).strip())
     async with httpx.AsyncClient(timeout=20.0) as c:
         params = {
             "select": "*",
-            "item_id": f"eq.{int(item_id)}",
-            "buyer_wa": f"eq.{buyer_msisdn}",    # <- SIN _norm_phone
-            "seller_wa": f"eq.{seller_msisdn}",  # <- SIN _norm_phone
+            "item_id": f"eq.{item_id_clean}",
+            "buyer_wa": f"eq.{buyer_msisdn}",
+            "seller_wa": f"eq.{seller_msisdn}",
             "order": "id.desc",
             "limit": 1,
         }
@@ -587,6 +448,88 @@ async def _get_latest_consent_for_triplet(item_id: str, buyer_msisdn: str, selle
 # -----------------------------------------------------------------
 # COMPAT: función antigua que usa item_id (con fallback de 409)
 # -----------------------------------------------------------------
+async def upsert_consent(item_id: str, buyer_msisdn: str, seller_msisdn: str):
+    """
+    Crea un consent nuevo. Si (en algún caso futuro) hay 409, devuelve el último existente
+    para (item_id, buyer, seller) con igualdad EXACTA.
+    Devuelve SIEMPRE {"row": {...}} para ser compatible con handlers.
+    """
+    try:
+        row = await create_consent(item_id, buyer_msisdn, seller_msisdn)
+        return {"row": row}
+    except httpx.HTTPStatusError as e:
+        if e.response is not None and e.response.status_code == 409:
+            existing = await _get_latest_consent_for_triplet(item_id, buyer_msisdn, seller_msisdn)
+            if existing:
+                return {"row": existing}
+        raise
+
+async def set_consent_flag_by_id(consent_id: str, msisdn: str, ok: bool) -> Optional[Dict[str, Any]]:
+    """
+    Marca buyer_ok / seller_ok. Coincide por igualdad exacta o por número normalizado.
+    """
+    actor = msisdn
+    actor_norm = _norm_phone(msisdn)
+
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        g = await client.get(
+            f"{BASE}/consents",
+            headers=HEADERS,
+            params={"select": "id,buyer_wa,seller_wa,buyer_ok,seller_ok,updated_at", "id": f"eq.{consent_id}", "limit": 1},
+        )
+        g.raise_for_status()
+        rows = g.json()
+        if not rows:
+            return None
+
+        row = rows[0]
+        buyer_raw = row.get("buyer_wa") or ""
+        seller_raw = row.get("seller_wa") or ""
+        buyer_norm = _norm_phone(buyer_raw)
+        seller_norm = _norm_phone(seller_raw)
+
+        if actor == buyer_raw or actor_norm == buyer_norm:
+            field = "buyer_ok"
+        elif actor == seller_raw or actor_norm == seller_norm:
+            field = "seller_ok"
+        else:
+            return row
+
+        upd = await client.patch(
+            f"{BASE}/consents",
+            headers=HEADERS_RETURN,
+            params={"id": f"eq.{row['id']}", "select": "*"},
+            json={field: bool(ok), "updated_at": _now_utc_iso()},
+        )
+        upd.raise_for_status()
+        res = upd.json() or []
+        return res[0] if res else None
+
+async def get_consent_by_id(consent_id: str) -> Optional[Dict[str, Any]]:
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        r = await client.get(
+            f"{BASE}/consents",
+            headers=HEADERS,
+            params={"select": "*", "id": f"eq.{consent_id}", "limit": 1},
+        )
+        r.raise_for_status()
+        rows = r.json()
+        return rows[0] if rows else None
+
+async def mark_introduced_once_by_consent(consent_id: str) -> bool:
+    """Marca introduced_at solo si estaba NULL para este consent_id (presentación 1 vez)."""
+    ts = _now_utc_iso()
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        upd = await client.patch(
+            f"{BASE}/consents",
+            headers=HEADERS_RETURN,
+            params={"id": f"eq.{consent_id}", "introduced_at": "is.null", "select": "id,introduced_at"},
+            json={"introduced_at": ts},
+        )
+        upd.raise_for_status()
+        rows = upd.json() or []
+        return len(rows) > 0
+
 
 async def get_consent(item_id_or_consent_id: str) -> Optional[Dict[str, Any]]:
     """
