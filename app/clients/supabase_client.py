@@ -396,7 +396,7 @@ async def get_listings_for_user(owner_wa: str) -> List[Dict[str, Any]]:
 # Consents (NUEVO: por consent_id)
 # =========================
 async def create_consent(item_id: str, buyer_msisdn: str, seller_msisdn: str) -> Dict[str, Any]:
-    """Crea siempre una nueva solicitud de consentimiento (una fila por solicitud)."""
+    """Intenta crear SIEMPRE una nueva fila (si tu índice único lo permite)."""
     buyer_n = _norm_phone(buyer_msisdn)
     seller_n = _norm_phone(seller_msisdn)
     payload = {
@@ -411,9 +411,8 @@ async def create_consent(item_id: str, buyer_msisdn: str, seller_msisdn: str) ->
     }
     async with httpx.AsyncClient(timeout=20.0) as c:
         r = await c.post(f"{BASE}/consents", headers=HEADERS_RETURN, json=payload)
-        r.raise_for_status()  # Aquí puede saltar 409 si hay índice único
-        rows = r.json()
-        return rows[0]
+        r.raise_for_status()  # si hay índice único, aquí puede lanzar 409
+        return r.json()[0]
 
 async def get_consent_by_id(consent_id: str) -> Optional[Dict[str, Any]]:
     async with httpx.AsyncClient(timeout=20.0) as client:
@@ -494,19 +493,17 @@ async def mark_introduced_once_by_consent(consent_id: str) -> bool:
 # -----------------------------------------------------------------
 async def upsert_consent(item_id: str, buyer_msisdn: str, seller_msisdn: str):
     """
-    COMPAT: intenta crear. Si existe (409 por índice único), devuelve la fila vigente.
-    Así evitamos romper el flujo sin tocar el esquema actual.
+    Intenta crear. Si Supabase responde 409 (índice único activo),
+    devuelve la fila vigente para (item_id, buyer, seller).
     """
     try:
         row = await create_consent(item_id, buyer_msisdn, seller_msisdn)
-        return row  # Handlers aceptan dict directo o dict["row"]
+        return row  # tus handlers aceptan dict o dict["row"]
     except httpx.HTTPStatusError as e:
-        # Si el esquema tiene unique y ya hay consent -> 409
         if e.response is not None and e.response.status_code == 409:
             existing = await _get_latest_consent_for_triplet(item_id, buyer_msisdn, seller_msisdn)
             if existing:
                 return existing
-        # Cualquier otro error se propaga para que quede logueado/visible
         raise
 
 async def get_consent(item_id_or_consent_id: str) -> Optional[Dict[str, Any]]:

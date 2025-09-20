@@ -13,8 +13,8 @@ from .clients.supabase_client import (
     ensure_user, get_user_name,
     set_session, get_session,
     insert_listing, get_listing,
-    # ---- Consents (nuevo, por consent_id) ----
-    consent_row, upsert_consent, get_consent_by_id, set_consent_flag_by_id, mark_introduced_once_by_consent,
+    # ---- Consents (por consent_id) ----
+    upsert_consent, get_consent_by_id, set_consent_flag_by_id, mark_introduced_once_by_consent,
     # ---- Rentals & demás ----
     create_rental_request,
     get_active_rentals_for_item, update_listing_status,
