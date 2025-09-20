@@ -115,7 +115,7 @@ async def _send_rental_management_menu(target_wa: str, rental: Dict[str, Any]):
     """
     Muestra botones de acción según estado de la renta.
     - pending  -> Confirmar / Cancelar
-    - active   -> Extender / Cancelar
+    - active   -> Extender (solo inquilino) / Cancelar
     - finished/cancelled/others -> solo info
     Incluye token anti-tap y, si existe en el objeto, el versioning esperado.
     """
@@ -127,6 +127,9 @@ async def _send_rental_management_menu(target_wa: str, rental: Dict[str, Any]):
     expected_version = rental.get("version")  # si lo expones desde backend
     ver_suffix = f"_{expected_version}" if expected_version is not None else ""
 
+    is_owner = rental.get("seller_wa") == target_wa
+    is_renter = rental.get("buyer_wa") == target_wa
+
     if status == "pending":
         buttons = [
             {"id": f"rental_confirm_{rid}_{token}{ver_suffix}", "title": "✅ Confirmar inicio"},
@@ -135,10 +138,12 @@ async def _send_rental_management_menu(target_wa: str, rental: Dict[str, Any]):
         await send_reply_buttons(target_wa, "Gestión de Renta", body + "\n\n¿Qué deseas hacer?", buttons)
 
     elif status == "active":
-        buttons = [
-            {"id": f"rental_extend_{rid}_{token}{ver_suffix}", "title": "🔄 Extender"},
-            {"id": f"rental_cancel_{rid}_{token}{ver_suffix}", "title": "❌ Cancelar"},
-        ]
+        buttons = []
+        # Extender: solo el inquilino
+        if is_renter:
+            buttons.append({"id": f"rental_extend_{rid}_{token}{ver_suffix}", "title": "🔄 Extender"})
+        # Cancelar: ambos
+        buttons.append({"id": f"rental_cancel_{rid}_{token}{ver_suffix}", "title": "❌ Cancelar"})
         await send_reply_buttons(target_wa, "Gestión de Renta", body + "\n\n¿Qué deseas hacer?", buttons)
 
     else:
@@ -676,8 +681,7 @@ async def handle_text(msg: Dict[str, Any], st: Dict[str, Any], from_msisdn: str)
         if not r:
             await send_text(from_msisdn, f"No encontré la renta #{rid}.")
             return
-        await send_text(from_msisdn, _card_for_rental(r, from_msisdn))
-        # Menú de acciones según estado
+        # Solo mostramos el menú (sin tarjeta duplicada)
         await _send_rental_management_menu(from_msisdn, r)
         return
 
@@ -730,7 +734,7 @@ async def handle_text(msg: Dict[str, Any], st: Dict[str, Any], from_msisdn: str)
         if not r:
             await send_text(from_msisdn, f"No encontré la renta #{rid}.")
             return
-        await send_text(from_msisdn, _card_for_rental(r, from_msisdn))
+        # Solo menú (sin tarjeta duplicada)
         await _send_rental_management_menu(from_msisdn, r)
         return
 
@@ -933,7 +937,7 @@ async def handle_text(msg: Dict[str, Any], st: Dict[str, Any], from_msisdn: str)
             await send_text(from_msisdn, f"No encontré la renta #{rid}.")
             await send_main_menu(from_msisdn)
             return
-        await send_text(from_msisdn, _card_for_rental(r, from_msisdn))
+        # Solo menú (sin tarjeta duplicada)
         await _send_rental_management_menu(from_msisdn, r)
         return
 
