@@ -14,7 +14,7 @@ from .clients.supabase_client import (
     set_session, get_session,
     insert_listing, get_listing,
     # ---- Consents (nuevo, por consent_id) ----
-    create_consent, get_consent_by_id, set_consent_flag_by_id, mark_introduced_once_by_consent,
+    upsert_consent, get_consent_by_id, set_consent_flag_by_id, mark_introduced_once_by_consent,
     # ---- Rentals & demás ----
     create_rental_request,
     get_active_rentals_for_item, update_listing_status,
@@ -411,8 +411,11 @@ async def handle_interactive(msg: Dict[str, Any], st: Dict[str, Any], from_msisd
             draft["selected_payment_method"] = row_title
 
             seller, buyer = listing["owner_wa"], from_msisdn
-            consent_row = await create_consent(item_id, buyer, seller)
-            consent_id = str(consent_row["id"])
+            cons_res = await upsert_consent(item_id, buyer, seller)
+            row = (cons_res or {})
+            row = row.get("row", row)
+            consent_id = str(row["id"])
+
             # guardamos consent_id en el draft (para fallback textual)
             new_draft = {**draft, "consent_id": consent_id}
             await set_session(from_msisdn, s, new_draft)
