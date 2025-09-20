@@ -408,7 +408,6 @@ async def handle_interactive(msg: Dict[str, Any], st: Dict[str, Any], from_msisd
                 return
 
             # Si todo OK, persistimos y pedimos consentimientos
-            # Si todo OK, persistimos y pedimos consentimientos
             draft["selected_payment_method"] = row_title
 
             seller, buyer = listing["owner_wa"], from_msisdn
