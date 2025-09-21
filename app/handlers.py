@@ -342,8 +342,17 @@ async def handle_interactive(msg: Dict[str, Any], st: Dict[str, Any], from_msisd
         # Formato: rental_ext_accept_{rentalId}_{YYYY-MM-DD}
         if btn_id.startswith("rental_ext_accept_"):
             try:
-                _, _, rid, end_iso = btn_id.split("_", 3)
-                rid_int = int(rid)
+                parts = btn_id.split("_")
+                # parts -> ['rental','ext','accept','<rid>','<YYYY-MM-DD>']
+                if len(parts) >= 5:
+                    rid_int = int(parts[3])
+                    end_iso = parts[4]
+                else:
+                    # Fallback defensivo si cambian el formato
+                    remainder = btn_id[len("rental_ext_accept_"):]
+                    rid_str, end_iso = remainder.split("_", 1)
+                    rid_int = int(rid_str)
+
                 res = await request_rental_extension(rid_int, from_msisdn, end_iso)
                 if res.get("status") == "EXTENDED":
                     for wa in res.get("parties", []):
@@ -353,7 +362,8 @@ async def handle_interactive(msg: Dict[str, Any], st: Dict[str, Any], from_msisd
                 else:
                     reason = res.get("reason") or "Verifica que la renta esté activa y la fecha sea válida."
                     await send_text(from_msisdn, f"No se pudo confirmar la extensión. {reason}")
-            except Exception:
+            except Exception as e:
+                print(f"Error al procesar rental_ext_accept: {e}")
                 await send_text(from_msisdn, "No se pudo procesar el botón de extensión.")
             return
 
