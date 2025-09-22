@@ -959,6 +959,7 @@ async def handle_text(msg: Dict[str, Any], st: Dict[str, Any], from_msisdn: str)
         return
 
     # ===== Edición de publicación (entrada del nuevo valor) =====
+    # ===== Edición de publicación (entrada del nuevo valor) =====
     if s == Step.LISTING_EDIT_WAIT:
         try:
             draft = st.get("draft") or {}
@@ -968,25 +969,38 @@ async def handle_text(msg: Dict[str, Any], st: Dict[str, Any], from_msisdn: str)
             if field == "pay":
                 pmts = [p.strip() for p in re.split(r"[,;]+", text) if p.strip()]
                 pmts = list(dict.fromkeys(pmts))[:10]
-                ok = await update_listing_fields(item_id, from_msisdn, payment_methods=pmts)
+                res = await update_listing_fields(item_id, from_msisdn, payment_methods=pmts)
             elif field == "title":
-                ok = await update_listing_fields(item_id, from_msisdn, title=text.strip())
+                res = await update_listing_fields(item_id, from_msisdn, title=text.strip())
             elif field == "price":
-                ok = await update_listing_fields(item_id, from_msisdn, price=text.strip())
+                res = await update_listing_fields(item_id, from_msisdn, price=text.strip())
             elif field == "desc":
-                ok = await update_listing_fields(item_id, from_msisdn, description=text.strip())
+                res = await update_listing_fields(item_id, from_msisdn, description=text.strip())
             elif field == "zone":
-                ok = await update_listing_fields(item_id, from_msisdn, zone=text.strip())
+                res = await update_listing_fields(item_id, from_msisdn, zone=text.strip())
             else:
-                ok = False
+                res = {"ok": False}
 
-            if ok:
+            if res.get("ok"):
                 await send_text(from_msisdn, f"✅ Publicación #{item_id} actualizada.")
                 lst = await get_listing(str(item_id))
                 if lst:
                     await _send_listing_management_menu(from_msisdn, lst)
             else:
-                await send_text(from_msisdn, "No se pudo actualizar. Verifica que seas el dueño.")
+                if res.get("error") == "IN_USE":
+                    until_iso = res.get("until")
+                    try:
+                        until_human = _to_ve(until_iso) if until_iso else None
+                    except Exception:
+                        until_human = until_iso
+                    dias = "día" if (res.get('days_left') or 0) == 1 else "días"
+                    await send_text(
+                        from_msisdn,
+                        f"Este artículo está alquilado hasta *{until_human}* "
+                        f"(faltan *{res.get('days_left')} {dias}*). No se puede editar mientras esté alquilado."
+                    )
+                else:
+                    await send_text(from_msisdn, "No se pudo actualizar. Verifica que seas el dueño.")
         except Exception as e:
             print(f"LISTING_EDIT_WAIT error: {e}")
             await send_text(from_msisdn, "Ocurrió un error al actualizar la publicación.")

@@ -385,7 +385,7 @@ async def get_listings_for_user(owner_wa: str) -> List[Dict[str, Any]]:
     async with httpx.AsyncClient(timeout=10.0) as c:
         params = {
             "owner_wa": f"eq.{owner_wa}",
-            "select": "id,title,status,price,zone,payment_methods,created_at",
+            "select": "id,title,status,price",
             "order": "created_at.desc",
         }
         r = await c.get(f"{BASE}/listings", headers=HEADERS, params=params)
@@ -926,7 +926,7 @@ async def request_rental_extension(
       - Sin solapes en (end_actual+1 .. new_end).
       - Usa version para concurrencia.
     """
-    if not await _idempotent_check_and_register(action_token):
+    if not await _idempotentent_check_and_register(action_token):
         return {"status": "IDEMPOTENT_OK"}
 
     try:
