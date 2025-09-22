@@ -29,7 +29,7 @@ from .clients.supabase_client import (
     get_rental,
     _today_business,
     end_of_first_overlap,
-    # >>> añadido: consent con guardas de disponibilidad
+    # >>> añadido previamente: consent con guardas de disponibilidad
     create_consent_guarded,
 )
 
@@ -503,7 +503,7 @@ async def handle_interactive(msg: Dict[str, Any], st: Dict[str, Any], from_msisd
 
             seller, buyer = listing["owner_wa"], from_msisdn
 
-            # >>> cambio: crear consent con guardas de disponibilidad (evita solicitudes si está ocupado)
+            # >>> uso de consent con guardas (evita solicitudes si está ocupado)
             cons_res = await create_consent_guarded(item_id, buyer, seller, start_iso, end_iso)
             if not cons_res or not cons_res.get("ok"):
                 if cons_res and cons_res.get("error") == "ITEM_BUSY":
@@ -705,6 +705,34 @@ async def handle_text(msg: Dict[str, Any], st: Dict[str, Any], from_msisdn: str)
             rows = [{"id": p.replace(" ", "_"), "title": p} for p in payment_options]
             await send_list(from_msisdn, f"Alquiler de #{item_id}", "Selecciona tu método de pago:", "Ver Pagos", rows)
         else:
+            # >>> NUEVO: comprobar si el artículo está ocupado HOY antes de pedir fechas
+            try:
+                bookings = await get_future_bookings(item_id)  # desde hoy en adelante
+            except Exception:
+                bookings = []
+            today = _today_business()
+            busy_end = None
+            for bs, be in (bookings or []):
+                if bs <= today <= be:
+                    busy_end = be
+                    break
+            if busy_end:
+                fin = busy_end.strftime("%d/%m/%Y")
+                left = (busy_end - today).days + 1
+                if left < 1:
+                    left = 1
+                dias = "día" if left == 1 else "días"
+                await send_text(
+                    from_msisdn,
+                    f"Este artículo está *alquilado ahora mismo* y queda ocupado hasta el *{fin}* "
+                    f"(faltan *{left} {dias}*).\n\n"
+                    "Si quieres reservar para después, envía un rango que *no* se solape, por ejemplo: *DD/MM/AAAA a DD/MM/AAAA*."
+                )
+                # Dejamos al usuario en espera de fechas para que proponga un rango posterior
+                await set_session(from_msisdn, Step.RENTAL_WAIT_DATES, {"item_id": int(item_id)})
+                return
+
+            # Si está libre hoy, pedimos fechas como antes
             await set_session(from_msisdn, Step.RENTAL_WAIT_DATES, {"item_id": int(item_id)})
             await send_text(from_msisdn, f"Perfecto. Ahora, indica las *fechas* que necesitas para el artículo #{item_id} (formato: DD/MM/AAAA a DD/MM/AAAA).")
         return
