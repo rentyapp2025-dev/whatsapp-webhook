@@ -31,12 +31,15 @@ from .clients.supabase_client import (
     end_of_first_overlap,
     # >>> añadido previamente: consent con guardas de disponibilidad
     create_consent_guarded,
+    # >>> NUEVO: actualizar campos de listing
+    update_listing_fields,
 )
 
 # ======================
 # Config UX / Paginación
 # ======================
 MYRENTALS_PAGE_SIZE = 10  # cantidad por página
+MYLISTINGS_PAGE_SIZE = 10  # cantidad por página
 BUSINESS_TZ = "America/Caracas"  # referencia comunicacional (guardas UTC en DB)
 
 # =================
@@ -91,11 +94,26 @@ def _card_for_rental(r: Dict[str, Any], you_msisdn: str) -> str:
         f"   - Fechas: {start} a {end}",
         f"   - Estado: *{r['status']}*",
     ]
-    # Si tu backend adjunta información adicional (precio, política, versión) la mostramos
     if r.get("price_per_day"):
         lines.append(f"   - Tarifa: {r['price_per_day']} por día")
     if r.get("policy"):
         lines.append(f"   - Política: {r['policy']}")
+    return "\n".join(lines)
+
+
+def _card_for_listing(lst: Dict[str, Any]) -> str:
+    pm = lst.get("payment_methods") or []
+    pm_txt = ", ".join(pm) if pm else "A convenir"
+    lines = [
+        f"📦 *Publicación #{lst['id']}*",
+        f"   - Título: {lst.get('title')}",
+        f"   - Precio: {lst.get('price')}",
+        f"   - Zona: {lst.get('zone')}",
+        f"   - Estado: {lst.get('status','unknown')}",
+        f"   - Pagos: {pm_txt}",
+    ]
+    if lst.get("description"):
+        lines.append(f"   - Descripción: {lst['description'][:180]}{'…' if len(lst['description'])>180 else ''}")
     return "\n".join(lines)
 
 
@@ -115,21 +133,16 @@ def _format_collision_message(overlap_end: date) -> str:
 
 async def _send_rental_management_menu(target_wa: str, rental: Dict[str, Any]):
     """
-    Muestra botones de acción según estado de la renta.
-    - pending  -> Confirmar / Cancelar
-    - active   -> Extender (solo inquilino) / Cancelar
-    - finished/cancelled/others -> solo info
-    Incluye token anti-tap y, si existe en el objeto, el versioning esperado.
+    Botones de gestión de rentas.
     """
     rid = rental["id"]
     status = (rental.get("status") or "").lower()
     body = _card_for_rental(rental, target_wa)
 
     token = _new_token()
-    expected_version = rental.get("version")  # si lo expones desde backend
+    expected_version = rental.get("version")
     ver_suffix = f"_{expected_version}" if expected_version is not None else ""
 
-    is_owner = rental.get("seller_wa") == target_wa
     is_renter = rental.get("buyer_wa") == target_wa
 
     if status == "pending":
@@ -141,10 +154,8 @@ async def _send_rental_management_menu(target_wa: str, rental: Dict[str, Any]):
 
     elif status == "active":
         buttons = []
-        # Extender: solo el inquilino
         if is_renter:
             buttons.append({"id": f"rental_extend_{rid}_{token}{ver_suffix}", "title": "🔄 Extender"})
-        # Cancelar: ambos
         buttons.append({"id": f"rental_cancel_{rid}_{token}{ver_suffix}", "title": "❌ Cancelar"})
         await send_reply_buttons(target_wa, "Gestión de Renta", body + "\n\n¿Qué deseas hacer?", buttons)
 
@@ -169,7 +180,6 @@ async def _render_my_rentals_page(user_wa: str, rentals: List[Dict[str, Any]], o
     txt = "Tus alquileres:\n\n" + "\n\n".join(chunks)
     await send_text(user_wa, txt)
 
-    # Botones de paginación
     buttons = []
     if offset > 0:
         prev_off = max(0, offset - MYRENTALS_PAGE_SIZE)
@@ -177,10 +187,73 @@ async def _render_my_rentals_page(user_wa: str, rentals: List[Dict[str, Any]], o
     if end_index < len(rentals):
         next_off = end_index
         buttons.append({"id": f"myrentals_page_{next_off}", "title": "➡️ Siguientes"})
-    # Ayuda de gestión directa
     buttons.append({"id": "myrentals_one", "title": "🔎 Ver uno (#ID)"})
 
     await send_reply_buttons(user_wa, "Mis Alquileres", "Navega tus rentas o gestiona una en particular:", buttons)
+
+
+# ======== NUEVO: Mis Publicaciones ========
+async def _render_my_listings_page(user_wa: str, listings: List[Dict[str, Any]], offset: int):
+    if not listings:
+        await send_text(user_wa, "No tienes publicaciones.")
+        return
+
+    end_index = min(offset + MYLISTINGS_PAGE_SIZE, len(listings))
+    page = listings[offset:end_index]
+
+    chunks = []
+    for lst in page:
+        chunks.append(_card_for_listing(lst))
+    await send_text(user_wa, "Tus publicaciones:\n\n" + "\n\n".join(chunks))
+
+    buttons = []
+    if offset > 0:
+        prev_off = max(0, offset - MYLISTINGS_PAGE_SIZE)
+        buttons.append({"id": f"mylistings_page_{prev_off}", "title": "⬅️ Anteriores"})
+    if end_index < len(listings):
+        next_off = end_index
+        buttons.append({"id": f"mylistings_page_{next_off}", "title": "➡️ Siguientes"})
+    buttons.append({"id": "mylistings_one", "title": "🔎 Ver una (#ID)"})
+    await send_reply_buttons(user_wa, "Mis Publicaciones", "Navega tus publicaciones o gestiona una en particular:", buttons)
+
+
+async def _send_listing_management_menu(user_wa: str, lst: Dict[str, Any]):
+    """
+    Menú de gestión de una publicación.
+    - Si está alquilada hoy, deshabilita edición y deja solo 'Eliminar'.
+    """
+    item_id = str(lst["id"])
+    body = _card_for_listing(lst)
+
+    # ¿Está alquilada hoy?
+    today = _today_business()
+    try:
+        bookings = await get_future_bookings(item_id) or []
+    except Exception:
+        bookings = []
+    busy_end = None
+    for bs, be in bookings:
+        if bs <= today <= be:
+            busy_end = be
+            break
+
+    token = _new_token()
+    if busy_end:
+        fin = busy_end.strftime("%d/%m/%Y")
+        body += f"\n\n⚠️ Este artículo está *alquilado hoy* (hasta el {fin}). No puedes editarlo."
+        buttons = [
+            {"id": f"listing_delete_{item_id}_{token}", "title": "🗑️ Eliminar (despublicar)"},
+        ]
+    else:
+        buttons = [
+            {"id": f"listing_edit_title_{item_id}_{token}", "title": "✏️ Cambiar Título"},
+            {"id": f"listing_edit_price_{item_id}_{token}", "title": "💲 Cambiar Precio"},
+            {"id": f"listing_edit_desc_{item_id}_{token}", "title": "🧾 Cambiar Descripción"},
+            {"id": f"listing_edit_zone_{item_id}_{token}", "title": "📍 Cambiar Zona"},
+            {"id": f"listing_edit_pay_{item_id}_{token}", "title": "💳 Cambiar Pagos"},
+            {"id": f"listing_delete_{item_id}_{token}", "title": "🗑️ Eliminar (despublicar)"},
+        ]
+    await send_reply_buttons(user_wa, f"Publicación #{item_id}", body + "\n\n¿Qué deseas hacer?", buttons)
 
 
 async def _send_post_agreement_menus(buyer_wa: str, seller_wa: str, item_id: str, rental_id: str):
@@ -194,7 +267,6 @@ async def _send_post_agreement_menus(buyer_wa: str, seller_wa: str, item_id: str
         "Opciones disponibles:"
     )
 
-    # Arrendatario
     body_buyer = (
         body_common
         + "\n• Confirmar inicio (activa la renta cuando los dos confirmen)"
@@ -207,7 +279,6 @@ async def _send_post_agreement_menus(buyer_wa: str, seller_wa: str, item_id: str
     ]
     await send_reply_buttons(buyer_wa, "Gestión de Renta", body_buyer, buttons_buyer)
 
-    # Arrendador
     body_seller = (
         body_common
         + "\n• Confirmar inicio (activa la renta cuando los dos confirmen)"
@@ -241,14 +312,12 @@ async def finalize_and_introduce(consent_id: str, actor_msisdn: str):
 
     rental_id_str = ""
     if 'start_iso' in draft and 'end_iso' in draft and 'selected_payment_method' in draft:
-        # Revalidación final
         listing = await get_listing(item_id)
         if not listing or listing.get("status") != "active":
             await send_text(buyer_wa, "La publicación ya no está activa; no se pudo crear la renta.")
         elif not _validate_date_window(draft['start_iso'], draft['end_iso']):
             await send_text(buyer_wa, "Las fechas ya no son válidas. Intenta proponer un nuevo rango.")
         elif not await is_item_available(item_id, draft['start_iso'], draft['end_iso']):
-            # Colisión
             bookings = await get_future_bookings(item_id, from_iso=draft['start_iso'])
             s_d = _safe_date(draft['start_iso']); e_d = _safe_date(draft['end_iso'])
             if s_d and e_d and bookings:
@@ -262,10 +331,8 @@ async def finalize_and_introduce(consent_id: str, actor_msisdn: str):
             )
             if r.get("ok"):
                 rental_id_str = str(r["row"]["id"])
-        # limpiar sesión del comprador
         await set_session(buyer_wa, Step.IDLE, {})
 
-    # Presentación (una sola vez por consent_id) + aviso de estado
     if await mark_introduced_once_by_consent(consent_id):
         buyer_name, seller_name = await get_user_name(buyer_wa), await get_user_name(seller_wa)
         base_msg = (
@@ -285,7 +352,6 @@ async def finalize_and_introduce(consent_id: str, actor_msisdn: str):
             await send_text(seller_wa, info)
             await _send_post_agreement_menus(buyer_wa, seller_wa, item_id, rental_id_str)
 
-    # Limpiar sesión y menú para quien accionó
     if actor_msisdn != buyer_wa:
         await set_session(actor_msisdn, Step.IDLE, {})
     await send_main_menu(actor_msisdn)
@@ -304,7 +370,6 @@ async def handle_interactive(msg: Dict[str, Any], st: Dict[str, Any], from_msisd
 
         # CONSENTIMIENTO (por consent_id)
         if btn_id.startswith("consent_"):
-            # consent_yes_{consentId} | consent_no_{consentId}
             parts = btn_id.split("_")
             answer, consent_id = parts[1], parts[2]
             cons = await set_consent_flag_by_id(consent_id, from_msisdn, ok=(answer == "yes"))
@@ -325,7 +390,6 @@ async def handle_interactive(msg: Dict[str, Any], st: Dict[str, Any], from_msisd
 
         # POST-ACUERDO (confirmar/cancelar/extender)
         if btn_id.startswith("rental_confirm_"):
-            # rental_confirm_{rid}_{token}[_version]
             await handle_rental_confirmation(btn_id, from_msisdn)
             return
 
@@ -341,16 +405,13 @@ async def handle_interactive(msg: Dict[str, Any], st: Dict[str, Any], from_msisd
             return
 
         # Aceptar extensión
-        # Formato: rental_ext_accept_{rentalId}_{YYYY-MM-DD}
         if btn_id.startswith("rental_ext_accept_"):
             try:
                 parts = btn_id.split("_")
-                # parts -> ['rental','ext','accept','<rid>','<YYYY-MM-DD>']
                 if len(parts) >= 5:
                     rid_int = int(parts[3])
                     end_iso = parts[4]
                 else:
-                    # Fallback defensivo si cambian el formato
                     remainder = btn_id[len("rental_ext_accept_"):]
                     rid_str, end_iso = remainder.split("_", 1)
                     rid_int = int(rid_str)
@@ -370,12 +431,6 @@ async def handle_interactive(msg: Dict[str, Any], st: Dict[str, Any], from_msisd
             return
 
         # ========= Fin de alquiler: reseña / reporte =========
-        # Enviados por tu job diario (o manual) el día de fin.
-        # Formatos:
-        #   end_review_owner_{rid}_{token}
-        #   end_review_buyer_{rid}_{token}
-        #   end_report_owner_{rid}_{token}
-        #   end_report_buyer_{rid}_{token}
         if btn_id.startswith("end_review_owner_") or btn_id.startswith("end_review_buyer_"):
             try:
                 parts = btn_id.split("_")
@@ -388,10 +443,8 @@ async def handle_interactive(msg: Dict[str, Any], st: Dict[str, Any], from_msisd
                     await send_text(from_msisdn, "No puedes reseñar una renta en la que no participaste.")
                     return
 
-                # Definimos a quién se evalúa: si el botón es "owner", se evalúa al comprador; si es "buyer", al dueño.
                 reviewee = r["buyer_wa"] if btn_id.startswith("end_review_owner_") else r["seller_wa"]
 
-                # Guardamos bandera en draft sin cambiar Step para no romper otros flujos
                 await set_session(from_msisdn, s, {
                     **(st.get("draft") or {}),
                     "awaiting_review": {"rental_id": rid, "reviewee_wa": reviewee}
@@ -434,7 +487,7 @@ async def handle_interactive(msg: Dict[str, Any], st: Dict[str, Any], from_msisd
             return
         # ========= Fin de alquiler: reseña / reporte (FIN) =========
 
-        # Paginación de "Mis Alquileres"
+        # ===== Mis Alquileres: paginación =====
         if btn_id.startswith("myrentals_page_"):
             try:
                 off = int(btn_id.split("_")[-1])
@@ -444,7 +497,7 @@ async def handle_interactive(msg: Dict[str, Any], st: Dict[str, Any], from_msisd
             await _render_my_rentals_page(from_msisdn, rentals or [], off)
             return
 
-        # Botones del submenú "Mis Alquileres"
+        # ===== Mis Alquileres: submenú =====
         if btn_id == "myrentals_all":
             rentals = await get_rentals_for_user(from_msisdn)
             await _render_my_rentals_page(from_msisdn, rentals or [], 0)
@@ -453,6 +506,63 @@ async def handle_interactive(msg: Dict[str, Any], st: Dict[str, Any], from_msisd
         if btn_id == "myrentals_one":
             await set_session(from_msisdn, Step.RENTAL_VIEW_ONE, {})
             await send_text(from_msisdn, "Escribe el *número de renta* (ej: `#123` o `123`).")
+            return
+
+        # ===== Mis Publicaciones: paginación =====
+        if btn_id.startswith("mylistings_page_"):
+            try:
+                off = int(btn_id.split("_")[-1])
+            except Exception:
+                off = 0
+            listings = await get_listings_for_user(from_msisdn)
+            await _render_my_listings_page(from_msisdn, listings or [], off)
+            return
+
+        # ===== Mis Publicaciones: submenú =====
+        if btn_id == "mylistings_all":
+            listings = await get_listings_for_user(from_msisdn)
+            await _render_my_listings_page(from_msisdn, listings or [], 0)
+            return
+
+        if btn_id == "mylistings_one":
+            await set_session(from_msisdn, Step.LISTING_VIEW_ONE, {})
+            await send_text(from_msisdn, "Escribe el *número de publicación* (ej: `#123` o `123`).")
+            return
+
+        # ===== Gestión de una publicación (botones) =====
+        if btn_id.startswith("listing_edit_title_") or btn_id.startswith("listing_edit_price_") \
+           or btn_id.startswith("listing_edit_desc_") or btn_id.startswith("listing_edit_zone_") \
+           or btn_id.startswith("listing_edit_pay_"):
+            try:
+                parts = btn_id.split("_")
+                field = parts[2]   # title | price | desc | zone | pay
+                item_id = int(parts[3])
+                prompts = {
+                    "title": "Escribe el *nuevo título*:",
+                    "price": "Escribe el *nuevo precio* (ej: 10 USD):",
+                    "desc": "Escribe la *nueva descripción*:",
+                    "zone": "Escribe la *nueva zona*:",
+                    "pay": "Indica los *métodos de pago* separados por coma:",
+                }
+                await set_session(from_msisdn, Step.LISTING_EDIT_WAIT, {"listing_id": item_id, "field": field})
+                await send_text(from_msisdn, prompts.get(field, "Escribe el nuevo valor:"))
+            except Exception as e:
+                print(f"listing_edit_* error: {e}")
+                await send_text(from_msisdn, "No se pudo iniciar la edición.")
+            return
+
+        if btn_id.startswith("listing_delete_"):
+            try:
+                parts = btn_id.split("_")
+                item_id = parts[2]
+                ok = await update_listing_status(item_id, from_msisdn, "inactive")
+                if ok:
+                    await send_text(from_msisdn, f"🗑️ Publicación #{item_id} despublicada.")
+                else:
+                    await send_text(from_msisdn, "No se pudo despublicar. Verifica que seas el dueño.")
+            except Exception as e:
+                print(f"listing_delete error: {e}")
+                await send_text(from_msisdn, "Ocurrió un error al despublicar.")
             return
 
     if itype == "list_reply":
@@ -487,7 +597,6 @@ async def handle_interactive(msg: Dict[str, Any], st: Dict[str, Any], from_msisd
                 return
 
             if not await is_item_available(item_id, start_iso, end_iso):
-                # Colisión
                 s_d = _safe_date(start_iso); e_d = _safe_date(end_iso)
                 bookings = await get_future_bookings(item_id, from_iso=start_iso)
                 if s_d and e_d and bookings:
@@ -498,7 +607,6 @@ async def handle_interactive(msg: Dict[str, Any], st: Dict[str, Any], from_msisd
                 await set_session(from_msisdn, Step.RENTAL_WAIT_DATES, {"item_id": int(item_id)})
                 return
 
-            # Si todo OK, persistimos y pedimos consentimientos
             draft["selected_payment_method"] = row_title
 
             seller, buyer = listing["owner_wa"], from_msisdn
@@ -527,11 +635,9 @@ async def handle_interactive(msg: Dict[str, Any], st: Dict[str, Any], from_msisd
                 await set_session(from_msisdn, Step.RENTAL_WAIT_DATES, {"item_id": int(item_id)})
                 return
 
-            # soporta que create_consent_guarded devuelva {"ok": True, "row": {...}}
             row = cons_res.get("row", cons_res) if cons_res else {}
             consent_id = str(row["id"])
 
-            # guardamos consent_id en el draft (para fallback textual)
             new_draft = {**draft, "consent_id": consent_id}
             await set_session(from_msisdn, s, new_draft)
 
@@ -556,9 +662,14 @@ async def handle_interactive(msg: Dict[str, Any], st: Dict[str, Any], from_msisd
         elif row_id == "menu_rent":
             await send_text(from_msisdn, "Para alquilar, escribe qué buscas o el ID del artículo. Ej: ALQUILAR #123")
         elif row_id == "menu_my_listings":
-            await handle_text({"text": {"body": "MIS PUBLICACIONES"}}, st, from_msisdn)
+            # Submenú como "Mis Alquileres"
+            body = "¿Qué te gustaría ver?"
+            buttons = [
+                {"id": "mylistings_all", "title": "📋 Ver todas"},
+                {"id": "mylistings_one", "title": "🔎 Ver una (#ID)"},
+            ]
+            await send_reply_buttons(from_msisdn, "Mis Publicaciones", body, buttons)
         elif row_id == "menu_my_rentals":
-            # Mostrar submenú con opciones
             body = "¿Qué te gustaría ver?"
             buttons = [
                 {"id": "myrentals_all", "title": "📋 Ver todos"},
@@ -586,7 +697,7 @@ async def handle_text(msg: Dict[str, Any], st: Dict[str, Any], from_msisdn: str)
         return
     upper = text.upper()
 
-    # --- Flujo: respuesta a reseña pendiente (sin agregar nuevos Step) ---
+    # --- Flujo: respuesta a reseña pendiente ---
     draft = st.get("draft") or {}
     if isinstance(draft, dict) and draft.get("awaiting_review"):
         try:
@@ -598,9 +709,6 @@ async def handle_text(msg: Dict[str, Any], st: Dict[str, Any], from_msisdn: str)
             comment = re.sub(r"^\s*\b[1-5]\b\s*", "", text).strip()
 
             rid = int(draft["awaiting_review"]["rental_id"])
-            # reviewed_wa está disponible si luego quieres recalcular reputación
-            # reviewed_wa = draft["awaiting_review"]["reviewee_wa"]
-
             result = await add_review(rid, from_msisdn, rating, comment)
             if result.get("ok"):
                 await send_text(from_msisdn, "✅ ¡Gracias! Tu reseña fue registrada.")
@@ -618,7 +726,6 @@ async def handle_text(msg: Dict[str, Any], st: Dict[str, Any], from_msisdn: str)
     if isinstance(draft, dict) and draft.get("awaiting_report"):
         try:
             rid = int(draft["awaiting_report"]["rental_id"])
-            # Registro simple (aquí solo notificamos; si creas tabla 'incidents', llámala desde supabase_client)
             r = await get_rental(rid)
             other = r["buyer_wa"] if from_msisdn == r["seller_wa"] else r["seller_wa"]
             await send_text(from_msisdn, "⚠️ Reporte recibido. Nuestro equipo lo revisará.")
@@ -639,7 +746,7 @@ async def handle_text(msg: Dict[str, Any], st: Dict[str, Any], from_msisdn: str)
         await send_main_menu(from_msisdn)
         return
 
-    # === Fallback textual para consentimiento final (usa consent_id del draft) ===
+    # === Fallback textual para consentimiento final ===
     if s == Step.RENTAL_WAIT_PAYMENT and st.get("draft", {}).get("consent_id"):
         consent_id = str(st["draft"]["consent_id"])
         if upper in {"SI, AUTORIZO", "SÍ, AUTORIZO", "SI AUTORIZO", "SÍ AUTORIZO"}:
@@ -684,12 +791,10 @@ async def handle_text(msg: Dict[str, Any], st: Dict[str, Any], from_msisdn: str)
         dates = _extract_dates(text)
         if dates:
             start_iso, end_iso = dates
-            # Validaciones de fechas y disponibilidad antes de pasar a pagos
             if not _validate_date_window(start_iso, end_iso):
                 await send_text(from_msisdn, "Las fechas no son válidas. Asegúrate de que el inicio sea desde hoy y el fin posterior.")
                 return
             if not await is_item_available(item_id, start_iso, end_iso):
-                # Colisión → informar fin y días restantes, mantener el paso para reintento
                 s_d = _safe_date(start_iso); e_d = _safe_date(end_iso)
                 bookings = await get_future_bookings(item_id, from_iso=start_iso)
                 if s_d and e_d and bookings:
@@ -705,9 +810,8 @@ async def handle_text(msg: Dict[str, Any], st: Dict[str, Any], from_msisdn: str)
             rows = [{"id": p.replace(" ", "_"), "title": p} for p in payment_options]
             await send_list(from_msisdn, f"Alquiler de #{item_id}", "Selecciona tu método de pago:", "Ver Pagos", rows)
         else:
-            # >>> NUEVO: comprobar si el artículo está ocupado HOY antes de pedir fechas
             try:
-                bookings = await get_future_bookings(item_id)  # desde hoy en adelante
+                bookings = await get_future_bookings(item_id)
             except Exception:
                 bookings = []
             today = _today_business()
@@ -724,27 +828,23 @@ async def handle_text(msg: Dict[str, Any], st: Dict[str, Any], from_msisdn: str)
                 dias = "día" if left == 1 else "días"
                 await send_text(
                     from_msisdn,
-                    f"Este artículo está *alquilado ahora mismo* y queda ocupado hasta el *{fin}* "
-                    f"(faltan *{left} {dias}*).\n\n"
-                    "Si quieres reservar para después, envía un rango que *no* se solape, por ejemplo: *DD/MM/AAAA a DD/MM/AAAA*."
+                    f"Este artículo está *alquilado* hasta el *{fin}* (faltan *{left} {dias}*)."
                 )
-                # Dejamos al usuario en espera de fechas para que proponga un rango posterior
-                await set_session(from_msisdn, Step.RENTAL_WAIT_DATES, {"item_id": int(item_id)})
+                await set_session(from_msisdn, Step.IDLE, {})
+                await send_main_menu(from_msisdn)
                 return
 
-            # Si está libre hoy, pedimos fechas como antes
             await set_session(from_msisdn, Step.RENTAL_WAIT_DATES, {"item_id": int(item_id)})
             await send_text(from_msisdn, f"Perfecto. Ahora, indica las *fechas* que necesitas para el artículo #{item_id} (formato: DD/MM/AAAA a DD/MM/AAAA).")
         return
 
-    # Ver una renta específica directamente: "ALQUILER #123" o "Renta #123"
+    # Ver una renta específica
     if re.search(r"\b(ALQUILER|RENTA)\b", upper) and re.search(r"[#№](\d+)", text):
         rid = int(re.search(r"[#№](\d+)", text).group(1))
         r = await get_rental(rid)
         if not r:
             await send_text(from_msisdn, f"No encontré la renta #{rid}.")
             return
-        # Solo mostramos el menú (sin tarjeta duplicada)
         await _send_rental_management_menu(from_msisdn, r)
         return
 
@@ -773,16 +873,24 @@ async def handle_text(msg: Dict[str, Any], st: Dict[str, Any], from_msisdn: str)
         await send_text(from_msisdn, response)
         return
 
+    # ===== NUEVO: Mis Publicaciones =====
     if upper == "MIS PUBLICACIONES":
-        listings = await get_listings_for_user(from_msisdn)
-        if not listings:
-            await send_text(from_msisdn, "No tienes ningún artículo publicado. ¡Anímate a publicar algo con el menú principal!")
+        body = "¿Qué te gustaría ver?"
+        buttons = [
+            {"id": "mylistings_all", "title": "📋 Ver todas"},
+            {"id": "mylistings_one", "title": "🔎 Ver una (#ID)"},
+        ]
+        await send_reply_buttons(from_msisdn, "Mis Publicaciones", body, buttons)
+        return
+
+    # Atajo: "MIS PUBLICACIONES #123"
+    if upper.startswith("MIS PUBLICACIONES #") or re.match(r"^MIS\s+PUBLICACIONES\s*[#№]\d+", upper):
+        lid = int(re.search(r"[#№](\d+)", text).group(1))
+        lst = await get_listing(str(lid))
+        if not lst or lst.get("owner_wa") != from_msisdn:
+            await send_text(from_msisdn, f"No encontré tu publicación #{lid}.")
             return
-        response = "Tus publicaciones:\n\n"
-        for item in listings:
-            status_emoji = "✅" if item['status'] == 'active' else "⏸️"
-            response += f"{status_emoji} *#{item['id']}* - {item['title']} ({item['price']}) - Estado: {item['status']}\n"
-        await send_text(from_msisdn, response)
+        await _send_listing_management_menu(from_msisdn, lst)
         return
 
     if upper == "MIS ALQUILERES":
@@ -797,23 +905,20 @@ async def handle_text(msg: Dict[str, Any], st: Dict[str, Any], from_msisdn: str)
         if not r:
             await send_text(from_msisdn, f"No encontré la renta #{rid}.")
             return
-        # Solo menú (sin tarjeta duplicada)
         await _send_rental_management_menu(from_msisdn, r)
         return
 
+    # ELIMINAR publicación (ahora siempre permite despublicar)
     if upper.startswith("ELIMINAR #"):
         item_id = text.split("#")[-1].strip()
         if not item_id.isdigit():
             await send_text(from_msisdn, "Proporciona un ID de artículo válido (solo números).")
             return
         try:
-            if await get_active_rentals_for_item(item_id):
-                await send_text(from_msisdn, f"No puedes eliminar la publicación #{item_id} porque tiene rentas activas o solicitadas.")
-                return
             if await update_listing_status(item_id, from_msisdn, "inactive"):
-                await send_text(from_msisdn, f"✅ Publicación #{item_id} eliminada con éxito.")
+                await send_text(from_msisdn, f"🗑️ Publicación #{item_id} despublicada.")
             else:
-                await send_text(from_msisdn, "No se pudo eliminar. Asegúrate de que el ID sea correcto y que seas el dueño de la publicación.")
+                await send_text(from_msisdn, "No se pudo despublicar. Asegúrate de que el ID sea correcto y que seas el dueño de la publicación.")
         except httpx.HTTPStatusError as e:
             print(f"Error de Supabase al eliminar item {item_id}: {e}")
             await send_text(from_msisdn, "Hubo un problema de comunicación con nuestros sistemas. Por favor, inténtalo de nuevo más tarde.")
@@ -827,25 +932,23 @@ async def handle_text(msg: Dict[str, Any], st: Dict[str, Any], from_msisdn: str)
         await handle_cancellation_request(rental_id, from_msisdn)
         return
 
-    # Máquina de estados (Publicación)
-    if s == Step.PUBLISH_TITLE:
+    # Máquina de estados (Publicación) - crear NUEVA
+    if s == Step.PUBLISH_TITLE and not (st.get("draft") or {}).get("edit_listing_id"):
         await set_session(from_msisdn, Step.PUBLISH_PRICE, {"title": text})
         await send_text(from_msisdn, "¡Bien! Ahora, indica el *precio por día* (ej: 10 USD).")
         return
-    if s == Step.PUBLISH_PRICE:
-        # (opcional) podríamos normalizar el monto a número aquí
+    if s == Step.PUBLISH_PRICE and not (st.get("draft") or {}).get("edit_listing_id"):
         st["draft"]["price"] = text
         await set_session(from_msisdn, Step.PUBLISH_ZONE, st["draft"])
         await send_text(from_msisdn, "Ok. ¿En qué *zona* se encuentra? (ej: Chacao, Caracas)")
         return
-    if s == Step.PUBLISH_ZONE:
+    if s == Step.PUBLISH_ZONE and not (st.get("draft") or {}).get("edit_listing_id"):
         st["draft"]["zone"] = text
         await set_session(from_msisdn, Step.PUBLISH_PAYMENTS, st["draft"])
         await send_text(from_msisdn, "Casi listo. ¿Qué *métodos de pago* aceptas? (separados por coma)")
         return
-    if s == Step.PUBLISH_PAYMENTS:
+    if s == Step.PUBLISH_PAYMENTS and not (st.get("draft") or {}).get("edit_listing_id"):
         pmts = [p.strip() for p in re.split(r"[,;]+", text) if p.strip()]
-        # deduplicar y acotar
         pmts = list(dict.fromkeys(pmts))[:10]
         d = st["draft"]
         item_id = await insert_listing(from_msisdn, d["title"], d["price"], d["zone"], pmts)
@@ -853,6 +956,42 @@ async def handle_text(msg: Dict[str, Any], st: Dict[str, Any], from_msisdn: str)
         pagos = ", ".join(pmts) if pmts else "A convenir"
         await send_text(from_msisdn, f"¡Publicación creada! ID: *#{item_id}*\n- {d['title']}\n- Precio: {d['price']}\n- Zona: {d['zone']}\n- Pagos: {pagos}")
         await send_main_menu(from_msisdn)
+        return
+
+    # ===== Edición de publicación (entrada del nuevo valor) =====
+    if s == Step.LISTING_EDIT_WAIT:
+        try:
+            draft = st.get("draft") or {}
+            item_id = int(draft.get("listing_id"))
+            field = (draft.get("field") or "").lower()
+
+            if field == "pay":
+                pmts = [p.strip() for p in re.split(r"[,;]+", text) if p.strip()]
+                pmts = list(dict.fromkeys(pmts))[:10]
+                ok = await update_listing_fields(item_id, from_msisdn, payment_methods=pmts)
+            elif field == "title":
+                ok = await update_listing_fields(item_id, from_msisdn, title=text.strip())
+            elif field == "price":
+                ok = await update_listing_fields(item_id, from_msisdn, price=text.strip())
+            elif field == "desc":
+                ok = await update_listing_fields(item_id, from_msisdn, description=text.strip())
+            elif field == "zone":
+                ok = await update_listing_fields(item_id, from_msisdn, zone=text.strip())
+            else:
+                ok = False
+
+            if ok:
+                await send_text(from_msisdn, f"✅ Publicación #{item_id} actualizada.")
+                lst = await get_listing(str(item_id))
+                if lst:
+                    await _send_listing_management_menu(from_msisdn, lst)
+            else:
+                await send_text(from_msisdn, "No se pudo actualizar. Verifica que seas el dueño.")
+        except Exception as e:
+            print(f"LISTING_EDIT_WAIT error: {e}")
+            await send_text(from_msisdn, "Ocurrió un error al actualizar la publicación.")
+        finally:
+            await set_session(from_msisdn, Step.IDLE, {})
         return
 
     # Máquina de estados (Alquiler)
@@ -876,7 +1015,6 @@ async def handle_text(msg: Dict[str, Any], st: Dict[str, Any], from_msisdn: str)
             return
 
         if not await is_item_available(item_id, start_iso, end_iso):
-            # Colisión → informar fin y días restantes, mantener el paso para reintento
             s_d = _safe_date(start_iso); e_d = _safe_date(end_iso)
             bookings = await get_future_bookings(item_id, from_iso=start_iso)
             if s_d and e_d and bookings:
@@ -884,7 +1022,6 @@ async def handle_text(msg: Dict[str, Any], st: Dict[str, Any], from_msisdn: str)
                 await send_text(from_msisdn, _format_collision_message(overlap_end))
             else:
                 await send_text(from_msisdn, "Esas fechas ya están reservadas. Prueba un rango distinto.")
-            # seguimos esperando fechas
             await set_session(from_msisdn, Step.RENTAL_WAIT_DATES, {"item_id": item_id})
             return
 
@@ -901,7 +1038,6 @@ async def handle_text(msg: Dict[str, Any], st: Dict[str, Any], from_msisdn: str)
             await send_main_menu(from_msisdn)
             return
 
-        # Obtener la renta actual para validar estado y fecha fin
         r = await get_rental(int(rental_id))
         if not r:
             await send_text(from_msisdn, f"No encontré la renta #{rental_id}.")
@@ -916,7 +1052,6 @@ async def handle_text(msg: Dict[str, Any], st: Dict[str, Any], from_msisdn: str)
             await send_main_menu(from_msisdn)
             return
 
-        # Parseo de fecha: admitimos "DD/MM/AAAA" o "DD/MM/AAAA a DD/MM/AAAA"
         dates = _extract_dates(text)
         end_iso = None
         if dates:
@@ -931,7 +1066,6 @@ async def handle_text(msg: Dict[str, Any], st: Dict[str, Any], from_msisdn: str)
             await send_text(from_msisdn, "Formato de fecha no válido. Usa *DD/MM/AAAA* para la nueva fecha de fin.")
             return
 
-        # Validaciones de ventana (nueva fecha fin > hoy y > fecha fin actual)
         new_end = _safe_date(end_iso)
         current_end = _safe_date(r["end_date"])
         if not (new_end and current_end):
@@ -946,10 +1080,8 @@ async def handle_text(msg: Dict[str, Any], st: Dict[str, Any], from_msisdn: str)
             await send_text(from_msisdn, f"La nueva fecha de fin debe ser *posterior a { _to_ve(r['end_date']) }*.")
             return
 
-        # Disponibilidad del TRAMO EXTRA: (current_end + 1) .. new_end
         item_id = r["item_id"]
         try:
-            # get_future_bookings devuelve List[Tuple[date, date]]
             bookings = await get_future_bookings(str(item_id)) or []
             extra_start = current_end + timedelta(days=1)
             extra_end = new_end
@@ -958,10 +1090,8 @@ async def handle_text(msg: Dict[str, Any], st: Dict[str, Any], from_msisdn: str)
                 await send_text(from_msisdn, "No es posible extender: el tramo adicional *se solapa* con otra reserva.")
                 return
         except Exception:
-            # Si falla la comprobación, continuamos y dejamos la decisión al backend (que valida).
             pass
 
-        # Solicitud de extensión (requiere confirmación de la otra parte)
         result = await request_rental_extension(int(rental_id), from_msisdn, end_iso)
         status = result.get("status")
 
@@ -1000,8 +1130,23 @@ async def handle_text(msg: Dict[str, Any], st: Dict[str, Any], from_msisdn: str)
             await send_text(from_msisdn, f"No encontré la renta #{rid}.")
             await send_main_menu(from_msisdn)
             return
-        # Solo menú (sin tarjeta duplicada)
         await _send_rental_management_menu(from_msisdn, r)
+        return
+
+    # Estado: pedir un ID de publicación específico
+    if s == Step.LISTING_VIEW_ONE:
+        m = re.search(r"(\d+)", text)
+        if not m:
+            await send_text(from_msisdn, "Por favor envía un número de publicación válido. Ej: `#123` o `123`.")
+            return
+        lid = int(m.group(1))
+        lst = await get_listing(str(lid))
+        await set_session(from_msisdn, Step.IDLE, {})
+        if not lst or lst.get("owner_wa") != from_msisdn:
+            await send_text(from_msisdn, f"No encontré tu publicación #{lid}.")
+            await send_main_menu(from_msisdn)
+            return
+        await _send_listing_management_menu(from_msisdn, lst)
         return
 
     # Fallback: IA (opcional)
@@ -1027,7 +1172,6 @@ async def handle_text(msg: Dict[str, Any], st: Dict[str, Any], from_msisdn: str)
                     await send_text(from_msisdn, "Las fechas no son válidas. Inicio desde hoy y fin posterior.")
                     return
                 if not await is_item_available(item_id, start_iso, end_iso):
-                    # Colisión -> informar fin y días restantes y mantener paso
                     s_d = _safe_date(start_iso); e_d = _safe_date(end_iso)
                     bookings = await get_future_bookings(item_id, from_iso=start_iso)
                     if s_d and e_d and bookings:
@@ -1132,7 +1276,6 @@ async def handle_rental_confirmation(btn_id: str, from_msisdn: str):
     try:
         parts = btn_id.split("_")
         rental_id = int(parts[2])
-        # Si adjuntas expected_version, lo puedes pasar a tu API confirm_rental_start vía header/campo adicional
         result = await confirm_rental_start(rental_id, from_msisdn)
         status = result.get("status")
         if status == "ACTIVATED":
@@ -1146,7 +1289,7 @@ async def handle_rental_confirmation(btn_id: str, from_msisdn: str):
             await send_text(from_msisdn, "Aún no puede activarse: solo se activa dentro del rango de fechas acordado.")
         elif status == "INVALID":
             await send_text(from_msisdn, "Esta renta no puede confirmarse (posiblemente ya está activa o fue cancelada).")
-        else:  # NOT_FOUND u otra
+        else:
             await send_text(from_msisdn, "No se encontró la renta.")
     except Exception as e:
         print(f"Error en handle_rental_confirmation para botón {btn_id}: {e}")

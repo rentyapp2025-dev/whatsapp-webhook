@@ -153,28 +153,6 @@ def days_left_until(d: date) -> int:
     """Días restantes hasta 'd' (incluyendo hoy) en tz de negocio."""
     return (d - _today_business()).days + 1
 
-# >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
-# NUEVO: ocupación actual (hoy en tz de negocio)
-# >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
-async def get_current_blocking_rental_for_item(item_id: int | str) -> Optional[Dict[str, Any]]:
-    """
-    Devuelve una renta bloqueante cuyo rango incluye 'hoy' (según BUSINESS_TZ).
-    """
-    today = _today_business().isoformat()
-    async with httpx.AsyncClient(timeout=12.0) as c:
-        params = {
-            "item_id": f"eq.{item_id}",
-            "status": f"in.({','.join(BLOCKING_STATUSES)})",
-            "select": "id,item_id,start_date,end_date,status,buyer_wa,seller_wa",
-            "and": f"(start_date.lte.{today},end_date.gte.{today})",
-            "order": "end_date.asc",
-            "limit": 1,
-        }
-        r = await c.get(f"{BASE}/rentals", headers=HEADERS, params=params)
-        r.raise_for_status()
-        rows = r.json() or []
-        return rows[0] if rows else None
-
 # =========================
 # Calendario / sugerencias
 # =========================
@@ -407,47 +385,109 @@ async def get_listings_for_user(owner_wa: str) -> List[Dict[str, Any]]:
     async with httpx.AsyncClient(timeout=10.0) as c:
         params = {
             "owner_wa": f"eq.{owner_wa}",
-            "select": "id,title,status,price",
+            "select": "id,title,status,price,zone,payment_methods,created_at",
             "order": "created_at.desc",
         }
         r = await c.get(f"{BASE}/listings", headers=HEADERS, params=params)
         r.raise_for_status()
         return r.json()
 
+# ========= NUEVO: Gestión segura de publicaciones =========
+
+async def _get_current_item_booking(item_id: str) -> Optional[Dict[str, Any]]:
+    """
+    Devuelve la reserva que mantiene bloqueado el artículo HOY (si existe).
+    """
+    today = _today_business().isoformat()
+    async with httpx.AsyncClient(timeout=10.0) as c:
+        params = {
+            "item_id": f"eq.{item_id}",
+            "status": f"in.({','.join(BLOCKING_STATUSES)})",
+            "select": "id,start_date,end_date,status",
+            "and": f"(start_date.lte.{today},end_date.gte.{today})",
+            "order": "end_date.asc",
+            "limit": 1,
+        }
+        r = await c.get(f"{BASE}/rentals", headers=HEADERS, params=params)
+        r.raise_for_status()
+        rows = r.json() or []
+        return rows[0] if rows else None
+
+async def is_item_in_use_now(item_id: str) -> Tuple[bool, Optional[str], Optional[int]]:
+    """
+    ¿Está el artículo alquilado HOY?
+    Retorna (en_uso, end_date_iso, dias_restantes)
+    """
+    row = await _get_current_item_booking(item_id)
+    if not row:
+        return False, None, None
+    end_iso = (row.get("end_date") or "")[:10]
+    try:
+        end_d = _parse_iso_to_date(end_iso)
+        return True, end_iso, max(1, days_left_until(end_d))
+    except Exception:
+        return True, end_iso, None
+
+async def can_manage_listing(item_id: str) -> bool:
+    """True si NO está alquilado hoy."""
+    in_use, _, _ = await is_item_in_use_now(item_id)
+    return not in_use
+
+async def update_listing_fields(item_id: str, owner_wa: str, **fields) -> Dict[str, Any]:
+    """
+    Actualiza campos de la publicación si NO está alquilada HOY.
+    Campos permitidos (si existen en tu tabla): title, price, description, zone, payment_methods, status.
+    """
+    if not await can_manage_listing(item_id):
+        in_use, until_iso, days_left = await is_item_in_use_now(item_id)
+        dias = "día" if (days_left or 0) == 1 else "días"
+        return {"ok": False, "error": "IN_USE", "until": until_iso, "days_left": days_left, "message": f"Artículo alquilado hasta {until_iso} (faltan {days_left} {dias})."}
+
+    allowed = {"title", "price", "description", "zone", "payment_methods", "status"}
+    payload = {k: v for k, v in fields.items() if k in allowed and v is not None}
+    if not payload:
+        return {"ok": False, "error": "NO_FIELDS"}
+
+    async with httpx.AsyncClient(timeout=10.0) as c:
+        r = await c.patch(
+            f"{BASE}/listings",
+            headers=HEADERS_RETURN,
+            params={"id": f"eq.{item_id}", "owner_wa": f"eq.{owner_wa}"},
+            json=payload,
+        )
+        if r.status_code >= 400:
+            return {"ok": False, "error": "DB_ERROR", "status": r.status_code, "text": r.text}
+        rows = r.json() or []
+        return {"ok": bool(rows), "row": rows[0] if rows else None}
+
+async def delete_listing(item_id: str, owner_wa: str, *, hard: bool = False) -> Dict[str, Any]:
+    """
+    Elimina una publicación. Si 'hard' es False, la marca como inactive.
+    Bloquea si está alquilada HOY.
+    """
+    if not await can_manage_listing(item_id):
+        in_use, until_iso, days_left = await is_item_in_use_now(item_id)
+        dias = "día" if (days_left or 0) == 1 else "días"
+        return {"ok": False, "error": "IN_USE", "until": until_iso, "days_left": days_left, "message": f"Artículo alquilado hasta {until_iso} (faltan {days_left} {dias})."}
+
+    if not hard:
+        ok = await update_listing_status(item_id, owner_wa, "inactive")
+        return {"ok": bool(ok), "soft": True}
+
+    async with httpx.AsyncClient(timeout=10.0) as c:
+        r = await c.delete(
+            f"{BASE}/listings",
+            headers=HEADERS,
+            params={"id": f"eq.{item_id}", "owner_wa": f"eq.{owner_wa}"},
+        )
+        if r.status_code in (200, 204):
+            return {"ok": True, "hard": True}
+        # A veces por FK no deja borrar: devolvemos instrucción para soft delete
+        return {"ok": False, "error": "DB_DELETE_FAILED", "status": r.status_code, "text": r.text}
+
 # =========================
 # Consents (SIEMPRE NUEVOS)
 # =========================
-
-async def create_consent_guarded(item_id: str, buyer_msisdn: str, seller_msisdn: str, start_iso: str, end_iso: str) -> Dict[str, Any]:
-    """
-    Crea un consent SOLO si el artículo no está ocupado en [start_iso, end_iso].
-    Devuelve:
-      {"ok": True, "row": {...}} si se creó
-      {"ok": False, "error": "ITEM_BUSY", "until": "YYYY-MM-DD", "days_left": int} si hay un alquiler bloqueante
-      {"ok": False, "error": "INVALID_DATES"} si las fechas no son válidas
-    """
-    # Validación defensiva de fechas
-    if not _valid_date_window(start_iso, end_iso):
-        return {"ok": False, "error": "INVALID_DATES"}
-
-    # Anti-overbooking: si hay solape NO creamos el consent
-    overlaps = await get_overlapping_rentals(item_id, start_iso, end_iso)
-    if overlaps:
-        try:
-            # “Hasta cuándo” está bloqueado: tomamos el fin más lejano de los solapes
-            until_date = max(_parse_iso_to_date(o["end_date"]) for o in overlaps if o.get("end_date"))
-            return {
-                "ok": False,
-                "error": "ITEM_BUSY",
-                "until": until_date.isoformat(),
-                "days_left": days_left_until(until_date),
-            }
-        except Exception:
-            return {"ok": False, "error": "ITEM_BUSY"}
-
-    # Si está libre, creamos el consent normal
-    row = await create_consent(item_id, buyer_msisdn, seller_msisdn)
-    return {"ok": True, "row": row}
 
 async def create_consent(item_id: str, buyer_msisdn: str, seller_msisdn: str) -> Dict[str, Any]:
     """
@@ -467,6 +507,38 @@ async def create_consent(item_id: str, buyer_msisdn: str, seller_msisdn: str) ->
         r.raise_for_status()
         rows = r.json() or []
         return rows[0] if rows else {}
+
+# NUEVO: consentimiento con guardas de disponibilidad (para evitar flujos inválidos)
+async def create_consent_guarded(item_id: str, buyer_msisdn: str, seller_msisdn: str, start_iso: str, end_iso: str) -> Dict[str, Any]:
+    """
+    Igual a create_consent, pero:
+      - Verifica que el listing esté activo
+      - Verifica ventana de fechas válida
+      - Verifica disponibilidad exacta [start,end]
+      - Si está ocupado, devuelve {"ok": False, "error": "ITEM_BUSY", "until": <YYYY-MM-DD>, "days_left": <int>}
+    """
+    listing = await get_listing(str(item_id))
+    if not listing:
+        return {"ok": False, "error": "LISTING_NOT_FOUND"}
+    if listing.get("status") != "active":
+        return {"ok": False, "error": "LISTING_INACTIVE"}
+
+    if not _valid_date_window(start_iso, end_iso):
+        return {"ok": False, "error": "INVALID_DATES"}
+
+    if not await is_item_available(item_id, start_iso, end_iso):
+        # calcular fin del primer solape y días restantes
+        bookings = await get_future_bookings(item_id, from_iso=start_iso)
+        try:
+            s = _parse_iso_to_date(start_iso)
+            e = _parse_iso_to_date(end_iso)
+            be = end_of_first_overlap(bookings, s, e)
+            return {"ok": False, "error": "ITEM_BUSY", "until": be.isoformat(), "days_left": days_left_until(be)}
+        except Exception:
+            return {"ok": False, "error": "ITEM_BUSY"}
+
+    row = await create_consent(str(item_id), buyer_msisdn, seller_msisdn)
+    return {"ok": True, "row": row}
 
 # (Se deja este helper por si lo necesitas más adelante; no interfiere)
 async def _get_latest_consent_for_triplet(item_id: str, buyer_msisdn: str, seller_msisdn: str) -> Optional[Dict[str, Any]]:
@@ -639,61 +711,6 @@ async def mark_introduced_once(item_id_or_consent_id: str) -> bool:
         upd.raise_for_status()
         rows = upd.json() or []
         return len(rows) > 0
-
-# >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
-# NUEVO: crear consent con guardas de disponibilidad
-# >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
-async def create_consent_guarded(
-    item_id: str,
-    buyer_msisdn: str,
-    seller_msisdn: str,
-    start_iso: Optional[str] = None,
-    end_iso: Optional[str] = None,
-) -> Dict[str, Any]:
-    """
-    Igual que create_consent, pero:
-      - Si hoy el artículo está ocupado → NO crea consent (ITEM_BUSY).
-      - Si se pasan fechas y hay solape con una renta bloqueante → NO crea consent (ITEM_BUSY).
-    Devuelve:
-      - {"ok": False, "error": "ITEM_BUSY", "until": "YYYY-MM-DD", "days_left": int}
-      - {"ok": True, "row": {...}}  (cuando sí lo crea)
-    """
-    # 1) Ocupación actual (hoy en tz negocio)
-    current = await get_current_blocking_rental_for_item(item_id)
-    if current:
-        end_dt = _parse_iso_to_date(current["end_date"])
-        days_left = max((end_dt - _today_business()).days, 0)
-        return {
-            "ok": False,
-            "error": "ITEM_BUSY",
-            "until": end_dt.isoformat(),
-            "days_left": days_left,
-        }
-
-    # 2) Si se especifican fechas, chequear solape
-    if start_iso and end_iso:
-        try:
-            _ = _parse_iso_to_date(start_iso)
-            _ = _parse_iso_to_date(end_iso)
-            overlaps = await get_overlapping_rentals(item_id, start_iso, end_iso)
-            if overlaps:
-                # Tomar el que termina antes para el mensaje
-                overlaps.sort(key=lambda r: r.get("end_date", "9999-12-31"))
-                end_dt = _parse_iso_to_date(overlaps[0]["end_date"])
-                days_left = max((end_dt - _today_business()).days, 0)
-                return {
-                    "ok": False,
-                    "error": "ITEM_BUSY",
-                    "until": end_dt.isoformat(),
-                    "days_left": days_left,
-                }
-        except Exception:
-            # Fechas inválidas: si quieres, podrías retornar un error distinto aquí.
-            pass
-
-    # 3) Si no está ocupado → crear consent como siempre
-    row = await create_consent(item_id, buyer_msisdn, seller_msisdn)
-    return {"ok": True, "row": row}
 
 # =========================
 # Rentals (endurecidos)
