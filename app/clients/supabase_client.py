@@ -418,6 +418,37 @@ async def get_listings_for_user(owner_wa: str) -> List[Dict[str, Any]]:
 # Consents (SIEMPRE NUEVOS)
 # =========================
 
+async def create_consent_guarded(item_id: str, buyer_msisdn: str, seller_msisdn: str, start_iso: str, end_iso: str) -> Dict[str, Any]:
+    """
+    Crea un consent SOLO si el artículo no está ocupado en [start_iso, end_iso].
+    Devuelve:
+      {"ok": True, "row": {...}} si se creó
+      {"ok": False, "error": "ITEM_BUSY", "until": "YYYY-MM-DD", "days_left": int} si hay un alquiler bloqueante
+      {"ok": False, "error": "INVALID_DATES"} si las fechas no son válidas
+    """
+    # Validación defensiva de fechas
+    if not _valid_date_window(start_iso, end_iso):
+        return {"ok": False, "error": "INVALID_DATES"}
+
+    # Anti-overbooking: si hay solape NO creamos el consent
+    overlaps = await get_overlapping_rentals(item_id, start_iso, end_iso)
+    if overlaps:
+        try:
+            # “Hasta cuándo” está bloqueado: tomamos el fin más lejano de los solapes
+            until_date = max(_parse_iso_to_date(o["end_date"]) for o in overlaps if o.get("end_date"))
+            return {
+                "ok": False,
+                "error": "ITEM_BUSY",
+                "until": until_date.isoformat(),
+                "days_left": days_left_until(until_date),
+            }
+        except Exception:
+            return {"ok": False, "error": "ITEM_BUSY"}
+
+    # Si está libre, creamos el consent normal
+    row = await create_consent(item_id, buyer_msisdn, seller_msisdn)
+    return {"ok": True, "row": row}
+
 async def create_consent(item_id: str, buyer_msisdn: str, seller_msisdn: str) -> Dict[str, Any]:
     """
     Crea SIEMPRE una nueva fila para cada solicitud.
