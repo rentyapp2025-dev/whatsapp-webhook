@@ -29,6 +29,8 @@ from .clients.supabase_client import (
     get_rental,
     _today_business,
     end_of_first_overlap,
+    # >>> añadido: consent con guardas de disponibilidad
+    create_consent_guarded,
 )
 
 # ======================
@@ -500,9 +502,32 @@ async def handle_interactive(msg: Dict[str, Any], st: Dict[str, Any], from_msisd
             draft["selected_payment_method"] = row_title
 
             seller, buyer = listing["owner_wa"], from_msisdn
-            cons_res = await upsert_consent(item_id, buyer, seller)
 
-            # soporta que upsert_consent devuelva {"row": {...}} o directamente {...}
+            # >>> cambio: crear consent con guardas de disponibilidad (evita solicitudes si está ocupado)
+            cons_res = await create_consent_guarded(item_id, buyer, seller, start_iso, end_iso)
+            if not cons_res or not cons_res.get("ok"):
+                if cons_res and cons_res.get("error") == "ITEM_BUSY":
+                    until_iso = cons_res.get("until")
+                    days_left = cons_res.get("days_left")
+                    try:
+                        until_human = _to_ve(until_iso) if until_iso else None
+                    except Exception:
+                        until_human = until_iso
+                    if until_human:
+                        dias = "día" if (days_left or 0) == 1 else "días"
+                        await send_text(
+                            from_msisdn,
+                            f"Este artículo ya está alquilado hasta *{until_human}* "
+                            + (f"(faltan *{days_left} {dias}*)." if days_left is not None else ".")
+                        )
+                    else:
+                        await send_text(from_msisdn, "Este artículo se encuentra alquilado en las fechas solicitadas.")
+                else:
+                    await send_text(from_msisdn, "No se pudo enviar la solicitud en este momento. Intenta con otras fechas.")
+                await set_session(from_msisdn, Step.RENTAL_WAIT_DATES, {"item_id": int(item_id)})
+                return
+
+            # soporta que create_consent_guarded devuelva {"ok": True, "row": {...}}
             row = cons_res.get("row", cons_res) if cons_res else {}
             consent_id = str(row["id"])
 

@@ -153,6 +153,28 @@ def days_left_until(d: date) -> int:
     """Días restantes hasta 'd' (incluyendo hoy) en tz de negocio."""
     return (d - _today_business()).days + 1
 
+# >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+# NUEVO: ocupación actual (hoy en tz de negocio)
+# >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+async def get_current_blocking_rental_for_item(item_id: int | str) -> Optional[Dict[str, Any]]:
+    """
+    Devuelve una renta bloqueante cuyo rango incluye 'hoy' (según BUSINESS_TZ).
+    """
+    today = _today_business().isoformat()
+    async with httpx.AsyncClient(timeout=12.0) as c:
+        params = {
+            "item_id": f"eq.{item_id}",
+            "status": f"in.({','.join(BLOCKING_STATUSES)})",
+            "select": "id,item_id,start_date,end_date,status,buyer_wa,seller_wa",
+            "and": f"(start_date.lte.{today},end_date.gte.{today})",
+            "order": "end_date.asc",
+            "limit": 1,
+        }
+        r = await c.get(f"{BASE}/rentals", headers=HEADERS, params=params)
+        r.raise_for_status()
+        rows = r.json() or []
+        return rows[0] if rows else None
+
 # =========================
 # Calendario / sugerencias
 # =========================
@@ -586,6 +608,61 @@ async def mark_introduced_once(item_id_or_consent_id: str) -> bool:
         upd.raise_for_status()
         rows = upd.json() or []
         return len(rows) > 0
+
+# >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+# NUEVO: crear consent con guardas de disponibilidad
+# >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+async def create_consent_guarded(
+    item_id: str,
+    buyer_msisdn: str,
+    seller_msisdn: str,
+    start_iso: Optional[str] = None,
+    end_iso: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Igual que create_consent, pero:
+      - Si hoy el artículo está ocupado → NO crea consent (ITEM_BUSY).
+      - Si se pasan fechas y hay solape con una renta bloqueante → NO crea consent (ITEM_BUSY).
+    Devuelve:
+      - {"ok": False, "error": "ITEM_BUSY", "until": "YYYY-MM-DD", "days_left": int}
+      - {"ok": True, "row": {...}}  (cuando sí lo crea)
+    """
+    # 1) Ocupación actual (hoy en tz negocio)
+    current = await get_current_blocking_rental_for_item(item_id)
+    if current:
+        end_dt = _parse_iso_to_date(current["end_date"])
+        days_left = max((end_dt - _today_business()).days, 0)
+        return {
+            "ok": False,
+            "error": "ITEM_BUSY",
+            "until": end_dt.isoformat(),
+            "days_left": days_left,
+        }
+
+    # 2) Si se especifican fechas, chequear solape
+    if start_iso and end_iso:
+        try:
+            _ = _parse_iso_to_date(start_iso)
+            _ = _parse_iso_to_date(end_iso)
+            overlaps = await get_overlapping_rentals(item_id, start_iso, end_iso)
+            if overlaps:
+                # Tomar el que termina antes para el mensaje
+                overlaps.sort(key=lambda r: r.get("end_date", "9999-12-31"))
+                end_dt = _parse_iso_to_date(overlaps[0]["end_date"])
+                days_left = max((end_dt - _today_business()).days, 0)
+                return {
+                    "ok": False,
+                    "error": "ITEM_BUSY",
+                    "until": end_dt.isoformat(),
+                    "days_left": days_left,
+                }
+        except Exception:
+            # Fechas inválidas: si quieres, podrías retornar un error distinto aquí.
+            pass
+
+    # 3) Si no está ocupado → crear consent como siempre
+    row = await create_consent(item_id, buyer_msisdn, seller_msisdn)
+    return {"ok": True, "row": row}
 
 # =========================
 # Rentals (endurecidos)
