@@ -14,6 +14,11 @@ class Step(str, Enum):
     RENTAL_EXTENSION_WAIT_DATES = "rental_extension_wait_dates"
     RENTAL_VIEW_ONE = "rental_view_one"
 
+    # 👇 FALTABAN ESTOS DOS (usados por handlers.py)
+    LISTING_VIEW_ONE = "listing_view_one"
+    LISTING_EDIT_WAIT = "listing_edit_wait"
+
+
 def step_val(st: Dict[str, Any] | None) -> str:
     v = (st or {}).get("step")
     return v.value if isinstance(v, Step) else v or Step.IDLE.value
