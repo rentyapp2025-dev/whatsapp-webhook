@@ -82,9 +82,15 @@ def _new_token() -> str:
     """Token de idempotencia simple para botones (previene doble tap)."""
     return uuid.uuid4().hex[:12]
 
+def _eq_msisdn(a: Optional[str], b: Optional[str]) -> bool:
+    """Compara teléfonos ignorando símbolos no numéricos (p. ej. +, espacios)."""
+    da = re.sub(r"\D", "", a or "")
+    db = re.sub(r"\D", "", b or "")
+    return da == db
+
 
 def _card_for_rental(r: Dict[str, Any], you_msisdn: str) -> str:
-    is_owner = r.get("seller_wa") == you_msisdn
+    is_owner = _eq_msisdn(r.get("seller_wa"), you_msisdn)
     role = "(Eres el dueño)" if is_owner else "(Eres el inquilino)"
     title = (r.get("listing") or {}).get("title", f"Artículo #{r['item_id']}")
     start, end = _to_ve(r['start_date']), _to_ve(r['end_date'])
@@ -143,7 +149,7 @@ async def _send_rental_management_menu(target_wa: str, rental: Dict[str, Any]):
     expected_version = rental.get("version")
     ver_suffix = f"_{expected_version}" if expected_version is not None else ""
 
-    is_renter = rental.get("buyer_wa") == target_wa
+    is_renter = _eq_msisdn(rental.get("buyer_wa"), target_wa)
 
     if status == "pending":
         buttons = [
@@ -394,8 +400,10 @@ async def handle_interactive(msg: Dict[str, Any], st: Dict[str, Any], from_msisd
             return
 
         if btn_id.startswith("rental_cancel_"):
-            rid = btn_id.split("_")[2]
-            await handle_cancellation_request(rid, from_msisdn)
+            parts = btn_id.split("_")
+            rid = parts[2]
+            token = parts[3] if len(parts) >= 4 else None
+            await handle_cancellation_request(rid, from_msisdn, action_token=token)
             return
 
         if btn_id.startswith("rental_extend_"):
@@ -439,7 +447,7 @@ async def handle_interactive(msg: Dict[str, Any], st: Dict[str, Any], from_msisd
                 if not r:
                     await send_text(from_msisdn, "No encontré esa renta.")
                     return
-                if from_msisdn not in (r["buyer_wa"], r["seller_wa"]):
+                if not (_eq_msisdn(from_msisdn, r["buyer_wa"]) or _eq_msisdn(from_msisdn, r["seller_wa"])):
                     await send_text(from_msisdn, "No puedes reseñar una renta en la que no participaste.")
                     return
 
@@ -450,7 +458,7 @@ async def handle_interactive(msg: Dict[str, Any], st: Dict[str, Any], from_msisd
                     "awaiting_review": {"rental_id": rid, "reviewee_wa": reviewee}
                 })
 
-                quien = "comprador" if reviewee == r["buyer_wa"] else "dueño"
+                quien = "comprador" if _eq_msisdn(reviewee, r["buyer_wa"]) else "dueño"
                 await send_text(
                     from_msisdn,
                     f"Califica al *{quien}* con un número del *1 al 5* y, si quieres, agrega un comentario.\n"
@@ -469,7 +477,7 @@ async def handle_interactive(msg: Dict[str, Any], st: Dict[str, Any], from_msisd
                 if not r:
                     await send_text(from_msisdn, "No encontré esa renta.")
                     return
-                if from_msisdn not in (r["buyer_wa"], r["seller_wa"]):
+                if not (_eq_msisdn(from_msisdn, r["buyer_wa"]) or _eq_msisdn(from_msisdn, r["seller_wa"])):
                     await send_text(from_msisdn, "No puedes reportar una renta en la que no participaste.")
                     return
 
@@ -727,7 +735,7 @@ async def handle_text(msg: Dict[str, Any], st: Dict[str, Any], from_msisdn: str)
         try:
             rid = int(draft["awaiting_report"]["rental_id"])
             r = await get_rental(rid)
-            other = r["buyer_wa"] if from_msisdn == r["seller_wa"] else r["seller_wa"]
+            other = r["buyer_wa"] if _eq_msisdn(from_msisdn, r["seller_wa"]) else r["seller_wa"]
             await send_text(from_msisdn, "⚠️ Reporte recibido. Nuestro equipo lo revisará.")
             try:
                 await send_text(other, f"El otro usuario abrió un reporte sobre la renta #{rid}:\n\"{text[:500]}\"")
@@ -762,7 +770,7 @@ async def handle_text(msg: Dict[str, Any], st: Dict[str, Any], from_msisdn: str)
         if upper in {"NO AUTORIZO", "NO, AUTORIZO", "NO", "NO ACEPTO"}:
             cons = await set_consent_flag_by_id(consent_id, from_msisdn, ok=False)
             if cons:
-                other = cons["seller_wa"] if from_msisdn == cons["buyer_wa"] else cons["buyer_wa"]
+                other = cons["seller_wa"] if _eq_msisdn(from_msisdn, cons["buyer_wa"]) else cons["buyer_wa"]
                 await send_text(from_msisdn, "Entendido. Tu decisión fue registrada.")
                 await send_text(other, "La otra parte ha rechazado la solicitud. La operación se canceló.")
                 await set_session(from_msisdn, Step.IDLE, {})
@@ -781,7 +789,7 @@ async def handle_text(msg: Dict[str, Any], st: Dict[str, Any], from_msisdn: str)
         if not listing:
             await send_text(from_msisdn, f"No encontré un artículo con el ID #{item_id}.")
             return
-        if listing['owner_wa'] == from_msisdn:
+        if _eq_msisdn(listing['owner_wa'], from_msisdn):
             await send_text(from_msisdn, "No puedes alquilar tu propio artículo.")
             return
         if listing.get("status") != "active":
@@ -887,7 +895,7 @@ async def handle_text(msg: Dict[str, Any], st: Dict[str, Any], from_msisdn: str)
     if upper.startswith("MIS PUBLICACIONES #") or re.match(r"^MIS\s+PUBLICACIONES\s*[#№]\d+", upper):
         lid = int(re.search(r"[#№](\d+)", text).group(1))
         lst = await get_listing(str(lid))
-        if not lst or lst.get("owner_wa") != from_msisdn:
+        if not lst or not _eq_msisdn(lst.get("owner_wa"), from_msisdn):
             await send_text(from_msisdn, f"No encontré tu publicación #{lid}.")
             return
         await _send_listing_management_menu(from_msisdn, lst)
@@ -958,7 +966,6 @@ async def handle_text(msg: Dict[str, Any], st: Dict[str, Any], from_msisdn: str)
         await send_main_menu(from_msisdn)
         return
 
-    # ===== Edición de publicación (entrada del nuevo valor) =====
     # ===== Edición de publicación (entrada del nuevo valor) =====
     if s == Step.LISTING_EDIT_WAIT:
         try:
@@ -1156,7 +1163,7 @@ async def handle_text(msg: Dict[str, Any], st: Dict[str, Any], from_msisdn: str)
         lid = int(m.group(1))
         lst = await get_listing(str(lid))
         await set_session(from_msisdn, Step.IDLE, {})
-        if not lst or lst.get("owner_wa") != from_msisdn:
+        if not lst or not _eq_msisdn(lst.get("owner_wa"), from_msisdn):
             await send_text(from_msisdn, f"No encontré tu publicación #{lid}.")
             await send_main_menu(from_msisdn)
             return
@@ -1173,7 +1180,7 @@ async def handle_text(msg: Dict[str, Any], st: Dict[str, Any], from_msisdn: str)
             if not listing:
                 await send_text(from_msisdn, f"No encontré un artículo con el ID #{item_id}.")
                 return
-            if listing['owner_wa'] == from_msisdn:
+            if _eq_msisdn(listing['owner_wa'], from_msisdn):
                 await send_text(from_msisdn, "No puedes alquilar tu propio artículo.")
                 return
             if listing.get("status") != "active":
@@ -1255,12 +1262,12 @@ async def get_intent_from_llm(text: str) -> Optional[Dict[str, Any]]:
         return None
 
 
-async def handle_cancellation_request(rental_id_str: str, requester_wa: str):
+async def handle_cancellation_request(rental_id_str: str, requester_wa: str, *, action_token: Optional[str] = None):
     if not rental_id_str.isdigit():
         await send_text(requester_wa, "Proporciona un ID de renta válido.")
         return
     try:
-        result = await request_rental_cancellation(int(rental_id_str), requester_wa)
+        result = await request_rental_cancellation(int(rental_id_str), requester_wa, action_token=action_token)
         status = result.get("status")
         if status == "CANCELLED":
             for party in result.get("parties", []):
@@ -1290,7 +1297,8 @@ async def handle_rental_confirmation(btn_id: str, from_msisdn: str):
     try:
         parts = btn_id.split("_")
         rental_id = int(parts[2])
-        result = await confirm_rental_start(rental_id, from_msisdn)
+        action_token = parts[3] if len(parts) >= 4 else None
+        result = await confirm_rental_start(rental_id, from_msisdn, action_token=action_token)
         status = result.get("status")
         if status == "ACTIVATED":
             for wa in result.get("parties", []):

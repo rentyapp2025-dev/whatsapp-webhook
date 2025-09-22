@@ -926,7 +926,8 @@ async def request_rental_extension(
       - Sin solapes en (end_actual+1 .. new_end).
       - Usa version para concurrencia.
     """
-    if not await _idempotentent_check_and_register(action_token):
+    # 🔧 Fix: nombre correcto de la función de idempotencia
+    if not await _idempotent_check_and_register(action_token):
         return {"status": "IDEMPOTENT_OK"}
 
     try:
