@@ -796,6 +796,28 @@ async def handle_text(msg: Dict[str, Any], st: Dict[str, Any], from_msisdn: str)
             await send_text(from_msisdn, "Este artículo no está disponible para nuevas rentas.")
             return
 
+        # 🛑 NUEVO: si el artículo tiene una renta ACTIVA hoy, lo informamos y NO pedimos nada más
+        try:
+            bookings = await get_future_bookings(item_id)
+        except Exception:
+            bookings = []
+        today = _today_business()
+        for bs, be in (bookings or []):
+            if bs <= today <= be:
+                fin = be.strftime("%d/%m/%Y")
+                left = (be - today).days + 1
+                if left < 1:
+                    left = 1
+                dias = "día" if left == 1 else "días"
+                await send_text(
+                    from_msisdn,
+                    f"Este artículo está *alquilado* hasta el *{fin}* (faltan *{left} {dias}*)."
+                )
+                await set_session(from_msisdn, Step.IDLE, {})
+                await send_main_menu(from_msisdn)
+                return
+
+        # Si no está alquilado HOY, continuamos como siempre
         dates = _extract_dates(text)
         if dates:
             start_iso, end_iso = dates
@@ -818,30 +840,6 @@ async def handle_text(msg: Dict[str, Any], st: Dict[str, Any], from_msisdn: str)
             rows = [{"id": p.replace(" ", "_"), "title": p} for p in payment_options]
             await send_list(from_msisdn, f"Alquiler de #{item_id}", "Selecciona tu método de pago:", "Ver Pagos", rows)
         else:
-            try:
-                bookings = await get_future_bookings(item_id)
-            except Exception:
-                bookings = []
-            today = _today_business()
-            busy_end = None
-            for bs, be in (bookings or []):
-                if bs <= today <= be:
-                    busy_end = be
-                    break
-            if busy_end:
-                fin = busy_end.strftime("%d/%m/%Y")
-                left = (busy_end - today).days + 1
-                if left < 1:
-                    left = 1
-                dias = "día" if left == 1 else "días"
-                await send_text(
-                    from_msisdn,
-                    f"Este artículo está *alquilado* hasta el *{fin}* (faltan *{left} {dias}*)."
-                )
-                await set_session(from_msisdn, Step.IDLE, {})
-                await send_main_menu(from_msisdn)
-                return
-
             await set_session(from_msisdn, Step.RENTAL_WAIT_DATES, {"item_id": int(item_id)})
             await send_text(from_msisdn, f"Perfecto. Ahora, indica las *fechas* que necesitas para el artículo #{item_id} (formato: DD/MM/AAAA a DD/MM/AAAA).")
         return
@@ -1186,6 +1184,28 @@ async def handle_text(msg: Dict[str, Any], st: Dict[str, Any], from_msisdn: str)
             if listing.get("status") != "active":
                 await send_text(from_msisdn, "Este artículo no está disponible para nuevas rentas.")
                 return
+
+            # 🛑 Misma regla: si está alquilado HOY, informamos y no pedimos nada
+            try:
+                bookings = await get_future_bookings(item_id)
+            except Exception:
+                bookings = []
+            today = _today_business()
+            for bs, be in (bookings or []):
+                if bs <= today <= be:
+                    fin = be.strftime("%d/%m/%Y")
+                    left = (be - today).days + 1
+                    if left < 1:
+                        left = 1
+                    dias = "día" if left == 1 else "días"
+                    await send_text(
+                        from_msisdn,
+                        f"Este artículo está *alquilado* hasta el *{fin}* (faltan *{left} {dias}*)."
+                    )
+                    await set_session(from_msisdn, Step.IDLE, {})
+                    await send_main_menu(from_msisdn)
+                    return
+
             dates = _extract_dates(dates_text) if dates_text else None
             if dates:
                 start_iso, end_iso = dates
