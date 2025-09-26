@@ -88,6 +88,10 @@ def _eq_msisdn(a: Optional[str], b: Optional[str]) -> bool:
     db = re.sub(r"\D", "", b or "")
     return da == db
 
+def _norm_msisdn(x: Optional[str]) -> str:
+    """Normaliza MSISDN a solo dígitos (útil para WhatsApp send_*)."""
+    return re.sub(r"\D", "", x or "")
+
 
 def _card_for_rental(r: Dict[str, Any], you_msisdn: str) -> str:
     is_owner = _eq_msisdn(r.get("seller_wa"), you_msisdn)
@@ -283,7 +287,7 @@ async def _send_post_agreement_menus(buyer_wa: str, seller_wa: str, item_id: str
         {"id": f"rental_confirm_{rental_id}_{tok_b}", "title": "✅ Confirmar inicio"},
         {"id": f"rental_cancel_{rental_id}_{tok_b}", "title": "❌ Cancelar"},
     ]
-    await send_reply_buttons(buyer_wa, "Gestión de Renta", body_buyer, buttons_buyer)
+    await send_reply_buttons(_norm_msisdn(buyer_wa), "Gestión de Renta", body_buyer, buttons_buyer)
 
     body_seller = (
         body_common
@@ -295,7 +299,7 @@ async def _send_post_agreement_menus(buyer_wa: str, seller_wa: str, item_id: str
         {"id": f"rental_confirm_{rental_id}_{tok_s}", "title": "✅ Confirmar inicio"},
         {"id": f"rental_cancel_{rental_id}_{tok_s}", "title": "❌ Cancelar"},
     ]
-    await send_reply_buttons(seller_wa, "Gestión de Renta", body_seller, buttons_seller)
+    await send_reply_buttons(_norm_msisdn(seller_wa), "Gestión de Renta", body_seller, buttons_seller)
 
 
 # =========================
@@ -320,17 +324,17 @@ async def finalize_and_introduce(consent_id: str, actor_msisdn: str):
     if 'start_iso' in draft and 'end_iso' in draft and 'selected_payment_method' in draft:
         listing = await get_listing(item_id)
         if not listing or listing.get("status") != "active":
-            await send_text(buyer_wa, "La publicación ya no está activa; no se pudo crear la renta.")
+            await send_text(_norm_msisdn(buyer_wa), "La publicación ya no está activa; no se pudo crear la renta.")
         elif not _validate_date_window(draft['start_iso'], draft['end_iso']):
-            await send_text(buyer_wa, "Las fechas ya no son válidas. Intenta proponer un nuevo rango.")
+            await send_text(_norm_msisdn(buyer_wa), "Las fechas ya no son válidas. Intenta proponer un nuevo rango.")
         elif not await is_item_available(item_id, draft['start_iso'], draft['end_iso']):
             bookings = await get_future_bookings(item_id, from_iso=draft['start_iso'])
             s_d = _safe_date(draft['start_iso']); e_d = _safe_date(draft['end_iso'])
             if s_d and e_d and bookings:
                 overlap_end = end_of_first_overlap(bookings, s_d, e_d)
-                await send_text(buyer_wa, _format_collision_message(overlap_end))
+                await send_text(_norm_msisdn(buyer_wa), _format_collision_message(overlap_end))
             else:
-                await send_text(buyer_wa, "Ese rango ya fue tomado. Propón nuevas fechas.")
+                await send_text(_norm_msisdn(buyer_wa), "Ese rango ya fue tomado. Propón nuevas fechas.")
         else:
             r = await create_rental_request(
                 int(item_id), buyer_wa, draft['start_iso'], draft['end_iso'], draft['selected_payment_method']
@@ -345,8 +349,8 @@ async def finalize_and_introduce(consent_id: str, actor_msisdn: str):
             f"¡Acuerdo logrado para el artículo #{item_id}! "
             "Hemos compartido sus contactos para coordinar detalles."
         )
-        await send_text(buyer_wa, f"{base_msg}\nVendedor: {seller_name} ({seller_wa})")
-        await send_text(seller_wa, f"{base_msg}\nComprador: {buyer_name} ({buyer_wa})")
+        await send_text(_norm_msisdn(buyer_wa), f"{base_msg}\nVendedor: {seller_name} ({seller_wa})")
+        await send_text(_norm_msisdn(seller_wa), f"{base_msg}\nComprador: {buyer_name} ({buyer_wa})")
 
         if rental_id_str:
             info = (
@@ -354,8 +358,8 @@ async def finalize_and_introduce(consent_id: str, actor_msisdn: str):
                 f"(del { _to_ve(draft['start_iso']) } al { _to_ve(draft['end_iso']) }).\n"
                 "Pulsa *Confirmar inicio* cuando esté todo listo. La renta se activará cuando ambos confirmen."
             )
-            await send_text(buyer_wa, info)
-            await send_text(seller_wa, info)
+            await send_text(_norm_msisdn(buyer_wa), info)
+            await send_text(_norm_msisdn(seller_wa), info)
             await _send_post_agreement_menus(buyer_wa, seller_wa, item_id, rental_id_str)
 
     if actor_msisdn != buyer_wa:
@@ -388,7 +392,7 @@ async def handle_interactive(msg: Dict[str, Any], st: Dict[str, Any], from_msisd
             elif answer == "no":
                 other = cons["seller_wa"] if from_msisdn == cons["buyer_wa"] else cons["buyer_wa"]
                 await send_text(from_msisdn, "Entendido. Tu decisión fue registrada.")
-                await send_text(other, "La otra parte ha rechazado la solicitud. La operación se canceló.")
+                await send_text(_norm_msisdn(other), "La otra parte ha rechazado la solicitud. La operación se canceló.")
                 await set_session(from_msisdn, Step.IDLE, {})
             else:
                 await send_text(from_msisdn, "Gracias. Esperamos la respuesta de la otra parte.")
@@ -427,7 +431,7 @@ async def handle_interactive(msg: Dict[str, Any], st: Dict[str, Any], from_msisd
                 res = await request_rental_extension(rid_int, from_msisdn, end_iso)
                 if res.get("status") == "EXTENDED":
                     for wa in res.get("parties", []):
-                        await send_text(wa, f"✅ La renta #{rid_int} fue *extendida* hasta *{_to_ve(end_iso)}* por mutuo acuerdo.")
+                        await send_text(_norm_msisdn(wa), f"✅ La renta #{rid_int} fue *extendida* hasta *{_to_ve(end_iso)}* por mutuo acuerdo.")
                 elif res.get("status") == "EXTENSION_PENDING":
                     await send_text(from_msisdn, "Tu respuesta fue registrada. Falta la confirmación de la otra parte.")
                 else:
@@ -655,12 +659,13 @@ async def handle_interactive(msg: Dict[str, Any], st: Dict[str, Any], from_msisd
                              "¿Aceptas compartir tu contacto para coordinar?")
             seller_buttons = [{"id": f"consent_yes_{consent_id}", "title": "Sí, acepto"},
                               {"id": f"consent_no_{consent_id}", "title": "No, gracias"}]
-            await send_reply_buttons(seller, "Confirmación de Alquiler", msg_to_seller, seller_buttons)
+            # ⬇️ Normalizamos MSISDN al enviar al dueño
+            await send_reply_buttons(_norm_msisdn(seller), "Confirmación de Alquiler", msg_to_seller, seller_buttons)
 
-            await send_text(buyer, "¡Excelente! Hemos enviado tu solicitud al dueño. Para continuar, solo falta tu autorización final para compartir tu contacto.")
+            await send_text(_norm_msisdn(buyer), "¡Excelente! Hemos enviado tu solicitud al dueño. Para continuar, solo falta tu autorización final para compartir tu contacto.")
             buyer_buttons = [{"id": f"consent_yes_{consent_id}", "title": "Sí, autorizo"},
                              {"id": f"consent_no_{consent_id}", "title": "No autorizo"}]
-            await send_reply_buttons(buyer, "Autorización Final", "¿Autorizas compartir tu contacto con el vendedor?", buyer_buttons)
+            await send_reply_buttons(_norm_msisdn(buyer), "Autorización Final", "¿Autorizas compartir tu contacto con el vendedor?", buyer_buttons)
             return
 
         # Menú principal
@@ -738,7 +743,7 @@ async def handle_text(msg: Dict[str, Any], st: Dict[str, Any], from_msisdn: str)
             other = r["buyer_wa"] if _eq_msisdn(from_msisdn, r["seller_wa"]) else r["seller_wa"]
             await send_text(from_msisdn, "⚠️ Reporte recibido. Nuestro equipo lo revisará.")
             try:
-                await send_text(other, f"El otro usuario abrió un reporte sobre la renta #{rid}:\n\"{text[:500]}\"")
+                await send_text(_norm_msisdn(other), f"El otro usuario abrió un reporte sobre la renta #{rid}:\n\"{text[:500]}\"")
             except Exception:
                 pass
         except Exception as e:
@@ -772,7 +777,7 @@ async def handle_text(msg: Dict[str, Any], st: Dict[str, Any], from_msisdn: str)
             if cons:
                 other = cons["seller_wa"] if _eq_msisdn(from_msisdn, cons["buyer_wa"]) else cons["buyer_wa"]
                 await send_text(from_msisdn, "Entendido. Tu decisión fue registrada.")
-                await send_text(other, "La otra parte ha rechazado la solicitud. La operación se canceló.")
+                await send_text(_norm_msisdn(other), "La otra parte ha rechazado la solicitud. La operación se canceló.")
                 await set_session(from_msisdn, Step.IDLE, {})
                 await send_main_menu(from_msisdn)
             else:
@@ -1119,13 +1124,13 @@ async def handle_text(msg: Dict[str, Any], st: Dict[str, Any], from_msisdn: str)
             await send_text(from_msisdn, f"Solicitud de extensión registrada hasta *{_to_ve(end_iso)}*. La otra parte debe confirmarla.")
             buttons = [{"id": f"rental_ext_accept_{rental_id}_{end_iso[:10]}", "title": "✅ Aceptar extensión"}]
             body = (f"El otro usuario solicita *extender* la renta #{rental_id} hasta *{_to_ve(end_iso)}*.\n\nElige una opción:")
-            await send_reply_buttons(other, "Extensión de Renta", body, buttons)
+            await send_reply_buttons(_norm_msisdn(other), "Extensión de Renta", body, buttons)
             await set_session(from_msisdn, Step.IDLE, {})
             await send_main_menu(from_msisdn)
 
         elif status == "EXTENDED":
             for party in result.get("parties", []):
-                await send_text(party, f"¡Listo! La renta #{rental_id} fue extendida hasta *{_to_ve(end_iso)}* por mutuo acuerdo.")
+                await send_text(_norm_msisdn(party), f"¡Listo! La renta #{rental_id} fue extendida hasta *{_to_ve(end_iso)}* por mutuo acuerdo.")
             await set_session(from_msisdn, Step.IDLE, {})
             await send_main_menu(from_msisdn)
 
@@ -1291,12 +1296,12 @@ async def handle_cancellation_request(rental_id_str: str, requester_wa: str, *, 
         status = result.get("status")
         if status == "CANCELLED":
             for party in result.get("parties", []):
-                await send_text(party, f"✅ La renta #{rental_id_str} ha sido cancelada por mutuo acuerdo.")
+                await send_text(_norm_msisdn(party), f"✅ La renta #{rental_id_str} ha sido cancelada por mutuo acuerdo.")
         elif status == "WAITING_OTHER":
             await send_text(requester_wa, "👍 Solicitud de cancelación enviada. La otra parte debe confirmarla para que sea efectiva.")
             msg_to_other = (f"⚠️ El otro usuario ha solicitado cancelar la renta #{rental_id_str}.\n\n"
                             f"Para aceptar, responde: CANCELAR RENTA #{rental_id_str}")
-            await send_text(result.get("other_party"), msg_to_other)
+            await send_text(_norm_msisdn(result.get("other_party")), msg_to_other)
         elif status == "NOT_FOUND":
             await send_text(requester_wa, f"No se encontró una renta con el ID #{rental_id_str}.")
         else:
@@ -1322,11 +1327,11 @@ async def handle_rental_confirmation(btn_id: str, from_msisdn: str):
         status = result.get("status")
         if status == "ACTIVATED":
             for wa in result.get("parties", []):
-                await send_text(wa, f"✅ Renta #{rental_id} *confirmada por ambas partes*. Estado: *ACTIVA*.")
+                await send_text(_norm_msisdn(wa), f"✅ Renta #{rental_id} *confirmada por ambas partes*. Estado: *ACTIVA*.")
         elif status == "WAITING_OTHER":
             other = result.get("other_party")
             await send_text(from_msisdn, "👍 Tu confirmación fue registrada. Falta la otra parte.")
-            await send_text(other, f"⚠️ La otra parte confirmó el inicio de la renta #{rental_id}. Entra a *Gestión de Renta* y pulsa *Confirmar inicio* para activarla.")
+            await send_text(_norm_msisdn(other), f"⚠️ La otra parte confirmó el inicio de la renta #{rental_id}. Entra a *Gestión de Renta* y pulsa *Confirmar inicio* para activarla.")
         elif status == "INVALID" and result.get("reason") == "OUT_OF_WINDOW":
             await send_text(from_msisdn, "Aún no puede activarse: solo se activa dentro del rango de fechas acordado.")
         elif status == "INVALID":
