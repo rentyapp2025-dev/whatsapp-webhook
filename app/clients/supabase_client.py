@@ -712,6 +712,118 @@ async def mark_introduced_once(item_id_or_consent_id: str) -> bool:
         rows = upd.json() or []
         return len(rows) > 0
 
+# =========================
+# Gestión post-renta (reviews & issues) - NUEVO
+# =========================
+
+async def get_rental_by_id(rental_id: int) -> Optional[Dict[str, Any]]:
+    """Carga mínima para validaciones de gestión post-renta."""
+    async with httpx.AsyncClient(timeout=10.0) as c:
+        r = await c.get(
+            f"{BASE}/rentals",
+            headers=HEADERS,
+            params={"id": f"eq.{rental_id}", "select": "id,status,buyer_wa,seller_wa,start_date,end_date,tz,completed_at", "limit": 1},
+        )
+        r.raise_for_status()
+        rows = r.json() or []
+        return rows[0] if rows else None
+
+async def get_user_role_in_rental(rental_id: int, wa: str) -> Optional[str]:
+    """Retorna 'buyer' | 'seller' | None."""
+    rental = await get_rental_by_id(rental_id)
+    if not rental:
+        return None
+    if _norm_phone(wa) == _norm_phone(rental.get("buyer_wa")):
+        return "buyer"
+    if _norm_phone(wa) == _norm_phone(rental.get("seller_wa")):
+        return "seller"
+    return None
+
+async def has_user_reviewed(rental_id: int, wa: str) -> bool:
+    async with httpx.AsyncClient(timeout=10.0) as c:
+        r = await c.get(
+            f"{BASE}/reviews",
+            headers=HEADERS,
+            params={"rental_id": f"eq.{rental_id}", "reviewer_wa": f"eq.{_norm_phone(wa)}", "select": "id", "limit": 1},
+        )
+        r.raise_for_status()
+        return bool(r.json())
+
+async def has_user_reported_issue(rental_id: int, wa: str) -> bool:
+    async with httpx.AsyncClient(timeout=10.0) as c:
+        r = await c.get(
+            f"{BASE}/rental_issues",
+            headers=HEADERS,
+            params={"rental_id": f"eq.{rental_id}", "reporter_wa": f"eq.{_norm_phone(wa)}", "select": "id", "limit": 1},
+        )
+        r.raise_for_status()
+        return bool(r.json())
+
+async def insert_review(rental_id: int, reviewer_wa: str, rating: int, comment: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Inserta reseña mínima. Los triggers en DB validan:
+    - rental status 'completed'
+    - pertenencia (buyer/seller)
+    - exclusión con issues
+    - autocompletar reviewed_wa
+    """
+    payload = {
+        "rental_id": rental_id,
+        "reviewer_wa": _norm_phone(reviewer_wa),
+        "rating": int(rating),
+    }
+    if comment:
+        payload["comment"] = comment
+    async with httpx.AsyncClient(timeout=10.0) as c:
+        r = await c.post(
+            f"{BASE}/reviews",
+            headers=HEADERS_RETURN,
+            json=payload,
+            params={"select": "id,rental_id,reviewer_wa,reviewed_wa,rating,comment,created_at"},
+        )
+        r.raise_for_status()
+        rows = r.json() or []
+        return rows[0] if rows else {}
+
+async def insert_issue(rental_id: int, reporter_wa: str, issue_type: str, notes: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Inserta issue. Triggers validan rol/tipo y exclusión con reseñas.
+    issue_type:
+      - seller: 'no_entregado' | 'entregado_con_danos'
+      - buyer : 'problema_general'
+    """
+    payload = {
+        "rental_id": rental_id,
+        "reporter_wa": _norm_phone(reporter_wa),
+        "issue_type": issue_type,
+    }
+    if notes:
+        payload["notes"] = notes
+    async with httpx.AsyncClient(timeout=10.0) as c:
+        r = await c.post(
+            f"{BASE}/rental_issues",
+            headers=HEADERS_RETURN,
+            json=payload,
+            params={"select": "id,rental_id,reporter_wa,issue_type,notes,created_at"},
+        )
+        r.raise_for_status()
+        rows = r.json() or []
+        return rows[0] if rows else {}
+
+async def get_pending_feedback(wa: str) -> List[Dict[str, Any]]:
+    """Usa la vista v_pending_feedback para listar rentals completados aún no gestionados por el usuario."""
+    async with httpx.AsyncClient(timeout=10.0) as c:
+        r = await c.get(
+            f"{BASE}/v_pending_feedback",
+            headers=HEADERS,
+            params={"user_wa": f"eq.{_norm_phone(wa)}", "select": "*"},
+        )
+        r.raise_for_status()
+        return r.json() or []
+
+# =========================
+# (Legacy) creación directa sin triggers
+# =========================
 async def create_review(rental_id: int, reviewer_wa: str, reviewed_wa: str, rating: int, comment: str | None):
     payload = {
         "rental_id": rental_id,

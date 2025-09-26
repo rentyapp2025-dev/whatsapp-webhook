@@ -531,7 +531,7 @@ async def handle_interactive(msg: Dict[str, Any], st: Dict[str, Any], from_msisd
             await send_reply_buttons(
                 from_msisdn,
                 "Califica tu experiencia",
-                "Elige tu calificación (puedes escribir un comentario después).",
+                "Elige tu calificación.",
                 rate_btns
             )
             return
@@ -539,16 +539,11 @@ async def handle_interactive(msg: Dict[str, Any], st: Dict[str, Any], from_msisd
         if btn_id.startswith("review_rate_"):
             parts = btn_id.split("_")
             rid = int(parts[2]); rating = int(parts[3])
-            # comentario opcional si responde luego por texto: usamos flujo existente awaiting_review
-            await set_session(from_msisdn, s, {
-                **(st.get("draft") or {}),
-                "awaiting_review": {"rental_id": rid, "reviewee_wa": None}
-            })
-            # Guardamos directo sin comentario usando tu add_review (que resuelve reviewed_wa internamente)
+            # Guardamos directo sin comentario (evita conflicto por única reseña)
             try:
                 res = await add_review(rid, from_msisdn, rating, "")
                 if res.get("ok"):
-                    await send_text(from_msisdn, "✅ ¡Gracias! Calificación registrada. Si quieres, envía ahora un comentario adicional en este mismo chat.")
+                    await send_text(from_msisdn, "✅ ¡Gracias! Calificación registrada.")
                 else:
                     await send_text(from_msisdn, f"No se pudo guardar la reseña: {res.get('error','intenta más tarde')}")
             except Exception as e:
@@ -558,16 +553,32 @@ async def handle_interactive(msg: Dict[str, Any], st: Dict[str, Any], from_msisd
 
         if btn_id.startswith("report_start_"):
             rid = int(btn_id.split("_")[2])
-            opts = [
-                {"id": f"report_pick_{rid}_not_delivered", "title": "📦 No entregado"},
-                {"id": f"report_pick_{rid}_damaged", "title": "🔧 Entregado con daños"},
-            ]
-            await send_reply_buttons(
-                from_msisdn,
-                "Reportar problema",
-                "Selecciona el tipo de problema:",
-                opts
-            )
+            # Determinar rol para ajustar UX
+            r = await get_rental(rid)
+            if not r or not _eligible_to_close(r):
+                await send_text(from_msisdn, "Ese alquiler no está disponible para gestionar.")
+                return
+            is_seller = _eq_msisdn(r.get("seller_wa"), from_msisdn)
+            if is_seller:
+                opts = [
+                    {"id": f"report_pick_{rid}_not_delivered", "title": "📦 No entregado"},
+                    {"id": f"report_pick_{rid}_damaged", "title": "🔧 Entregado con daños"},
+                ]
+                await send_reply_buttons(
+                    from_msisdn,
+                    "Reportar problema",
+                    "Selecciona el tipo de problema:",
+                    opts
+                )
+            else:
+                # Buyer: problema general por texto
+                await set_session(from_msisdn, Step.IDLE, {
+                    "awaiting_report": {"rental_id": rid, "kind": "general"}
+                })
+                await send_text(
+                    from_msisdn,
+                    "Cuéntanos brevemente el *problema general* con la renta (máx. 500 caracteres)."
+                )
             return
 
         if btn_id.startswith("report_pick_"):
@@ -865,13 +876,14 @@ async def handle_text(msg: Dict[str, Any], st: Dict[str, Any], from_msisdn: str)
     if isinstance(draft, dict) and draft.get("awaiting_report"):
         try:
             rid = int(draft["awaiting_report"]["rental_id"])
-            # Registramos como 'damaged' por defecto si viene texto sin tipo explícito
-            await create_issue(rid, from_msisdn, "damaged", text[:500] or None)
+            kind = (draft["awaiting_report"].get("kind") or "damaged")
+            note = text[:500] or None
+            await create_issue(rid, from_msisdn, kind, note)
             await send_text(from_msisdn, "⚠️ Reporte recibido. Nuestro equipo lo revisará.")
             try:
                 r = await get_rental(rid)
                 other = r["buyer_wa"] if _eq_msisdn(from_msisdn, r["seller_wa"]) else r["seller_wa"]
-                await send_text(_norm_msisdn(other), f"El otro usuario abrió un reporte sobre la renta #{rid}:\n\"{text[:500]}\"")
+                await send_text(_norm_msisdn(other), f"El otro usuario abrió un reporte sobre la renta #{rid}:\n\"{(note or '')}\"")
             except Exception:
                 pass
         except Exception as e:

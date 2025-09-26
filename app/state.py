@@ -3,37 +3,66 @@ from enum import Enum
 from typing import Any, Dict, Optional, Tuple
 from datetime import datetime, date
 
+# =====================================================
+# Conversational steps (state machine)
+# =====================================================
+
 class Step(str, Enum):
+    # Estado base
     IDLE = "idle"
+
+    # Publicar anuncio
     PUBLISH_TITLE = "publish_title"
     PUBLISH_PRICE = "publish_price"
     PUBLISH_ZONE = "publish_zone"
     PUBLISH_PAYMENTS = "publish_payments"
+
+    # Flujo de renta (crear / extender / ver)
     RENTAL_WAIT_DATES = "rental_wait_dates"
     RENTAL_WAIT_PAYMENT = "rental_wait_payment"
     RENTAL_EXTENSION_WAIT_DATES = "rental_extension_wait_dates"
     RENTAL_VIEW_ONE = "rental_view_one"
 
-    # 👇 FALTABAN ESTOS DOS (usados por handlers.py)
+    # Listings (ver / editar)
     LISTING_VIEW_ONE = "listing_view_one"
     LISTING_EDIT_WAIT = "listing_edit_wait"
 
+    # =================================================
+    # Gestión de rental COMPLETADO (feedback/Post-mortem)
+    # =================================================
+    # 1) Usuario envía ID del rental que quiere gestionar
+    MANAGE_RENTAL_ID = "manage_rental_id"
+    # 2) Menú de acción (⭐ Reseñar | ⚠️ Reportar problema)
+    MANAGE_RENTAL_ACTION = "manage_rental_action"
+    # 3) Reseña
+    REVIEW_RATING = "review_rating"        # espera 1..5
+    REVIEW_COMMENT = "review_comment"      # comentario opcional
+    # 4) Reporte de problema
+    ISSUE_TYPE = "issue_type"              # buyer: problema_general; seller: no_entregado / entregado_con_danos
+    ISSUE_NOTES = "issue_notes"            # notas opcionales
+
 
 def step_val(st: Dict[str, Any] | None) -> str:
+    """
+    Devuelve el valor string del paso actual de la sesión.
+    Si no hay step, vuelve a IDLE.
+    """
     v = (st or {}).get("step")
-    return v.value if isinstance(v, Step) else v or Step.IDLE.value
+    return v.value if isinstance(v, Step) else (v or Step.IDLE.value)
 
 
 # ===========================
 # Fechas / utilidades robustas
 # ===========================
+
 # Aceptamos separadores comunes día/mes/año
 _DATE_SEP = r"[\/\-.]"  # /  -  .
-# Patron DD{sep}MM{sep}YYYY con ceros a la izquierda
+# Patrón DD{sep}MM{sep}YYYY con ceros a la izquierda
 _DDMMYYYY = rf"(\d{{2}}){_DATE_SEP}(\d{{2}}){_DATE_SEP}(\d{{4}})"
 
 # Separadores de rango comunes: 'a', 'al', 'hasta', '-', '–'
 _RANGE_SEP = r"(?:\s*(?:a|al|hasta|–|-)\s*)"
+
 
 def _parse_date_any(s: str) -> Optional[date]:
     """
@@ -46,6 +75,7 @@ def _parse_date_any(s: str) -> Optional[date]:
     if not s:
         return None
     s = s.strip()
+
     # ISO directo
     try:
         if re.fullmatch(r"\d{4}-\d{2}-\d{2}", s[:10]):
@@ -80,12 +110,14 @@ def _to_ve(d: date | str) -> str:
 def _extract_dates(text: str) -> Optional[Tuple[str, str]]:
     """
     Extrae el primer rango de fechas del texto y lo devuelve como (start_iso, end_iso).
+
     Acepta:
       - "DD/MM/AAAA a DD/MM/AAAA"
       - "DD-MM-AAAA al DD-MM-AAAA"
       - "DD.MM.AAAA hasta DD.MM.AAAA"
       - "DD/MM/AAAA - DD/MM/AAAA" (guion normal o en dash)
-    También soporta si el usuario envía dos fechas separadas por espacio.
+      - Dos fechas válidas en el texto (cualquier formato soportado), separadas por espacios u otro texto.
+
     Devuelve None si no encuentra al menos dos fechas válidas.
     """
     if not text:
@@ -93,7 +125,6 @@ def _extract_dates(text: str) -> Optional[Tuple[str, str]]:
     t = text.strip()
 
     # 1) Intento con separador de rango explícito (a|al|hasta|-|–)
-    #    Permitimos texto alrededor.
     range_pattern = rf"{_DDMMYYYY}{_RANGE_SEP}{_DDMMYYYY}"
     m = re.search(range_pattern, t, flags=re.IGNORECASE)
     if m:
@@ -130,3 +161,12 @@ def _extract_dates(text: str) -> Optional[Tuple[str, str]]:
         return pool[0].isoformat(), pool[1].isoformat()
 
     return None
+
+
+# Export explícito de utilidades usadas en otros módulos
+__all__ = [
+    "Step",
+    "step_val",
+    "_extract_dates",
+    "_to_ve",
+]
