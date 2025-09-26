@@ -592,8 +592,24 @@ async def handle_interactive(msg: Dict[str, Any], st: Dict[str, Any], from_msisd
 
         # Método de pago → crea consentimiento (con revalidación previa)
         if s == Step.RENTAL_WAIT_PAYMENT:
-            draft = st["draft"]
-            start_iso, end_iso, item_id = draft['start_iso'], draft['end_iso'], str(draft['item_id'])
+            # ✅ NUEVO: validar que el draft tenga item_id + fechas antes de seguir
+            draft = st.get("draft") or {}
+            item_id = draft.get('item_id')
+            start_iso = draft.get('start_iso')
+            end_iso = draft.get('end_iso')
+
+            if not item_id:
+                await set_session(from_msisdn, Step.IDLE, {})
+                await send_text(from_msisdn, "Para alquilar, primero indica el *ID del artículo*. Ejemplo: *ALQUILAR #123*")
+                await send_main_menu(from_msisdn)
+                return
+
+            if not start_iso or not end_iso:
+                await set_session(from_msisdn, Step.RENTAL_WAIT_DATES, {"item_id": int(item_id)})
+                await send_text(from_msisdn, f"Ahora indica las *fechas* para el artículo #{item_id} (formato: DD/MM/AAAA a DD/MM/AAAA).")
+                return
+
+            item_id = str(item_id)
 
             listing = await get_listing(item_id)
             if not listing or listing.get("status") != "active":
@@ -673,7 +689,9 @@ async def handle_interactive(msg: Dict[str, Any], st: Dict[str, Any], from_msisd
             await set_session(from_msisdn, Step.PUBLISH_TITLE, {})
             await send_text(from_msisdn, "¡Vamos a publicar! Primero, dime el *título* de tu artículo.")
         elif row_id == "menu_rent":
-            await send_text(from_msisdn, "Para alquilar, escribe qué buscas o el ID del artículo. Ej: ALQUILAR #123")
+            # ✅ NUEVO: limpiar estado para evitar que taps viejos en payment-list disparen autorización
+            await set_session(from_msisdn, Step.IDLE, {})
+            await send_text(from_msisdn, "Para alquilar, escribe qué buscas o el ID del artículo. Ej: *ALQUILAR #123*")
         elif row_id == "menu_my_listings":
             # Submenú como "Mis Alquileres"
             body = "¿Qué te gustaría ver?"
@@ -847,6 +865,12 @@ async def handle_text(msg: Dict[str, Any], st: Dict[str, Any], from_msisdn: str)
         else:
             await set_session(from_msisdn, Step.RENTAL_WAIT_DATES, {"item_id": int(item_id)})
             await send_text(from_msisdn, f"Perfecto. Ahora, indica las *fechas* que necesitas para el artículo #{item_id} (formato: DD/MM/AAAA a DD/MM/AAAA).")
+        return
+
+    # ✅ NUEVO: si dice ALQUILAR sin ID, pedir el ID explícitamente y no avanzar
+    if m_cmd and not m_id:
+        await set_session(from_msisdn, Step.IDLE, {})
+        await send_text(from_msisdn, "Indica el *ID del artículo* que quieres alquilar. Ejemplo: *ALQUILAR #123*")
         return
 
     # Ver una renta específica
