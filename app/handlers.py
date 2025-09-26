@@ -33,6 +33,8 @@ from .clients.supabase_client import (
     create_consent_guarded,
     # >>> NUEVO: actualizar campos de listing
     update_listing_fields,
+    # >>> NUEVO: guardar reporte de problemas
+    create_issue,  # <-- asegúrate de tenerlo implementado en supabase_client.py
 )
 
 # ======================
@@ -140,7 +142,72 @@ def _format_collision_message(overlap_end: date) -> str:
         "Envía un nuevo rango que *no* solape con el formato: *DD/MM/AAAA a DD/MM/AAAA*."
     )
 
+# ===========================
+# NUEVO: Gestión post-renta
+# ===========================
+def _eligible_to_close(r: Dict[str, Any]) -> bool:
+    """
+    Devuelve True si la renta ya terminó (end_date < hoy Caracas).
+    """
+    end_iso = (r.get("end_date") or "")[:10]
+    if not end_iso:
+        return False
+    try:
+        end_d = datetime.strptime(end_iso, "%Y-%m-%d").date()
+    except Exception:
+        return False
+    return end_d < _today_business()
 
+async def _send_post_end_buttons(to_wa: str, r: Dict[str, Any]):
+    """
+    Muestra botones para reseñar o reportar una renta finalizada.
+    """
+    rid = r["id"]
+    item_id = r["item_id"]
+    body = (
+        f"🕓 *Renta #{rid}* del artículo #{item_id} ya *finalizó* "
+        f"({ _to_ve(r['start_date']) } → { _to_ve(r['end_date']) }).\n\n"
+        "¿Qué deseas hacer?"
+    )
+    t = _new_token()
+    btns = [
+        {"id": f"review_start_{rid}_{t}", "title": "⭐️ Dejar reseña"},
+        {"id": f"report_start_{rid}_{t}", "title": "⚠️ Reportar problema"},
+    ]
+    await send_reply_buttons(_norm_msisdn(to_wa), "Gestión post-renta", body, btns)
+
+async def _show_manage_ended_rentals(user_wa: str):
+    """
+    Lista solo las rentas finalizadas del usuario y permite gestionarlas.
+    """
+    rentals = await get_rentals_for_user(user_wa) or []
+    ended = [r for r in rentals if _eligible_to_close(r)]
+    if not ended:
+        await send_text(user_wa, "No tienes alquileres que hayan finalizado recientemente.")
+        return
+
+    # Si solo hay una, manda directamente botones
+    if len(ended) == 1:
+        await _send_post_end_buttons(user_wa, ended[0])
+        return
+
+    # Si hay varias, usar lista
+    rows = [{
+        "id": f"manage_pick_{r['id']}",
+        "title": f"#{r['id']} • Artículo {r['item_id']}",
+        "description": f"{_to_ve(r['start_date'])} → {_to_ve(r['end_date'])}"
+    } for r in ended]
+    await send_list(
+        user_wa,
+        "Gestionar alquileres finalizados",
+        "Selecciona un alquiler para dejar una reseña o reportar un problema:",
+        "Ver alquileres",
+        rows
+    )
+
+# =========================
+# Menús / UI ya existentes
+# =========================
 async def _send_rental_management_menu(target_wa: str, rental: Dict[str, Any]):
     """
     Botones de gestión de rentas.
@@ -442,62 +509,87 @@ async def handle_interactive(msg: Dict[str, Any], st: Dict[str, Any], from_msisd
                 await send_text(from_msisdn, "No se pudo procesar el botón de extensión.")
             return
 
-        # ========= Fin de alquiler: reseña / reporte =========
-        if btn_id.startswith("end_review_owner_") or btn_id.startswith("end_review_buyer_"):
-            try:
-                parts = btn_id.split("_")
-                rid = int(parts[3])
-                r = await get_rental(rid)
-                if not r:
-                    await send_text(from_msisdn, "No encontré esa renta.")
-                    return
-                if not (_eq_msisdn(from_msisdn, r["buyer_wa"]) or _eq_msisdn(from_msisdn, r["seller_wa"])):
-                    await send_text(from_msisdn, "No puedes reseñar una renta en la que no participaste.")
-                    return
-
-                reviewee = r["buyer_wa"] if btn_id.startswith("end_review_owner_") else r["seller_wa"]
-
-                await set_session(from_msisdn, s, {
-                    **(st.get("draft") or {}),
-                    "awaiting_review": {"rental_id": rid, "reviewee_wa": reviewee}
-                })
-
-                quien = "comprador" if _eq_msisdn(reviewee, r["buyer_wa"]) else "dueño"
-                await send_text(
-                    from_msisdn,
-                    f"Califica al *{quien}* con un número del *1 al 5* y, si quieres, agrega un comentario.\n"
-                    "Ejemplos:\n• 5 Excelente\n• 3 Bien\n• 1 Mal"
-                )
-            except Exception as e:
-                print(f"end_review_* error: {e}")
-                await send_text(from_msisdn, "No pudimos iniciar la reseña.")
+        # ========= NUEVO: Gestión post-renta (botones) =========
+        if btn_id.startswith("manage_pick_"):
+            rid = int(btn_id.split("_")[-1])
+            r = await get_rental(rid)
+            if not r or not _eligible_to_close(r):
+                await send_text(from_msisdn, "Ese alquiler no está disponible para gestionar.")
+                return
+            await _send_post_end_buttons(from_msisdn, r)
             return
 
-        if btn_id.startswith("end_report_owner_") or btn_id.startswith("end_report_buyer_"):
-            try:
-                parts = btn_id.split("_")
-                rid = int(parts[3])
-                r = await get_rental(rid)
-                if not r:
-                    await send_text(from_msisdn, "No encontré esa renta.")
-                    return
-                if not (_eq_msisdn(from_msisdn, r["buyer_wa"]) or _eq_msisdn(from_msisdn, r["seller_wa"])):
-                    await send_text(from_msisdn, "No puedes reportar una renta en la que no participaste.")
-                    return
-
-                await set_session(from_msisdn, s, {
-                    **(st.get("draft") or {}),
-                    "awaiting_report": {"rental_id": rid}
-                })
-                await send_text(
-                    from_msisdn,
-                    "Cuéntanos brevemente el problema (p. ej. *no entregó el artículo*, *daños*, etc.)."
-                )
-            except Exception as e:
-                print(f"end_report_* error: {e}")
-                await send_text(from_msisdn, "No pudimos iniciar el reporte.")
+        if btn_id.startswith("review_start_"):
+            rid = int(btn_id.split("_")[2])
+            rate_btns = [
+                {"id": f"review_rate_{rid}_5", "title": "⭐️⭐️⭐️⭐️⭐️"},
+                {"id": f"review_rate_{rid}_4", "title": "⭐️⭐️⭐️⭐️"},
+                {"id": f"review_rate_{rid}_3", "title": "⭐️⭐️⭐️"},
+                {"id": f"review_rate_{rid}_2", "title": "⭐️⭐️"},
+                {"id": f"review_rate_{rid}_1", "title": "⭐️"},
+            ]
+            await send_reply_buttons(
+                from_msisdn,
+                "Califica tu experiencia",
+                "Elige tu calificación (puedes escribir un comentario después).",
+                rate_btns
+            )
             return
-        # ========= Fin de alquiler: reseña / reporte (FIN) =========
+
+        if btn_id.startswith("review_rate_"):
+            parts = btn_id.split("_")
+            rid = int(parts[2]); rating = int(parts[3])
+            # comentario opcional si responde luego por texto: usamos flujo existente awaiting_review
+            await set_session(from_msisdn, s, {
+                **(st.get("draft") or {}),
+                "awaiting_review": {"rental_id": rid, "reviewee_wa": None}
+            })
+            # Guardamos directo sin comentario usando tu add_review (que resuelve reviewed_wa internamente)
+            try:
+                res = await add_review(rid, from_msisdn, rating, "")
+                if res.get("ok"):
+                    await send_text(from_msisdn, "✅ ¡Gracias! Calificación registrada. Si quieres, envía ahora un comentario adicional en este mismo chat.")
+                else:
+                    await send_text(from_msisdn, f"No se pudo guardar la reseña: {res.get('error','intenta más tarde')}")
+            except Exception as e:
+                print(f"review_rate error: {e}")
+                await send_text(from_msisdn, "No se pudo registrar tu calificación.")
+            return
+
+        if btn_id.startswith("report_start_"):
+            rid = int(btn_id.split("_")[2])
+            opts = [
+                {"id": f"report_pick_{rid}_not_delivered", "title": "📦 No entregado"},
+                {"id": f"report_pick_{rid}_damaged", "title": "🔧 Entregado con daños"},
+            ]
+            await send_reply_buttons(
+                from_msisdn,
+                "Reportar problema",
+                "Selecciona el tipo de problema:",
+                opts
+            )
+            return
+
+        if btn_id.startswith("report_pick_"):
+            parts = btn_id.split("_")
+            rid = int(parts[2]); kind = parts[3]  # not_delivered | damaged
+            try:
+                await create_issue(rid, from_msisdn, kind, None)
+                await send_text(from_msisdn, "✅ Tu reporte fue registrado. Puedes enviar detalles adicionales por texto si deseas.")
+                # Notificar a la otra parte
+                r = await get_rental(rid)
+                if r:
+                    other = r["buyer_wa"] if _eq_msisdn(from_msisdn, r["seller_wa"]) else r["seller_wa"]
+                    human = "no entregado" if kind == "not_delivered" else "entregado con daños"
+                    try:
+                        await send_text(_norm_msisdn(other), f"⚠️ Se abrió un reporte en la renta #{rid}: {human}.")
+                    except Exception:
+                        pass
+            except Exception as e:
+                print(f"report_pick error: {e}")
+                await send_text(from_msisdn, "No pudimos registrar tu reporte en este momento.")
+            return
+        # ========= FIN Gestión post-renta =========
 
         # ===== Mis Alquileres: paginación =====
         if btn_id.startswith("myrentals_page_"):
@@ -583,6 +675,16 @@ async def handle_interactive(msg: Dict[str, Any], st: Dict[str, Any], from_msisd
 
         # 🚧 Guard-rail anti "tap viejo": si no estamos en RENTAL_WAIT_PAYMENT y no es del menú, ignoramos.
         if s != Step.RENTAL_WAIT_PAYMENT and not str(row_id).startswith("menu_"):
+            # Permitir selección de "manage_pick_*" para gestión post-renta
+            if str(row_id).startswith("manage_pick_"):
+                rid = int(str(row_id).split("_")[-1])
+                r = await get_rental(rid)
+                if not r or not _eligible_to_close(r):
+                    await send_text(from_msisdn, "Ese alquiler no está disponible para gestionar.")
+                else:
+                    await _send_post_end_buttons(from_msisdn, r)
+                return
+
             await send_text(
                 from_msisdn,
                 "Esa lista ya venció. Para alquilar, escribe: *ALQUILAR #<id>* y luego envía las fechas."
@@ -715,7 +817,8 @@ async def handle_interactive(msg: Dict[str, Any], st: Dict[str, Any], from_msisd
                 "Comandos útiles:\n"
                 "- `ELIMINAR #ID`: Quita una publicación.\n"
                 "- `CANCELAR RENTA #ID`: Cancela una renta.\n"
-                "- `RESEÑA #ID_RENTA 1-5`: Deja una opinión."
+                "- `RESEÑA #ID_RENTA 1-5`: Deja una opinión.\n"
+                "- `GESTIONAR`: Gestionar reseña o reporte de rentas finalizadas."
             )
 
 # =========
@@ -727,6 +830,11 @@ async def handle_text(msg: Dict[str, Any], st: Dict[str, Any], from_msisdn: str)
     if not text:
         return
     upper = text.upper()
+
+    # --- NUEVO: comando GESTIONAR ---
+    if upper in {"GESTIONAR", "GESTIONAR ALQUILERES"}:
+        await _show_manage_ended_rentals(from_msisdn)
+        return
 
     # --- Flujo: respuesta a reseña pendiente ---
     draft = st.get("draft") or {}
@@ -757,10 +865,12 @@ async def handle_text(msg: Dict[str, Any], st: Dict[str, Any], from_msisdn: str)
     if isinstance(draft, dict) and draft.get("awaiting_report"):
         try:
             rid = int(draft["awaiting_report"]["rental_id"])
-            r = await get_rental(rid)
-            other = r["buyer_wa"] if _eq_msisdn(from_msisdn, r["seller_wa"]) else r["seller_wa"]
+            # Registramos como 'damaged' por defecto si viene texto sin tipo explícito
+            await create_issue(rid, from_msisdn, "damaged", text[:500] or None)
             await send_text(from_msisdn, "⚠️ Reporte recibido. Nuestro equipo lo revisará.")
             try:
+                r = await get_rental(rid)
+                other = r["buyer_wa"] if _eq_msisdn(from_msisdn, r["seller_wa"]) else r["seller_wa"]
                 await send_text(_norm_msisdn(other), f"El otro usuario abrió un reporte sobre la renta #{rid}:\n\"{text[:500]}\"")
             except Exception:
                 pass

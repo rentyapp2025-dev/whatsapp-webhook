@@ -712,6 +712,31 @@ async def mark_introduced_once(item_id_or_consent_id: str) -> bool:
         rows = upd.json() or []
         return len(rows) > 0
 
+async def create_review(rental_id: int, reviewer_wa: str, reviewed_wa: str, rating: int, comment: str | None):
+    payload = {
+        "rental_id": rental_id,
+        "reviewer_wa": reviewer_wa,
+        "reviewed_wa": reviewed_wa,
+        "rating": rating,
+        "comment": comment or None,
+    }
+    async with httpx.AsyncClient(timeout=10.0) as c:
+        r = await c.post(f"{BASE}/reviews", headers=HEADERS, json=payload)
+        r.raise_for_status()
+        return r.json()
+
+async def create_issue(rental_id: int, reporter_wa: str, issue_type: str, notes: str | None):
+    payload = {
+        "rental_id": rental_id,
+        "reporter_wa": reporter_wa,
+        "issue_type": issue_type,
+        "notes": notes or None,
+    }
+    async with httpx.AsyncClient(timeout=10.0) as c:
+        r = await c.post(f"{BASE}/rental_issues", headers=HEADERS, json=payload)
+        r.raise_for_status()
+        return r.json()
+
 # =========================
 # Rentals (endurecidos)
 # =========================
