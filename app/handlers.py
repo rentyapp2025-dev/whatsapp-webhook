@@ -629,22 +629,17 @@ async def handle_interactive(msg: Dict[str, Any], st: Dict[str, Any], from_msisd
 
         # dentro de tu on_button / handler de botones
         if btn_id.startswith("report_pick_"):
-            try:
-                _, _, rid_str, kind_raw = btn_id.split("_", 3)  # report_pick_<rentalId>_<kind>
-                rid = int(rid_str)
-            except Exception:
-                return
-
-            role = await get_user_role_in_rental(rid, from_msisdn)
-            if role != "seller":
-                await send_text(from_msisdn, "Este reporte solo puede abrirlo el propietario del artículo.")
-                return
-
-            kind = _map_issue_kind_for_seller(kind_raw)  # -> no_entregado | entregado_con_danos
+            parts = btn_id.split("_")
+            rid = int(parts[2])
+            kind_raw = parts[3]  # not_delivered | damaged
+            # 👇 Mapeamos a los valores que acepta tu DB
+            kind = "no_entregado" if kind_raw == "not_delivered" else "entregado_con_danos"
 
             try:
-                await insert_issue(rid, from_msisdn, kind, None)   # <- AQUÍ EL CAMBIO
-                await send_text(from_msisdn, "✅ Tu reporte fue registrado. Si quieres, envía detalles adicionales por texto.")
+                await create_issue(rid, from_msisdn, kind, None)
+                await send_text(from_msisdn, "✅ Tu reporte fue registrado. Puedes enviar detalles adicionales por texto si deseas.")
+
+                # Notificar a la otra parte
                 r = await get_rental(rid)
                 if r:
                     other = r["buyer_wa"] if _eq_msisdn(from_msisdn, r["seller_wa"]) else r["seller_wa"]
@@ -657,6 +652,7 @@ async def handle_interactive(msg: Dict[str, Any], st: Dict[str, Any], from_msisd
                 print(f"report_pick error: {e}")
                 await send_text(from_msisdn, "No pudimos registrar tu reporte en este momento.")
             return
+
 
         # ========= FIN Gestión post-renta =========
 
