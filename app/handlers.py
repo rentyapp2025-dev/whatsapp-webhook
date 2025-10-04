@@ -35,7 +35,33 @@ from .clients.supabase_client import (
     update_listing_fields,
     # >>> NUEVO: guardar reporte de problemas
     create_issue,  # <-- asegúrate de tenerlo implementado en supabase_client.py
+    has_review_for_rental,   # <-- añade esto
+    add_review_once,         
 )
+
+
+OWNER_MENU_BTNS = [
+    {"id": "completed_review", "title": "Dejar reseña ⭐"},
+    {"id": "completed_issue",  "title": "Reportar un problema ⚠️"},
+]
+
+RENTER_MENU_BTNS = [
+    {"id": "completed_issue",  "title": "Reportar un problema ⚠️"},
+]
+
+ISSUE_BTNS = [
+    {"id": "issue_no_recibi", "title": "No recibí el artículo"},
+    {"id": "issue_danios", "title": "Artículo con daños"},
+    {"id": "issue_otro", "title": "Otro problema"},
+]
+
+RATING_BTNS = [
+    {"id": "rate_1", "title": "1"},
+    {"id": "rate_2", "title": "2"},
+    {"id": "rate_3", "title": "3"},
+    {"id": "rate_4", "title": "4"},
+    {"id": "rate_5", "title": "5"},
+]
 
 # ======================
 # Config UX / Paginación
@@ -94,6 +120,28 @@ def _norm_msisdn(x: Optional[str]) -> str:
     """Normaliza MSISDN a solo dígitos (útil para WhatsApp send_*)."""
     return re.sub(r"\D", "", x or "")
 
+async def prompt_completed_menu(owner_wa_id: str, renter_wa_id: str, rental_id: int):
+    # Owner: puede reseñar o reportar
+    await set_session(owner_wa_id, {
+        "step": Step.COMPLETED_MENU,
+        "ctx": {"rental_id": rental_id, "role": "owner", "counterparty_wa_id": renter_wa_id}
+    })
+    await send_reply_buttons(
+        owner_wa_id,
+        "Tu arriendo finalizó 🎉\n¿Quieres dejar una reseña o reportar un problema?",
+        OWNER_MENU_BTNS
+    )
+
+    # Renter: solo reportar
+    await set_session(renter_wa_id, {
+        "step": Step.COMPLETED_MENU,
+        "ctx": {"rental_id": rental_id, "role": "renter"}
+    })
+    await send_reply_buttons(
+        renter_wa_id,
+        "Tu arriendo finalizó 🎉\nSi hubo un inconveniente, puedes reportarlo:",
+        RENTER_MENU_BTNS
+    )
 
 def _card_for_rental(r: Dict[str, Any], you_msisdn: str) -> str:
     is_owner = _eq_msisdn(r.get("seller_wa"), you_msisdn)
@@ -441,6 +489,56 @@ async def handle_interactive(msg: Dict[str, Any], st: Dict[str, Any], from_msisd
     s = step_val(st)
     interactive = msg["interactive"]
     itype = interactive["type"]
+    data = msg.get("interactive", {}) or {}
+    button = (data.get("button_reply") or {}).get("id")
+    step = (st or {}).get("step")
+    ctx = (st or {}).get("ctx") or {}
+    rental_id = ctx.get("rental_id")
+    role = ctx.get("role")
+
+    # === Menú post-completion
+    if step == Step.COMPLETED_MENU:
+        if button == "completed_review" and role == "owner":
+            if await has_review_for_rental(rental_id, from_msisdn):
+                await send_text(from_msisdn, "Ya enviaste una reseña para este arriendo. Gracias 🙌")
+                return
+            await set_session(from_msisdn, {"step": Step.COMPLETED_REVIEW_SCORE, "ctx": ctx})
+            await send_reply_buttons(from_msisdn, "Califica al arrendatario del 1 al 5:", RATING_BTNS)
+            return
+
+        if button == "completed_issue":
+            await set_session(from_msisdn, {"step": Step.COMPLETED_ISSUE_TYPE, "ctx": ctx})
+            await send_reply_buttons(from_msisdn, "Cuéntame qué pasó:", ISSUE_BTNS)
+            return
+
+        await send_text(from_msisdn, "Opción no válida. Elige una de las opciones mostradas.")
+        return
+
+    # === Selección de score
+    if step == Step.COMPLETED_REVIEW_SCORE:
+        if button and button.startswith("rate_"):
+            score = int(button.split("_")[1])
+            ctx["score"] = score
+            await set_session(from_msisdn, {"step": Step.COMPLETED_REVIEW_COMMENT, "ctx": ctx})
+            await send_text(from_msisdn, "¿Quieres añadir un comentario? (Opcional). Envíalo por texto o escribe 'omitir'.")
+            return
+        await send_text(from_msisdn, "Elige un puntaje del 1 al 5 con los botones.")
+        return
+
+    # === Tipo de issue
+    if step == Step.COMPLETED_ISSUE_TYPE:
+        mapping = {
+            "issue_no_recibi": "no_recibi",
+            "issue_danios": "danios",
+            "issue_otro": "otro",
+        }
+        if button in mapping:
+            ctx["issue_type"] = mapping[button]
+            await set_session(from_msisdn, {"step": Step.COMPLETED_ISSUE_DESC, "ctx": ctx})
+            await send_text(from_msisdn, "Describe brevemente el problema (opcional).")
+            return
+        await send_text(from_msisdn, "Elige una opción válida para el problema.")
+        return
 
     if itype == "button_reply":
         btn_id = interactive["button_reply"]["id"]
@@ -838,9 +936,59 @@ async def handle_interactive(msg: Dict[str, Any], st: Dict[str, Any], from_msisd
 async def handle_text(msg: Dict[str, Any], st: Dict[str, Any], from_msisdn: str):
     s = step_val(st)
     text = (msg.get("text", {}).get("body", "")).strip()
+    body = (msg.get("text") or {}).get("body", "").strip()
+    step = (st or {}).get("step")
+    ctx = (st or {}).get("ctx") or {}
+    rental_id = ctx.get("rental_id")
+    role = ctx.get("role")
+
     if not text:
         return
     upper = text.upper()
+
+    # === Comentario de reseña (owner)
+    if step == Step.COMPLETED_REVIEW_COMMENT:
+        comment = None if body.lower() == "omitir" else body
+        ratee_wa_id = ctx.get("counterparty_wa_id")
+        if not ratee_wa_id:
+            await send_text(from_msisdn, "No pude identificar a quién calificar. Intenta luego.")
+            return
+
+        if await has_review_for_rental(rental_id, from_msisdn):
+            await send_text(from_msisdn, "Ya enviaste una reseña para este arriendo. ¡Gracias!")
+            return
+
+        score = int(ctx.get("score", 0))
+        if score < 1 or score > 5:
+            await send_text(from_msisdn, "El puntaje es inválido. Vuelve a intentar.")
+            return
+
+        await add_review_once(
+            rental_id=rental_id,
+            reviewer_wa=from_msisdn,
+            reviewed_wa=ratee_wa_id,
+            rating=score,
+            comment=comment,
+        )
+        await send_text(from_msisdn, f"¡Gracias! Guardé tu reseña ({score}/5).")
+        return
+
+    # === Descripción de issue (owner o renter)
+    if step == Step.COMPLETED_ISSUE_DESC:
+        desc = None if body.lower() in ("", "omitir") else body
+        issue_type = ctx.get("issue_type")
+        if not issue_type:
+            await send_text(from_msisdn, "No pude identificar el tipo de problema. Vuelve a abrir el menú.")
+            return
+
+        await create_issue(
+            rental_id=rental_id,
+            reporter_wa=from_msisdn,
+            issue_type=issue_type,
+            notes=desc,   # usa 'notes'!
+        )
+        await send_text(from_msisdn, "Gracias. Registré tu reporte. Nuestro equipo lo revisará.")
+        return
 
     # --- NUEVO: comando GESTIONAR ---
     if upper in {"GESTIONAR", "GESTIONAR ALQUILERES"}:

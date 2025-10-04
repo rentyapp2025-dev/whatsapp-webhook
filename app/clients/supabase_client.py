@@ -836,16 +836,59 @@ async def create_review(rental_id: int, reviewer_wa: str, reviewed_wa: str, rati
         r = await c.post(f"{BASE}/reviews", headers=HEADERS, json=payload)
         r.raise_for_status()
         return r.json()
+    
+async def has_review_for_rental(rental_id: int, reviewer_wa: str) -> bool:
+    async with httpx.AsyncClient(timeout=20) as client:
+        r = await client.get(
+            f"{BASE}/reviews",
+            headers=HEADERS,
+            params={
+                "select": "id",
+                "rental_id": f"eq.{rental_id}",
+                "reviewer_wa": f"eq.{reviewer_wa}",
+                "limit": 1,
+            },
+        )
+        r.raise_for_status()
+        return len(r.json()) > 0
 
-async def create_issue(rental_id: int, reporter_wa: str, issue_type: str, notes: str | None):
+async def add_review_once(
+    rental_id: int,
+    reviewer_wa: str,
+    reviewed_wa: str,
+    rating: int,
+    comment: str | None,
+):
+    payload = {
+        "rental_id": rental_id,
+        "reviewer_wa": reviewer_wa,
+        "reviewed_wa": reviewed_wa,
+        "rating": rating,
+        "comment": comment,
+    }
+    async with httpx.AsyncClient(timeout=20) as client:
+        r = await client.post(f"{BASE}/reviews", headers=HEADERS, json=payload)
+        if r.status_code in (200, 201):
+            return r.json()
+        if r.status_code == 409:
+            # ya existe por el índice único
+            return None
+        r.raise_for_status()
+
+async def create_issue(
+    rental_id: int,
+    reporter_wa: str,
+    issue_type: str,         # 'no_recibi' | 'danios' | 'otro'
+    notes: str | None,       # <- usa 'notes' (tu columna real)
+):
     payload = {
         "rental_id": rental_id,
         "reporter_wa": reporter_wa,
         "issue_type": issue_type,
-        "notes": notes or None,
+        "notes": notes,
     }
-    async with httpx.AsyncClient(timeout=10.0) as c:
-        r = await c.post(f"{BASE}/rental_issues", headers=HEADERS, json=payload)
+    async with httpx.AsyncClient(timeout=20) as client:
+        r = await client.post(f"{BASE}/rental_issues", headers=HEADERS, json=payload)
         r.raise_for_status()
         return r.json()
 

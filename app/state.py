@@ -11,6 +11,12 @@ class Step(str, Enum):
     # Estado base
     IDLE = "idle"
 
+    COMPLETED_MENU = "completed_menu"
+    COMPLETED_REVIEW_SCORE = "completed_review_score"
+    COMPLETED_REVIEW_COMMENT = "completed_review_comment"
+    COMPLETED_ISSUE_TYPE = "completed_issue_type"
+    COMPLETED_ISSUE_DESC = "completed_issue_desc"
+
     # Publicar anuncio
     PUBLISH_TITLE = "publish_title"
     PUBLISH_PRICE = "publish_price"
