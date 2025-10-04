@@ -36,11 +36,9 @@ STATUS_COMPLETED = "completed"
 
 _ISSUE_CANON = {"not_delivered", "damaged", "general"}
 _ISSUE_MAP = {
-    # EN
     "not_delivered": "not_delivered",
     "damaged": "damaged",
     "general": "general",
-    # ES (legacy)
     "no_recibi": "not_delivered",
     "no recibí": "not_delivered",
     "danios": "damaged",
@@ -894,41 +892,6 @@ async def add_review_once(
 # =========================
 # Issues (robusto, acepta ambos dialectos)
 # =========================
-
-_ISSUE_CANON = {"not_delivered", "damaged", "general"}
-# Mapeo para compat ⚙️
-_ISSUE_MAP = {
-    # inglés -> canon
-    "not_delivered": "not_delivered",
-    "damaged": "damaged",
-    "general": "general",
-    # español (legacy) -> canon
-    "no_recibi": "not_delivered",
-    "danios": "damaged",
-    "daños": "damaged",
-    "otro": "general",
-    "otro_problema": "general",
-    "problema_general": "general",
-}
-
-# --- Issues robusto ---
-
-_ISSUE_CANON = {"not_delivered", "damaged", "general"}
-_ISSUE_MAP = {
-    # EN
-    "not_delivered": "not_delivered",
-    "damaged": "damaged",
-    "general": "general",
-    # ES (legacy)
-    "no_recibi": "not_delivered",
-    "no recibí": "not_delivered",
-    "danios": "damaged",
-    "daños": "damaged",
-    "otro": "general",
-    "otro_problema": "general",
-    "problema_general": "general",
-}
-
 def _normalize_issue_type(t: Optional[str]) -> Optional[str]:
     if not t:
         return None
@@ -938,8 +901,8 @@ def _normalize_issue_type(t: Optional[str]) -> Optional[str]:
 async def create_issue(
     rental_id: int,
     reporter_wa: str,
-    issue_type: str,             # admite EN/ES (se normaliza)
-    notes: Optional[str] = None, # <- lo mapeamos a 'description'
+    issue_type: str,             # EN/ES; se normaliza
+    notes: Optional[str] = None, # 👈 se guarda en la columna 'notes'
 ) -> Dict[str, Any]:
     canon = _normalize_issue_type(issue_type)
     if canon not in _ISSUE_CANON:
@@ -951,13 +914,13 @@ async def create_issue(
         "issue_type": canon,
     }
     if notes:
-        payload["description"] = str(notes).strip()[:500]  # 👈 CAMPO CORRECTO
+        payload["notes"] = str(notes).strip()[:500]  # 👈 tu tabla tiene 'notes'
 
     async with httpx.AsyncClient(timeout=15.0) as c:
         r = await c.post(f"{BASE}/rental_issues", headers=HEADERS_RETURN, json=payload)
 
         if not (200 <= r.status_code < 300):
-            # Devolver detalles para depurar si vuelve a fallar
+            # devuelve detalles por si hay otra restricción (FK, enum, etc.)
             try:
                 j = r.json()
             except Exception:

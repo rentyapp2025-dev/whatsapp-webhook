@@ -577,22 +577,25 @@ async def handle_interactive(msg: Dict[str, Any], st: Dict[str, Any], from_msisd
         if btn_id.startswith("review_rate_"):
             parts = btn_id.split("_")
             rid = int(parts[2]); rating = int(parts[3])
-            # Guardamos directo sin comentario (evita conflicto por única reseña)
+
+            # (opcional) valida que no haya reseñado ya
             try:
-                res = await add_review_once(
-                    rental_id=rid,
-                    reviewer_wa=from_msisdn,
-                    reviewed_wa=(await get_rental(rid))["buyer_wa"] if _eq_msisdn((await get_rental(rid))["seller_wa"], from_msisdn) else (await get_rental(rid))["seller_wa"],
-                    rating=rating,
-                    comment=""
-                )
-                if res is None:
-                    await send_text(from_msisdn, "Ya enviaste una reseña para este arriendo. ¡Gracias!")
-                else:
-                    await send_text(from_msisdn, "✅ ¡Gracias! Calificación registrada.")
-            except Exception as e:
-                print(f"review_rate error: {e}")
-                await send_text(from_msisdn, "No se pudo registrar tu calificación.")
+                from .clients.supabase_client import has_user_reviewed
+                if await has_user_reviewed(rid, from_msisdn):
+                    await send_text(from_msisdn, "Ya enviaste tu reseña para esta renta. ¡Gracias!")
+                    return
+            except Exception:
+                pass
+
+            # guarda rating en sesión y pide comentario opcional
+            await set_session(from_msisdn, Step.IDLE, {
+                "awaiting_review": {"rental_id": rid, "rating": rating}
+            })
+            await send_text(
+                from_msisdn,
+                "¿Quieres añadir un comentario a tu calificación?\n"
+                "Escríbelo ahora (máx. 300 caracteres) o responde *omitir*."
+            )
             return
 
         if btn_id.startswith("report_start_"):
@@ -892,25 +895,35 @@ async def handle_text(msg: Dict[str, Any], st: Dict[str, Any], from_msisdn: str)
         return
 
     # --- Flujo: respuesta a reseña pendiente (opcional si usas comentario libre) ---
+    # --- Flujo: respuesta a reseña pendiente ---
     draft = st.get("draft") or {}
     if isinstance(draft, dict) and draft.get("awaiting_review"):
         try:
-            m = re.search(r"\b([1-5])\b", text)
-            if not m:
-                await send_text(from_msisdn, "Envía un número del *1 al 5* seguido (opcional) de un comentario. Ej: 5 Muy responsable.")
-                return
-            rating = int(m.group(1))
-            comment = re.sub(r"^\s*\b[1-5]\b\s*", "", text).strip()
+            ar = draft["awaiting_review"]
+            rid = int(ar["rental_id"])
+            rating = ar.get("rating")  # puede venir del botón
 
-            rid = int(draft["awaiting_review"]["rental_id"])
-            # usa add_review_once para respetar 1 por rental/reviewer
-            r = await get_rental(rid)
-            reviewed_wa = r["buyer_wa"] if _eq_msisdn(r["seller_wa"], from_msisdn) else r["seller_wa"]
-            result = await add_review_once(rid, from_msisdn, reviewed_wa, rating, comment)
-            if result is None:
-                await send_text(from_msisdn, "Ya enviaste una reseña para este arriendo. ¡Gracias!")
+            # Si no vino rating del botón, intenta extraer "1-5" del texto
+            if rating is None:
+                m = re.search(r"\b([1-5])\b", text)
+                if not m:
+                    await send_text(from_msisdn, "Envía un número del *1 al 5* seguido (opcional) de un comentario. Ej: 5 Muy responsable.")
+                    return
+                rating = int(m.group(1))
+                comment = re.sub(r"^\s*\b[1-5]\b\s*", "", text).strip()[:300] or None
             else:
+                # rating ya elegido por botón; ahora el texto es el comentario (u 'omitir')
+                if text.strip().lower() in {"omitir", "skip", "ninguno"}:
+                    comment = None
+                else:
+                    comment = text.strip()[:300] or None
+
+            result = await add_review(rid, from_msisdn, int(rating), comment or "")
+            if result.get("ok"):
                 await send_text(from_msisdn, "✅ ¡Gracias! Tu reseña fue registrada.")
+            else:
+                await send_text(from_msisdn, f"No se pudo guardar la reseña: {result.get('error','intenta más tarde')}")
+
         except Exception as e:
             print(f"awaiting_review error: {e}")
             await send_text(from_msisdn, "Ocurrió un problema al registrar tu reseña.")
