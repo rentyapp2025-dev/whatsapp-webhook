@@ -34,9 +34,10 @@ from .clients.supabase_client import (
     # >>> NUEVO: actualizar campos de listing
     update_listing_fields,
     # >>> NUEVO: guardar reporte de problemas
-    create_issue,  # <-- asegúrate de tenerlo implementado en supabase_client.py
-    has_review_for_rental,   # <-- añade esto
-    add_review_once,         
+    create_issue,
+    # >>> NUEVO: utilidades reseñas 1-sola-vez
+    has_review_for_rental,
+    add_review_once,
 )
 
 
@@ -120,28 +121,6 @@ def _norm_msisdn(x: Optional[str]) -> str:
     """Normaliza MSISDN a solo dígitos (útil para WhatsApp send_*)."""
     return re.sub(r"\D", "", x or "")
 
-async def prompt_completed_menu(owner_wa_id: str, renter_wa_id: str, rental_id: int):
-    # Owner: puede reseñar o reportar
-    await set_session(owner_wa_id, {
-        "step": Step.COMPLETED_MENU,
-        "ctx": {"rental_id": rental_id, "role": "owner", "counterparty_wa_id": renter_wa_id}
-    })
-    await send_reply_buttons(
-        owner_wa_id,
-        "Tu arriendo finalizó 🎉\n¿Quieres dejar una reseña o reportar un problema?",
-        OWNER_MENU_BTNS
-    )
-
-    # Renter: solo reportar
-    await set_session(renter_wa_id, {
-        "step": Step.COMPLETED_MENU,
-        "ctx": {"rental_id": rental_id, "role": "renter"}
-    })
-    await send_reply_buttons(
-        renter_wa_id,
-        "Tu arriendo finalizó 🎉\nSi hubo un inconveniente, puedes reportarlo:",
-        RENTER_MENU_BTNS
-    )
 
 def _card_for_rental(r: Dict[str, Any], you_msisdn: str) -> str:
     is_owner = _eq_msisdn(r.get("seller_wa"), you_msisdn)
@@ -489,56 +468,6 @@ async def handle_interactive(msg: Dict[str, Any], st: Dict[str, Any], from_msisd
     s = step_val(st)
     interactive = msg["interactive"]
     itype = interactive["type"]
-    data = msg.get("interactive", {}) or {}
-    button = (data.get("button_reply") or {}).get("id")
-    step = (st or {}).get("step")
-    ctx = (st or {}).get("ctx") or {}
-    rental_id = ctx.get("rental_id")
-    role = ctx.get("role")
-
-    # === Menú post-completion
-    if step == Step.COMPLETED_MENU:
-        if button == "completed_review" and role == "owner":
-            if await has_review_for_rental(rental_id, from_msisdn):
-                await send_text(from_msisdn, "Ya enviaste una reseña para este arriendo. Gracias 🙌")
-                return
-            await set_session(from_msisdn, {"step": Step.COMPLETED_REVIEW_SCORE, "ctx": ctx})
-            await send_reply_buttons(from_msisdn, "Califica al arrendatario del 1 al 5:", RATING_BTNS)
-            return
-
-        if button == "completed_issue":
-            await set_session(from_msisdn, {"step": Step.COMPLETED_ISSUE_TYPE, "ctx": ctx})
-            await send_reply_buttons(from_msisdn, "Cuéntame qué pasó:", ISSUE_BTNS)
-            return
-
-        await send_text(from_msisdn, "Opción no válida. Elige una de las opciones mostradas.")
-        return
-
-    # === Selección de score
-    if step == Step.COMPLETED_REVIEW_SCORE:
-        if button and button.startswith("rate_"):
-            score = int(button.split("_")[1])
-            ctx["score"] = score
-            await set_session(from_msisdn, {"step": Step.COMPLETED_REVIEW_COMMENT, "ctx": ctx})
-            await send_text(from_msisdn, "¿Quieres añadir un comentario? (Opcional). Envíalo por texto o escribe 'omitir'.")
-            return
-        await send_text(from_msisdn, "Elige un puntaje del 1 al 5 con los botones.")
-        return
-
-    # === Tipo de issue
-    if step == Step.COMPLETED_ISSUE_TYPE:
-        mapping = {
-            "issue_no_recibi": "no_recibi",
-            "issue_danios": "danios",
-            "issue_otro": "otro",
-        }
-        if button in mapping:
-            ctx["issue_type"] = mapping[button]
-            await set_session(from_msisdn, {"step": Step.COMPLETED_ISSUE_DESC, "ctx": ctx})
-            await send_text(from_msisdn, "Describe brevemente el problema (opcional).")
-            return
-        await send_text(from_msisdn, "Elige una opción válida para el problema.")
-        return
 
     if itype == "button_reply":
         btn_id = interactive["button_reply"]["id"]
@@ -639,11 +568,17 @@ async def handle_interactive(msg: Dict[str, Any], st: Dict[str, Any], from_msisd
             rid = int(parts[2]); rating = int(parts[3])
             # Guardamos directo sin comentario (evita conflicto por única reseña)
             try:
-                res = await add_review(rid, from_msisdn, rating, "")
-                if res.get("ok"):
-                    await send_text(from_msisdn, "✅ ¡Gracias! Calificación registrada.")
+                res = await add_review_once(
+                    rental_id=rid,
+                    reviewer_wa=from_msisdn,
+                    reviewed_wa=(await get_rental(rid))["buyer_wa"] if _eq_msisdn((await get_rental(rid))["seller_wa"], from_msisdn) else (await get_rental(rid))["seller_wa"],
+                    rating=rating,
+                    comment=""
+                )
+                if res is None:
+                    await send_text(from_msisdn, "Ya enviaste una reseña para este arriendo. ¡Gracias!")
                 else:
-                    await send_text(from_msisdn, f"No se pudo guardar la reseña: {res.get('error','intenta más tarde')}")
+                    await send_text(from_msisdn, "✅ ¡Gracias! Calificación registrada.")
             except Exception as e:
                 print(f"review_rate error: {e}")
                 await send_text(from_msisdn, "No se pudo registrar tu calificación.")
@@ -936,66 +871,16 @@ async def handle_interactive(msg: Dict[str, Any], st: Dict[str, Any], from_msisd
 async def handle_text(msg: Dict[str, Any], st: Dict[str, Any], from_msisdn: str):
     s = step_val(st)
     text = (msg.get("text", {}).get("body", "")).strip()
-    body = (msg.get("text") or {}).get("body", "").strip()
-    step = (st or {}).get("step")
-    ctx = (st or {}).get("ctx") or {}
-    rental_id = ctx.get("rental_id")
-    role = ctx.get("role")
-
     if not text:
         return
     upper = text.upper()
-
-    # === Comentario de reseña (owner)
-    if step == Step.COMPLETED_REVIEW_COMMENT:
-        comment = None if body.lower() == "omitir" else body
-        ratee_wa_id = ctx.get("counterparty_wa_id")
-        if not ratee_wa_id:
-            await send_text(from_msisdn, "No pude identificar a quién calificar. Intenta luego.")
-            return
-
-        if await has_review_for_rental(rental_id, from_msisdn):
-            await send_text(from_msisdn, "Ya enviaste una reseña para este arriendo. ¡Gracias!")
-            return
-
-        score = int(ctx.get("score", 0))
-        if score < 1 or score > 5:
-            await send_text(from_msisdn, "El puntaje es inválido. Vuelve a intentar.")
-            return
-
-        await add_review_once(
-            rental_id=rental_id,
-            reviewer_wa=from_msisdn,
-            reviewed_wa=ratee_wa_id,
-            rating=score,
-            comment=comment,
-        )
-        await send_text(from_msisdn, f"¡Gracias! Guardé tu reseña ({score}/5).")
-        return
-
-    # === Descripción de issue (owner o renter)
-    if step == Step.COMPLETED_ISSUE_DESC:
-        desc = None if body.lower() in ("", "omitir") else body
-        issue_type = ctx.get("issue_type")
-        if not issue_type:
-            await send_text(from_msisdn, "No pude identificar el tipo de problema. Vuelve a abrir el menú.")
-            return
-
-        await create_issue(
-            rental_id=rental_id,
-            reporter_wa=from_msisdn,
-            issue_type=issue_type,
-            notes=desc,   # usa 'notes'!
-        )
-        await send_text(from_msisdn, "Gracias. Registré tu reporte. Nuestro equipo lo revisará.")
-        return
 
     # --- NUEVO: comando GESTIONAR ---
     if upper in {"GESTIONAR", "GESTIONAR ALQUILERES"}:
         await _show_manage_ended_rentals(from_msisdn)
         return
 
-    # --- Flujo: respuesta a reseña pendiente ---
+    # --- Flujo: respuesta a reseña pendiente (opcional si usas comentario libre) ---
     draft = st.get("draft") or {}
     if isinstance(draft, dict) and draft.get("awaiting_review"):
         try:
@@ -1007,11 +892,14 @@ async def handle_text(msg: Dict[str, Any], st: Dict[str, Any], from_msisdn: str)
             comment = re.sub(r"^\s*\b[1-5]\b\s*", "", text).strip()
 
             rid = int(draft["awaiting_review"]["rental_id"])
-            result = await add_review(rid, from_msisdn, rating, comment)
-            if result.get("ok"):
-                await send_text(from_msisdn, "✅ ¡Gracias! Tu reseña fue registrada.")
+            # usa add_review_once para respetar 1 por rental/reviewer
+            r = await get_rental(rid)
+            reviewed_wa = r["buyer_wa"] if _eq_msisdn(r["seller_wa"], from_msisdn) else r["seller_wa"]
+            result = await add_review_once(rid, from_msisdn, reviewed_wa, rating, comment)
+            if result is None:
+                await send_text(from_msisdn, "Ya enviaste una reseña para este arriendo. ¡Gracias!")
             else:
-                await send_text(from_msisdn, f"No se pudo guardar la reseña: {result.get('error','intenta más tarde')}")
+                await send_text(from_msisdn, "✅ ¡Gracias! Tu reseña fue registrada.")
         except Exception as e:
             print(f"awaiting_review error: {e}")
             await send_text(from_msisdn, "Ocurrió un problema al registrar tu reseña.")
@@ -1024,7 +912,7 @@ async def handle_text(msg: Dict[str, Any], st: Dict[str, Any], from_msisdn: str)
     if isinstance(draft, dict) and draft.get("awaiting_report"):
         try:
             rid = int(draft["awaiting_report"]["rental_id"])
-            kind = (draft["awaiting_report"].get("kind") or "damaged")
+            kind = (draft["awaiting_report"].get("kind") or "general")
             note = text[:500] or None
             await create_issue(rid, from_msisdn, kind, note)
             await send_text(from_msisdn, "⚠️ Reporte recibido. Nuestro equipo lo revisará.")
@@ -1160,11 +1048,14 @@ async def handle_text(msg: Dict[str, Any], st: Dict[str, Any], from_msisdn: str)
             await send_text(from_msisdn, "Formato incorrecto. Uso: RESEÑA #ID_RENTA CALIFICACIÓN COMENTARIO")
             return
         rental_id, rating, comment = match.groups()
-        result = await add_review(int(rental_id), from_msisdn, int(rating), comment.strip())
-        if result.get("ok"):
-            await send_text(from_msisdn, "¡Gracias por tu reseña!")
+        # usa add_review_once para respetar 1 por rental/reviewer
+        r = await get_rental(int(rental_id))
+        reviewed_wa = r["buyer_wa"] if _eq_msisdn(r["seller_wa"], from_msisdn) else r["seller_wa"]
+        result = await add_review_once(int(rental_id), from_msisdn, reviewed_wa, int(rating), comment.strip())
+        if result is None:
+            await send_text(from_msisdn, "Ya enviaste una reseña para este arriendo. ¡Gracias!")
         else:
-            await send_text(from_msisdn, f"Error: {result.get('error', 'No se pudo guardar la reseña.')}")
+            await send_text(from_msisdn, "¡Gracias por tu reseña!")
         return
 
     if upper == "MIS RESEÑAS":

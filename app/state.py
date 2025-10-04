@@ -11,6 +11,7 @@ class Step(str, Enum):
     # Estado base
     IDLE = "idle"
 
+    # Post-renta (reseñas y reportes)
     COMPLETED_MENU = "completed_menu"
     COMPLETED_REVIEW_SCORE = "completed_review_score"
     COMPLETED_REVIEW_COMMENT = "completed_review_comment"
@@ -33,22 +34,16 @@ class Step(str, Enum):
     LISTING_VIEW_ONE = "listing_view_one"
     LISTING_EDIT_WAIT = "listing_edit_wait"
 
-    # =================================================
-    # Gestión de rental COMPLETADO (feedback/Post-mortem)
-    # =================================================
-    # 1) Usuario envía ID del rental que quiere gestionar
+    # (Opcionales para flujos manuales de gestión)
     MANAGE_RENTAL_ID = "manage_rental_id"
-    # 2) Menú de acción (⭐ Reseñar | ⚠️ Reportar problema)
     MANAGE_RENTAL_ACTION = "manage_rental_action"
-    # 3) Reseña
     REVIEW_RATING = "review_rating"        # espera 1..5
     REVIEW_COMMENT = "review_comment"      # comentario opcional
-    # 4) Reporte de problema
     ISSUE_TYPE = "issue_type"              # buyer: problema_general; seller: no_entregado / entregado_con_danos
     ISSUE_NOTES = "issue_notes"            # notas opcionales
 
 
-def step_val(st: Dict[str, Any] | None) -> str:
+def step_val(st: Optional[Dict[str, Any]]) -> str:
     """
     Devuelve el valor string del paso actual de la sesión.
     Si no hay step, vuelve a IDLE.
@@ -98,7 +93,7 @@ def _parse_date_any(s: str) -> Optional[date]:
         except Exception:
             return None
 
-    # Último intento: truncar a 10 y probar ISO
+    # Último intento: truncar a 10 e intentar ISO
     try:
         return datetime.strptime(s[:10], "%Y-%m-%d").date()
     except Exception:
@@ -140,7 +135,7 @@ def _extract_dates(text: str) -> Optional[Tuple[str, str]]:
             start, end = (d1, d2) if d1 <= d2 else (d2, d1)
             return start.isoformat(), end.isoformat()
 
-    # 2) Si no hubo separador de rango, busquemos todas las fechas DD{sep}MM{sep}YYYY
+    # 2) Sin separador explícito: tomar las primeras dos DD{sep}MM{sep}YYYY
     dates = re.findall(_DDMMYYYY, t)
     if len(dates) >= 2:
         d1 = _parse_date_any("/".join(dates[0]))
@@ -149,8 +144,7 @@ def _extract_dates(text: str) -> Optional[Tuple[str, str]]:
             start, end = (d1, d2) if d1 <= d2 else (d2, d1)
             return start.isoformat(), end.isoformat()
 
-    # 3) Fallback: mezclar con posibles ISO ya formateadas en el texto
-    #    Buscar "YYYY-MM-DD" también.
+    # 3) Fallback: mezclar con posibles ISO "YYYY-MM-DD"
     iso_matches = re.findall(r"\b(\d{4}-\d{2}-\d{2})\b", t)
     ddmm_matches = re.findall(_DDMMYYYY, t)
     pool: list[date] = []

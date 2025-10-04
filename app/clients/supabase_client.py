@@ -259,7 +259,7 @@ async def suggest_availability_for_request(
     except Exception:
         return []
     requested_days = (e - s).days + 1
-    bookings = await get_future_bookings(item_id, from_iso=s.isoformat())
+    bookings = await get_future_bookings(item_id, from_iso=start_iso)
     sugg = suggest_windows(bookings, requested_days, from_day=s, max_suggestions=max_suggestions)
     return [(a.isoformat(), b.isoformat()) for a, b in sugg]
 
@@ -878,8 +878,8 @@ async def add_review_once(
 async def create_issue(
     rental_id: int,
     reporter_wa: str,
-    issue_type: str,         # 'no_recibi' | 'danios' | 'otro'
-    notes: str | None,       # <- usa 'notes' (tu columna real)
+    issue_type: str,         # 'not_delivered' | 'damaged' | 'general' (o tus variantes)
+    notes: str | None,       # usa 'notes' (tu columna real)
 ):
     payload = {
         "rental_id": rental_id,
