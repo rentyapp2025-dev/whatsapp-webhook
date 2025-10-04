@@ -14,10 +14,10 @@ from .clients.supabase_client import (
     set_session, get_session,
     insert_listing, get_listing,
     # ---- Consents (por consent_id) ----
-    upsert_consent, get_consent_by_id, set_consent_flag_by_id, mark_introduced_once_by_consent,
+    get_consent_by_id, set_consent_flag_by_id, mark_introduced_once_by_consent,
     # ---- Rentals & demás ----
     create_rental_request,
-    get_active_rentals_for_item, update_listing_status,
+    update_listing_status,
     add_review, get_reviews_for_user,
     request_rental_cancellation,
     request_rental_extension,
@@ -27,6 +27,7 @@ from .clients.supabase_client import (
     is_item_available,
     get_future_bookings,
     get_rental,
+    get_user_role_in_rental, 
     _today_business,
     end_of_first_overlap,
     # >>> añadido previamente: consent con guardas de disponibilidad
@@ -36,7 +37,7 @@ from .clients.supabase_client import (
     # >>> NUEVO: guardar reporte de problemas
     create_issue,
     # >>> NUEVO: utilidades reseñas 1-sola-vez
-    has_review_for_rental,
+    insert_issue,
     add_review_once,
 )
 
@@ -111,16 +112,11 @@ def _new_token() -> str:
     """Token de idempotencia simple para botones (previene doble tap)."""
     return uuid.uuid4().hex[:12]
 
-def _eq_msisdn(a: Optional[str], b: Optional[str]) -> bool:
-    """Compara teléfonos ignorando símbolos no numéricos (p. ej. +, espacios)."""
-    da = re.sub(r"\D", "", a or "")
-    db = re.sub(r"\D", "", b or "")
-    return da == db
+def _norm_msisdn(s: str | None) -> str:
+    return re.sub(r"\D", "", s or "")
 
-def _norm_msisdn(x: Optional[str]) -> str:
-    """Normaliza MSISDN a solo dígitos (útil para WhatsApp send_*)."""
-    return re.sub(r"\D", "", x or "")
-
+def _eq_msisdn(a: str | None, b: str | None) -> bool:
+    return _norm_msisdn(a) == _norm_msisdn(b)
 
 def _card_for_rental(r: Dict[str, Any], you_msisdn: str) -> str:
     is_owner = _eq_msisdn(r.get("seller_wa"), you_msisdn)
@@ -620,7 +616,10 @@ async def handle_interactive(msg: Dict[str, Any], st: Dict[str, Any], from_msisd
             else:
                 # Buyer: problema general por texto
                 await set_session(from_msisdn, Step.IDLE, {
-                    "awaiting_report": {"rental_id": rid, "kind": "general"}
+                    "awaiting_report": {
+                        "rental_id": rid,
+                        "kind": "problema_general"   # <-- SIEMPRE así para buyer
+                    }
                 })
                 await send_text(
                     from_msisdn,
@@ -628,17 +627,28 @@ async def handle_interactive(msg: Dict[str, Any], st: Dict[str, Any], from_msisd
                 )
             return
 
+        # dentro de tu on_button / handler de botones
         if btn_id.startswith("report_pick_"):
-            parts = btn_id.split("_")
-            rid = int(parts[2]); kind = parts[3]  # not_delivered | damaged
             try:
-                await create_issue(rid, from_msisdn, kind, None)
-                await send_text(from_msisdn, "✅ Tu reporte fue registrado. Puedes enviar detalles adicionales por texto si deseas.")
-                # Notificar a la otra parte
+                _, _, rid_str, kind_raw = btn_id.split("_", 3)  # report_pick_<rentalId>_<kind>
+                rid = int(rid_str)
+            except Exception:
+                return
+
+            role = await get_user_role_in_rental(rid, from_msisdn)
+            if role != "seller":
+                await send_text(from_msisdn, "Este reporte solo puede abrirlo el propietario del artículo.")
+                return
+
+            kind = _map_issue_kind_for_seller(kind_raw)  # -> no_entregado | entregado_con_danos
+
+            try:
+                await insert_issue(rid, from_msisdn, kind, None)   # <- AQUÍ EL CAMBIO
+                await send_text(from_msisdn, "✅ Tu reporte fue registrado. Si quieres, envía detalles adicionales por texto.")
                 r = await get_rental(rid)
                 if r:
                     other = r["buyer_wa"] if _eq_msisdn(from_msisdn, r["seller_wa"]) else r["seller_wa"]
-                    human = "no entregado" if kind == "not_delivered" else "entregado con daños"
+                    human = "no entregado" if kind == "no_entregado" else "entregado con daños"
                     try:
                         await send_text(_norm_msisdn(other), f"⚠️ Se abrió un reporte en la renta #{rid}: {human}.")
                     except Exception:
@@ -647,6 +657,7 @@ async def handle_interactive(msg: Dict[str, Any], st: Dict[str, Any], from_msisd
                 print(f"report_pick error: {e}")
                 await send_text(from_msisdn, "No pudimos registrar tu reporte en este momento.")
             return
+
         # ========= FIN Gestión post-renta =========
 
         # ===== Mis Alquileres: paginación =====
@@ -1474,6 +1485,14 @@ async def handle_message(value: Dict[str, Any], msg: Dict[str, Any]):
     else:
         await send_text(from_msisdn, "Solo puedo procesar mensajes de texto y botones. Por favor, usa el menú.")
 
+# helper arriba del archivo (o en utils)
+def _map_issue_kind_for_seller(kind_raw: str) -> str:
+    k = (kind_raw or "").lower().strip()
+    if k in ("not_delivered", "no_entregado", "no-recibido", "no_recibi"):
+        return "no_entregado"
+    if k in ("damaged", "dañado", "danios", "entregado_con_danos", "entregado-con-danos"):
+        return "entregado_con_danos"
+    return "entregado_con_danos"  # default seguro
 
 # ===========
 # AUXILIARES

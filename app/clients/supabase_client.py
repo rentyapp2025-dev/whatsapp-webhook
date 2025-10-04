@@ -901,46 +901,39 @@ def _normalize_issue_type(t: Optional[str]) -> Optional[str]:
 async def create_issue(
     rental_id: int,
     reporter_wa: str,
-    issue_type: str,             # EN/ES; se normaliza
-    notes: Optional[str] = None, # 👈 se guarda en la columna 'notes'
-) -> Dict[str, Any]:
-    canon = _normalize_issue_type(issue_type)
-    if canon not in _ISSUE_CANON:
-        return {"ok": False, "error": "INVALID_ISSUE_TYPE", "received": issue_type}
+    issue_type: str,   # puede venir sucio; lo corregimos aquí
+    notes: str | None,
+):
+    # Normaliza por rol
+    role = await get_user_role_in_rental(rental_id, reporter_wa)
+    if role == "buyer":
+        final_type = "problema_general"
+    elif role == "seller":
+        k = (issue_type or "").lower().strip()
+        if k in ("not_delivered", "no_entregado", "no-recibido", "no_recibi"):
+            final_type = "no_entregado"
+        elif k in ("damaged", "danios", "dañado", "entregado_con_danos", "entregado-con-danos"):
+            final_type = "entregado_con_danos"
+        else:
+            final_type = "entregado_con_danos"  # default seller
+    else:
+        # si no pertenece a la renta, devolvemos error consistente
+        return {"ok": False, "status": 403, "text": "NOT_PART_OF_RENTAL"}
 
     payload = {
-        "rental_id": int(rental_id),
+        "rental_id": rental_id,
         "reporter_wa": _norm_phone(reporter_wa),
-        "issue_type": canon,
+        "issue_type": final_type,
+        "notes": (notes or None),
     }
-    if notes:
-        payload["notes"] = str(notes).strip()[:500]  # 👈 tu tabla tiene 'notes'
-
-    async with httpx.AsyncClient(timeout=15.0) as c:
-        r = await c.post(f"{BASE}/rental_issues", headers=HEADERS_RETURN, json=payload)
-
-        if not (200 <= r.status_code < 300):
-            # devuelve detalles por si hay otra restricción (FK, enum, etc.)
+    async with httpx.AsyncClient(timeout=20) as client:
+        r = await client.post(f"{BASE}/rental_issues", headers=HEADERS_RETURN, json=payload)
+        if 200 <= r.status_code < 300:
             try:
-                j = r.json()
+                return r.json()
             except Exception:
-                j = None
-            return {"ok": False, "status": r.status_code, "error": "DB_ERROR", "text": r.text, "json": j}
-
-        data = None
-        try:
-            data = r.json()
-            if isinstance(data, list):
-                data = data[0] if data else None
-        except Exception:
-            data = None
-
-        try:
-            await _log_event(int(rental_id), "issue_created", _norm_phone(reporter_wa), {"issue_type": canon})
-        except Exception:
-            pass
-
-        return {"ok": True, "data": data}
+                return {"ok": True}
+        return {"ok": False, "status": r.status_code, "text": r.text}
 
 # Alias por compat
 insert_issue = create_issue
