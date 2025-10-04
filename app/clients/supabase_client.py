@@ -34,6 +34,22 @@ STATUS_EXTENSION_PENDING = "extension_pending"
 STATUS_CANCELLED = "cancelled"
 STATUS_COMPLETED = "completed"
 
+_ISSUE_CANON = {"not_delivered", "damaged", "general"}
+# Mapeo para compat ⚙️
+_ISSUE_MAP = {
+    # inglés -> canon
+    "not_delivered": "not_delivered",
+    "damaged": "damaged",
+    "general": "general",
+    # español (legacy) -> canon
+    "no_recibi": "not_delivered",
+    "danios": "damaged",
+    "daños": "damaged",
+    "otro": "general",
+    "otro_problema": "general",
+    "problema_general": "general",
+}
+
 BLOCKING_STATUSES = (STATUS_PENDING, "requested", STATUS_APPROVED, STATUS_ACTIVE)
 
 # =========================
@@ -875,22 +891,96 @@ async def add_review_once(
             return None
         r.raise_for_status()
 
+# =========================
+# Issues (robusto, acepta ambos dialectos)
+# =========================
+
+_ISSUE_CANON = {"not_delivered", "damaged", "general"}
+# Mapeo para compat ⚙️
+_ISSUE_MAP = {
+    # inglés -> canon
+    "not_delivered": "not_delivered",
+    "damaged": "damaged",
+    "general": "general",
+    # español (legacy) -> canon
+    "no_recibi": "not_delivered",
+    "danios": "damaged",
+    "daños": "damaged",
+    "otro": "general",
+    "otro_problema": "general",
+    "problema_general": "general",
+}
+
+def _normalize_issue_type(t: Optional[str]) -> Optional[str]:
+    if not t:
+        return None
+    key = str(t).strip().lower()
+    return _ISSUE_MAP.get(key, key if key in _ISSUE_CANON else None)
+
 async def create_issue(
     rental_id: int,
     reporter_wa: str,
-    issue_type: str,         # 'not_delivered' | 'damaged' | 'general' (o tus variantes)
-    notes: str | None,       # usa 'notes' (tu columna real)
-):
+    issue_type: str,   # admite: not_delivered | damaged | general | no_recibi | danios | otro | ...
+    notes: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Inserta un issue en rental_issues de manera robusta:
+      - Normaliza issue_type (acepta español/inglés)
+      - Recorta notes a 500 chars
+      - Devuelve {"ok": True, "data": ...} en 2xx aunque el cuerpo venga vacío
+    """
+    canon = _normalize_issue_type(issue_type)
+    if canon not in _ISSUE_CANON:
+        return {"ok": False, "error": "INVALID_ISSUE_TYPE", "received": issue_type}
+
     payload = {
-        "rental_id": rental_id,
-        "reporter_wa": reporter_wa,
-        "issue_type": issue_type,
-        "notes": notes,
+        "rental_id": int(rental_id),
+        "reporter_wa": _norm_phone(reporter_wa),
+        "issue_type": canon,
     }
-    async with httpx.AsyncClient(timeout=20) as client:
-        r = await client.post(f"{BASE}/rental_issues", headers=HEADERS, json=payload)
-        r.raise_for_status()
-        return r.json()
+    if notes:
+        txt = str(notes).strip()
+        payload["notes"] = txt[:500]  # hard cap
+
+    async with httpx.AsyncClient(timeout=15.0) as c:
+        r = await c.post(
+            f"{BASE}/rental_issues",
+            headers=HEADERS_RETURN,
+            json=payload,
+        )
+
+        # 409/4xx/5xx: devolvemos error legible
+        if not (200 <= r.status_code < 300):
+            err_text = r.text
+            try:
+                # algunos errores vienen como JSON con "message"
+                err_json = r.json()
+            except Exception:
+                err_json = None
+            return {
+                "ok": False,
+                "status": r.status_code,
+                "error": "DB_ERROR",
+                "text": err_text,
+                "json": err_json,
+            }
+
+        # 2xx: Éxito, aunque el cuerpo sea vacío o lista
+        data = None
+        try:
+            data = r.json()
+            if isinstance(data, list):
+                data = data[0] if data else None
+        except Exception:
+            data = None
+
+        # (opcional) auditar
+        try:
+            await _log_event(int(rental_id), "issue_created", _norm_phone(reporter_wa), {"issue_type": canon})
+        except Exception:
+            pass
+
+        return {"ok": True, "data": data}
 
 # =========================
 # Rentals (endurecidos)
@@ -1268,27 +1358,36 @@ async def reject_rental_extension(rental_id: int, actor_wa: str, *, action_token
 # Reviews
 # =========================
 async def add_review(rental_id: int, reviewer_wa: str, rating: int, comment: str) -> Dict[str, Any]:
+    """
+    Inserta una reseña. Devuelve {"ok": True} aunque el cuerpo de la respuesta venga vacío,
+    para evitar 'false negatives' en el handler.
+    """
     async with httpx.AsyncClient(timeout=15.0) as c:
+        # 1) validar renta y rol
         r_get = await c.get(
             f"{BASE}/rentals",
             headers=HEADERS,
             params={"select": "buyer_wa,seller_wa,status", "id": f"eq.{rental_id}", "limit": 1},
         )
-        rows = r_get.json()
+        r_get.raise_for_status()
+        rows = r_get.json() or []
         if not rows:
             return {"ok": False, "error": "RENTAL_NOT_FOUND"}
 
         rental = rows[0]
         reviewer_norm = _norm_phone(reviewer_wa)
-        buyer_norm = _norm_phone(rental["buyer_wa"])
-        seller_norm = _norm_phone(rental["seller_wa"])
+        buyer_norm = _norm_phone(rental.get("buyer_wa"))
+        seller_norm = _norm_phone(rental.get("seller_wa"))
 
-        if reviewer_norm not in [buyer_norm, seller_norm]:
+        if reviewer_norm not in (buyer_norm, seller_norm):
             return {"ok": False, "error": "NOT_PART_OF_RENTAL"}
 
+        # ⚠️ Si exiges 'completed' desde DB, puedes mantener este check;
+        # si no, comenta las 3 líneas siguientes.
         if rental.get("status") != STATUS_COMPLETED:
             return {"ok": False, "error": "RENTAL_NOT_COMPLETED"}
 
+        # 2) rating 1..5
         try:
             r_int = int(rating)
         except Exception:
@@ -1300,23 +1399,40 @@ async def add_review(rental_id: int, reviewer_wa: str, rating: int, comment: str
 
         payload = {
             "rental_id": rental_id,
-            "reviewer_wa": reviewer_wa,
-            "reviewed_wa": reviewed_wa,
+            "reviewer_wa": reviewer_norm,   # normalizado
+            "reviewed_wa": _norm_phone(reviewed_wa),
             "rating": r_int,
-            "comment": comment,
+            "comment": comment or None,
         }
+
+        # 3) crear review
         r_post = await c.post(f"{BASE}/reviews", headers=HEADERS_RETURN, json=payload)
         if r_post.status_code == 409:
+            # índice único (rental_id, reviewer_wa) o constraint de negocio
             return {"ok": False, "error": "ALREADY_REVIEWED"}
-        r_post.raise_for_status()
 
-        # Recalcular reputación del usuario reseñado (si no usas trigger en DB)
-        try:
-            await recalc_reputation(reviewed_wa)
-        except Exception:
-            pass
+        # Si fue 2xx, consideramos éxito aunque el cuerpo venga vacío.
+        if 200 <= r_post.status_code < 300:
+            data = None
+            try:
+                data = r_post.json()
+                # Supabase con Prefer:return=representation puede devolver lista
+                if isinstance(data, list):
+                    data = data[0] if data else None
+            except Exception:
+                # cuerpo vacío o no-JSON: igual marcamos ok=True
+                data = None
 
-        return {"ok": True, "data": r_post.json()}
+            # (opcional) recalcular reputación; no hacer fallar la llamada si falla
+            try:
+                await recalc_reputation(reviewed_wa)
+            except Exception:
+                pass
+
+            return {"ok": True, "data": data}
+
+        # Cualquier otro estado no-2xx
+        return {"ok": False, "error": f"DB_STATUS_{r_post.status_code}", "text": r_post.text}
 
 async def get_reviews_for_user(wa_id: str) -> List[Dict[str, Any]]:
     async with httpx.AsyncClient(timeout=10.0) as c:
