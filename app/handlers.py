@@ -255,17 +255,28 @@ async def _send_rental_management_menu(target_wa: str, rental: Dict[str, Any]):
             {"id": f"rental_cancel_{rid}_{token}{ver_suffix}", "title": "❌ Cancelar"},
         ]
         await send_reply_buttons(target_wa, "Gestión de Renta", body + "\n\n¿Qué deseas hacer?", buttons)
+        return
 
-    elif status == "active":
+    if status == "active":
         buttons = []
         if is_renter:
             buttons.append({"id": f"rental_extend_{rid}_{token}{ver_suffix}", "title": "🔄 Extender"})
         buttons.append({"id": f"rental_cancel_{rid}_{token}{ver_suffix}", "title": "❌ Cancelar"})
         await send_reply_buttons(target_wa, "Gestión de Renta", body + "\n\n¿Qué deseas hacer?", buttons)
+        return
 
-    else:
-        await send_text(target_wa, body)
+    # 👇 NUEVO: si ya está completada, mostrar directamente el menú post-renta
+    if status == "completed":
+        await _send_post_end_buttons(target_wa, rental)
+        return
 
+    # 👇 Opcionalmente, si no está en 'completed' pero el período ya terminó por fechas, también ofrece post-renta
+    if _eligible_to_close(rental):
+        await _send_post_end_buttons(target_wa, rental)
+        return
+
+    # Resto de estados: solo muestra la tarjeta
+    await send_text(target_wa, body)
 
 async def _render_my_rentals_page(user_wa: str, rentals: List[Dict[str, Any]], offset: int):
     """
